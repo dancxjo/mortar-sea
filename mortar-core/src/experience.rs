@@ -8,15 +8,36 @@ use uuid::Uuid;
 /// Experience *explains*. It answers "what does this mean?" rather than
 /// "what did I notice?". Experiences are the output of understanding and the
 /// primary content stored in, and later retrieved from, memory.
+///
+/// ## `occurred_at` vs `observed_at`
+///
+/// - **`occurred_at`**: when the events that led to this meaning took place,
+///   typically inherited from the impression(s) that were synthesized. For
+///   retrospective analysis or memory recall the experience may be created long
+///   after the underlying events, yet its `occurred_at` reflects those original
+///   events.
+/// - **`observed_at`**: when the wit produced this experience. This is usually
+///   close to the time the wit ran, which may be after any deliberate delay.
+///
+/// When an experience is recalled from memory and re-enters the pipeline as a
+/// `"memory.related_experience"` sensation, the sensation's `occurred_at` is
+/// copied from the experience so the memory sorts chronologically alongside
+/// the original events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Experience {
     /// Unique identifier for this experience.
     pub id: Uuid,
     /// The impressions from which this meaning was extracted.
     pub impression_ids: Vec<Uuid>,
-    /// When this meaning was understood.
+    /// When this meaning was understood, inherited from the source impressions.
+    ///
+    /// Used as the sort key in [`TimelineFrame`](crate::timeline::TimelineFrame)
+    /// and preserved verbatim when the experience is recalled as a sensation.
     pub occurred_at: DateTime<Utc>,
-    /// When the system recorded this experience.
+    /// When the wit produced this experience.
+    ///
+    /// For synchronous wits this is close to `occurred_at`. For asynchronous
+    /// or retrospective wits it may be significantly later.
     pub observed_at: DateTime<Utc>,
     /// A natural-language explanation, e.g. `"A visitor may have arrived."`.
     pub what: String,

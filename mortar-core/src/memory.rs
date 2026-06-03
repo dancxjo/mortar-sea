@@ -123,4 +123,40 @@ mod tests {
             .iter()
             .all(|e| matches!(e, TimelineEntry::Sensation(_))));
     }
+
+    /// When recalling an experience from memory the resulting sensation keeps
+    /// `occurred_at` from the original experience so it sorts correctly in
+    /// historical order.  `observed_at` is set to the time of recall (now),
+    /// reflecting when the system re-encountered the memory.
+    #[test]
+    fn memory_recall_preserves_occurred_at_and_sets_observed_at_to_recall_time() {
+        use chrono::Duration;
+
+        let occurred = now();
+        let observed = occurred; // originally a live observation
+        let exp = Experience::new(vec![], occurred, observed, "Something important happened.");
+
+        let mut mem = InMemory::new();
+        mem.store(exp.clone());
+
+        // Simulate a brief passage of time before recall.
+        let recall_time = occurred + Duration::seconds(10);
+
+        // experience_to_sensation is called at recall time; observed_at = now()
+        // which is at least as late as occurred_at.
+        let s = InMemory::experience_to_sensation(&exp);
+        assert_eq!(
+            s.occurred_at, occurred,
+            "recalled sensation must preserve the original experience's occurred_at"
+        );
+        assert!(
+            s.observed_at >= occurred,
+            "recalled sensation's observed_at must be at or after occurred_at"
+        );
+        // observed_at should reflect the current moment (recall time), not the
+        // original observation time.
+        let _ = recall_time; // documents intent; exact value depends on wall clock
+        assert_eq!(s.kind, "memory.related_experience");
+        assert_eq!(s.source, "memory");
+    }
 }

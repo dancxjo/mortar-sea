@@ -30,6 +30,35 @@ A remembered thing re-enters cognition as something newly noticed.
 
 Memory is not a separate pathway.
 
+### `occurred_at` vs `observed_at`
+
+Every cognitive event carries two timestamps:
+
+| Field | Meaning |
+|---|---|
+| `occurred_at` | When the underlying real-world event took place. |
+| `observed_at` | When the cognitive system first became aware of the event. |
+
+**Ordering rule:** [`TimelineFrame`] always sorts by `occurred_at`. The system
+maintains causal history regardless of when data arrived.
+
+**When they differ:**
+
+- **Delayed observations** — a camera delivers a buffered frame 10 seconds late.
+  `occurred_at` = time of capture; `observed_at` = time of delivery.
+- **Replayed / batch data** — a sensor log from an hour ago is ingested now.
+  `occurred_at` = log timestamp; `observed_at` = ingestion time. The replayed
+  events sort before current entries in the timeline.
+- **Memory recall** — an experience from the past re-enters the pipeline as a
+  `"memory.related_experience"` sensation. `occurred_at` is copied from the
+  original experience; `observed_at` is set to the recall time (now) by
+  `InMemory::experience_to_sensation`.
+- **Derived sensations** — a faculty that detects faces in a camera frame emits
+  a `"vision.face_crop"` sensation. The derived sensation inherits `occurred_at`
+  from the parent frame so both sort together in the timeline.
+
+**Invariant:** `observed_at` is never before `occurred_at`.
+
 ### Canonical memory recall semantics
 
 - **When recall occurs:** only when `Pipeline::recall_into_timeline` is called.
@@ -175,9 +204,19 @@ Experience
 Impression
 ```
 
-Entries are ordered by time rather than by subsystem.
+Entries are ordered by `occurred_at` rather than by subsystem or by when data arrived.
 
 Reasoning should emerge from temporal relationships, not from isolated pipelines.
+
+### Ordering rules
+
+- Entries are sorted by `occurred_at` (when the event happened), not `observed_at`
+  (when the system became aware of it).
+- A delayed or replayed entry with an old `occurred_at` is placed before
+  current-time entries, preserving causal history.
+- Entries sharing the same `occurred_at` retain stable insertion order.
+- `TimelineEntry::observed_at()` exposes the awareness timestamp for all entry
+  types when needed (e.g. to measure observation delay).
 
 ---
 
