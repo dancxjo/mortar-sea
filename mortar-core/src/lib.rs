@@ -9,9 +9,11 @@
 //! A remembered thing re-enters cognition as a new sensation; there is no
 //! separate memory pathway.
 
+pub mod episode;
 pub mod experience;
 pub mod faculty;
 pub mod impression;
+pub mod link;
 pub mod memory;
 pub mod mock;
 pub mod pipeline;
@@ -20,10 +22,12 @@ pub mod time;
 pub mod timeline;
 pub mod wit;
 
+pub use episode::Episode;
 pub use experience::Experience;
 pub use faculty::{Faculty, FacultyRegistry, FacultyRegistryError, RegisteredFaculty};
 pub use impression::Impression;
-pub use memory::{InMemory, Memory};
+pub use link::{ExperienceLink, ExperienceLinkKind};
+pub use memory::{InMemory, InMemoryLinked, LinkedMemory, Memory};
 pub use mock::*;
 pub use pipeline::Pipeline;
 pub use sensation::Sensation;

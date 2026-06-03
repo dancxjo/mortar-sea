@@ -191,7 +191,51 @@ orchestrators.
 
 ---
 
-## Timeline
+## Memory structures
+
+### Experience links
+
+Experiences can be connected to one another through directed `ExperienceLink`s.
+A link has a `from_id`, a `to_id`, and a `kind`:
+
+| Kind | Meaning |
+|---|---|
+| `Causal` | The source experience caused or enabled the target. |
+| `Social` | The two experiences share social context (same person, agent, or relationship). |
+| `Sequential` | The target followed the source in a narrative sequence without implying full causation. |
+| `Custom(String)` | Application-defined relationship for prototyping new semantics. |
+
+Links are the primitive edge type for experience-to-experience graphs. They are
+backend-independent: any `LinkedMemory` implementation can store them as native
+edges in a graph database, extra columns in a relational store, or additional
+fields in a document store.
+
+### Episodes
+
+An `Episode` is a labelled, bounded grouping of experiences that form a
+coherent narrative or temporal unit. Episodes answer "what was this period of
+time about?" rather than "what did a single observation mean?".
+
+Episodes reference experiences by id. The experiences remain in the flat memory
+store; the episode is an index — a labelled window over a subset of that store.
+This keeps the model backend-independent.
+
+### `LinkedMemory` trait
+
+`LinkedMemory` extends `Memory` with graph and episode operations:
+
+- `link_experiences(link)` — record a directed `ExperienceLink`
+- `links_from(id)` / `links_to(id)` — traverse the link graph
+- `form_episode(ids, label)` — persist a named `Episode`
+- `recall_episode(id)` — retrieve a specific episode
+- `episodes()` — list all formed episodes
+- `temporal_clusters(window)` — automatically partition stored experiences into
+  episodes by temporal proximity (pure computation, does not persist)
+
+`InMemoryLinked` is the reference in-process implementation. Future graph and
+vector backends implement the same trait.
+
+---
 
 A TimelineFrame is a heterogeneous stream of cognitive events.
 
@@ -227,6 +271,8 @@ This repository currently provides:
 - cognitive data structures
 - timeline abstractions
 - memory abstractions
+- experience-to-experience linking (`ExperienceLink`, `ExperienceLinkKind`)
+- episode formation and temporal clustering (`Episode`, `LinkedMemory`)
 - a canonical cognition `Pipeline` abstraction
 - Faculty and Wit traits
 
