@@ -21,7 +21,7 @@ pub mod timeline;
 pub mod wit;
 
 pub use experience::Experience;
-pub use faculty::Faculty;
+pub use faculty::{Faculty, FacultyRegistry, FacultyRegistryError, RegisteredFaculty};
 pub use impression::Impression;
 pub use memory::{InMemory, Memory};
 pub use mock::*;
