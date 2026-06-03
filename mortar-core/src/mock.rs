@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use crate::{
     experience::Experience,
@@ -255,19 +256,16 @@ impl MockCognition {
         }
 
         let mut experiences = Vec::new();
-        let mut known_experiences = self.memory.recall();
+        let mut known_experience_keys: HashSet<_> =
+            self.memory.recall().iter().map(experience_key).collect();
         for wit in &mut self.wits {
             for experience in wit.interpret(&self.timeline) {
-                if known_experiences
-                    .iter()
-                    .any(|known| experiences_equivalent(known, &experience))
-                {
+                if !known_experience_keys.insert(experience_key(&experience)) {
                     continue;
                 }
 
                 self.memory.store(experience.clone());
                 self.timeline.push(TimelineEntry::Experience(experience.clone()));
-                known_experiences.push(experience.clone());
                 experiences.push(experience);
             }
         }
@@ -306,10 +304,23 @@ fn render_template(template: &str, sensation: &Sensation) -> String {
         .replace("{text}", text)
 }
 
-fn experiences_equivalent(left: &Experience, right: &Experience) -> bool {
-    left.impression_ids == right.impression_ids
-        && left.occurred_at == right.occurred_at
-        && left.what == right.what
+/// Canonical identity for deduplicating reinterpretation results.
+///
+/// Two experiences are treated as equivalent when they represent the same
+/// meaning (`what`), drawn from the same impression IDs, at the same
+/// `occurred_at` instant, regardless of generated UUID or `observed_at`.
+fn experience_key(
+    experience: &Experience,
+) -> (
+    Vec<uuid::Uuid>,
+    chrono::DateTime<chrono::Utc>,
+    String,
+) {
+    (
+        experience.impression_ids.clone(),
+        experience.occurred_at,
+        experience.what.clone(),
+    )
 }
 
 #[cfg(test)]
