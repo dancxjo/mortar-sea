@@ -296,6 +296,7 @@ fn render_template(template: &str, sensation: &Sensation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn mock_faculty_renders_text_impression() {
@@ -313,5 +314,204 @@ mod tests {
 
         assert_eq!(impressions.len(), 1);
         assert_eq!(impressions[0].how, "The speaker said hello.");
+    }
+
+    #[test]
+    fn behavior_pipeline_sensation_to_memory() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let experiences = cognition.observe(sensation);
+
+        assert_eq!(experiences.len(), 1);
+        assert_eq!(experiences[0].what, "A person spoke.");
+
+        let recalled = cognition.memory().recall();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].what, "A person spoke.");
+
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Impression(_))));
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
+    fn behavior_experience_recall_becomes_memory_sensation() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        cognition.observe(sensation);
+
+        let recalled = cognition.recall_into_timeline();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].kind, "memory.related_experience");
+        assert_eq!(recalled[0].source, "memory");
+
+        let recovered: Experience =
+            serde_json::from_value(recalled[0].payload.clone()).expect("experience payload");
+        assert_eq!(recovered.what, "A person spoke.");
+    }
+
+    #[test]
+    fn behavior_timeline_orders_heterogeneous_entries() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "vision",
+                vec![MockFacultyRule::impression(
+                    "vision.frame",
+                    "Observed frame from {source}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "scene",
+                vec![MockWitRule::new("Observed frame", "A frame was observed.")],
+            ));
+
+        let t0 = now();
+        let later = t0 + Duration::seconds(10);
+
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_late",
+            later,
+            later,
+            json!({}),
+        ));
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_early",
+            t0,
+            t0,
+            json!({}),
+        ));
+
+        let entries = cognition.timeline().entries();
+        let times: Vec<_> = entries.iter().map(TimelineEntry::occurred_at).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Impression(_))));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
+    fn behavior_multiple_faculties_process_same_sensation() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Speech faculty heard {text}",
+                )],
+            ))
+            .with_faculty(MockFaculty::new(
+                "context",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Context faculty noticed source {source}",
+                )],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        cognition.observe(sensation);
+
+        let impressions: Vec<&Impression> = cognition
+            .timeline()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Impression(impression) => Some(impression),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(impressions.len(), 2);
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Speech faculty heard hello")
+        );
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Context faculty noticed source mic")
+        );
+    }
+
+    #[test]
+    fn behavior_multiple_wits_derive_from_same_timeline() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "semantic",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ))
+            .with_wit(MockWit::new(
+                "social",
+                vec![MockWitRule::new("Heard utterance", "Someone attempted interaction.")],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let experiences = cognition.observe(sensation);
+
+        assert_eq!(experiences.len(), 2);
+        assert!(experiences.iter().any(|e| e.what == "A person spoke."));
+        assert!(
+            experiences
+                .iter()
+                .any(|e| e.what == "Someone attempted interaction.")
+        );
+        assert_eq!(cognition.memory().recall().len(), 2);
     }
 }
