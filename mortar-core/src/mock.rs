@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 use crate::{
     experience::Experience,
@@ -232,6 +233,10 @@ impl MockCognition {
 
     /// Present a sensation to the mock system and run the full core loop:
     /// sensation → faculty outputs → timeline → wit outputs → memory.
+    ///
+    /// Wits interpret the full accumulated timeline on every call. To avoid
+    /// duplicate accumulation across observations, experiences that match an
+    /// already-stored experience are skipped before storage.
     pub fn observe(&mut self, sensation: Sensation) -> Vec<Experience> {
         let mut pending = vec![sensation];
 
@@ -251,8 +256,14 @@ impl MockCognition {
         }
 
         let mut experiences = Vec::new();
+        let mut known_experience_keys: HashSet<_> =
+            self.memory.recall().iter().map(experience_key).collect();
         for wit in &mut self.wits {
             for experience in wit.interpret(&self.timeline) {
+                if !known_experience_keys.insert(experience_key(&experience)) {
+                    continue;
+                }
+
                 self.memory.store(experience.clone());
                 self.timeline.push(TimelineEntry::Experience(experience.clone()));
                 experiences.push(experience);
@@ -293,9 +304,29 @@ fn render_template(template: &str, sensation: &Sensation) -> String {
         .replace("{text}", text)
 }
 
+/// Canonical identity for deduplicating reinterpretation results.
+///
+/// Two experiences are treated as equivalent when they represent the same
+/// meaning (`what`), drawn from the same impression IDs, at the same
+/// `occurred_at` instant, regardless of generated UUID or `observed_at`.
+fn experience_key(
+    experience: &Experience,
+) -> (
+    Vec<uuid::Uuid>,
+    chrono::DateTime<chrono::Utc>,
+    String,
+) {
+    (
+        experience.impression_ids.clone(),
+        experience.occurred_at,
+        experience.what.clone(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     #[test]
     fn mock_faculty_renders_text_impression() {
@@ -313,5 +344,297 @@ mod tests {
 
         assert_eq!(impressions.len(), 1);
         assert_eq!(impressions[0].how, "The speaker said hello.");
+    }
+
+    #[test]
+    fn behavior_pipeline_sensation_to_memory() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let experiences = cognition.observe(sensation);
+
+        assert_eq!(experiences.len(), 1);
+        assert_eq!(experiences[0].what, "A person spoke.");
+
+        let recalled = cognition.memory().recall();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].what, "A person spoke.");
+
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Impression(_))));
+        assert!(cognition
+            .timeline()
+            .entries()
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
+    fn behavior_experience_recall_becomes_memory_sensation() {
+        const TEST_TIME_DELTA_SECONDS: i64 = 10;
+
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let earlier_time = now();
+        let later_time = earlier_time + Duration::seconds(TEST_TIME_DELTA_SECONDS);
+
+        cognition.observe(Sensation::new(
+            "audio.utterance",
+            "mic",
+            earlier_time,
+            earlier_time,
+            json!({ "text": "hello" }),
+        ));
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_external",
+            later_time,
+            later_time,
+            json!({}),
+        ));
+
+        let sensation_count_before_recall = cognition
+            .timeline()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TimelineEntry::Sensation(_)))
+            .count();
+
+        let recalled = cognition.recall_into_timeline();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].kind, "memory.related_experience");
+        assert_eq!(recalled[0].source, "memory");
+        assert_eq!(recalled[0].occurred_at, earlier_time);
+
+        let recovered: Experience =
+            serde_json::from_value(recalled[0].payload.clone()).expect("experience payload");
+        assert_eq!(recovered.what, "A person spoke.");
+
+        let entries = cognition.timeline().entries();
+        let sensation_count_after_recall = entries
+            .iter()
+            .filter(|entry| matches!(entry, TimelineEntry::Sensation(_)))
+            .count();
+        assert_eq!(sensation_count_after_recall, sensation_count_before_recall + 1);
+
+        let memory_sensation_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    TimelineEntry::Sensation(s) if s.kind == "memory.related_experience"
+                )
+            })
+            .expect("memory sensation should be inserted into timeline");
+        let external_sensation_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, TimelineEntry::Sensation(s) if s.source == "camera_external")
+            })
+            .expect("external sensation should be present in timeline");
+        assert!(
+            memory_sensation_index < external_sensation_index,
+            "memory sensation at index {} must appear before external sensation at index {} for chronological ordering",
+            memory_sensation_index,
+            external_sensation_index
+        );
+    }
+
+    #[test]
+    fn behavior_timeline_orders_heterogeneous_entries() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "vision",
+                vec![MockFacultyRule::impression(
+                    "vision.frame",
+                    "Observed frame from {source}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "scene",
+                vec![MockWitRule::new("Observed frame", "A frame was observed.")],
+            ));
+
+        let earlier_time = now();
+        let later_time = earlier_time + Duration::seconds(10);
+
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_late",
+            later_time,
+            later_time,
+            json!({}),
+        ));
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_early",
+            earlier_time,
+            earlier_time,
+            json!({}),
+        ));
+
+        let entries = cognition.timeline().entries();
+        let times: Vec<_> = entries.iter().map(TimelineEntry::occurred_at).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Impression(_))));
+        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
+    fn behavior_multiple_faculties_process_same_sensation() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Speech faculty heard {text}",
+                )],
+            ))
+            .with_faculty(MockFaculty::new(
+                "context",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Context faculty noticed source {source}",
+                )],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        cognition.observe(sensation);
+
+        let impressions: Vec<&Impression> = cognition
+            .timeline()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Impression(impression) => Some(impression),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(impressions.len(), 2);
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Speech faculty heard hello")
+        );
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Context faculty noticed source mic")
+        );
+    }
+
+    #[test]
+    fn behavior_multiple_wits_derive_from_same_timeline() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "semantic",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ))
+            .with_wit(MockWit::new(
+                "social",
+                vec![MockWitRule::new("Heard utterance", "Someone attempted interaction.")],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let experiences = cognition.observe(sensation);
+
+        assert_eq!(experiences.len(), 2);
+        assert!(experiences.iter().any(|e| e.what == "A person spoke."));
+        assert!(
+            experiences
+                .iter()
+                .any(|e| e.what == "Someone attempted interaction.")
+        );
+        assert_eq!(cognition.memory().recall().len(), 2);
+    }
+
+    #[test]
+    fn behavior_observe_deduplicates_reinterpreted_experiences() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let first = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let first_experiences = cognition.observe(first);
+        assert_eq!(first_experiences.len(), 1);
+        assert_eq!(cognition.memory().recall().len(), 1);
+
+        let second_experiences = cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_0",
+            now(),
+            now(),
+            json!({}),
+        ));
+        assert!(second_experiences.is_empty());
+        assert_eq!(cognition.memory().recall().len(), 1);
+
+        let timeline_experience_count = cognition
+            .timeline()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TimelineEntry::Experience(_)))
+            .count();
+        assert_eq!(timeline_experience_count, 1);
     }
 }
