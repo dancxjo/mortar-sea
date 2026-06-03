@@ -1,4 +1,4 @@
-function faceApp() {
+window.faceApp = function faceApp() {
   return {
     cameraMessage: 'Camera idle',
     clientId: 'face-browser',
@@ -173,4 +173,4 @@ function faceApp() {
       });
     },
   };
-}
+};
