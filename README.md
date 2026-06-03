@@ -148,6 +148,18 @@ Examples of future Wits might include:
 
 Multiple Wits may operate concurrently over the same timeline.
 
+### Wit registry
+
+`WitRegistry` supports declarative wiring by stable wit name. It can:
+
+- register wit builders with priority, timeline filters, and cadence hooks
+- list registered wits and their scheduling metadata
+- select matching wit instances for a timeline frame in priority order
+
+Filters currently support activation by impression type or experience type.
+Cadence includes `EveryObserve` plus named scheduling hooks for future
+orchestrators.
+
 ---
 
 ## Timeline

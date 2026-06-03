@@ -28,4 +28,4 @@ pub use mock::*;
 pub use pipeline::Pipeline;
 pub use sensation::Sensation;
 pub use timeline::{TimelineEntry, TimelineFrame};
-pub use wit::Wit;
+pub use wit::{RegisteredWit, Wit, WitCadence, WitFilter, WitRegistry, WitRegistryError};
