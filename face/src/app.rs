@@ -20,18 +20,29 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
+use crate::field_vision;
 use crate::ingestion::{accept_frame, sequence_from_raw_json};
-use crate::messages::{AckMessage, ErrorMessage, RealTimeExperienceEvent, SensationRecord};
+use crate::messages::{
+    AckMessage, ErrorMessage, RawVisionFrame, RealTimeExperienceEvent, SensationRecord,
+    VisionFieldImpressionRecord,
+};
 use crate::realtime_experience;
 
 pub(crate) const FACULTIES: &[&str] = &["vision-frame", "face", "motion", "scene"];
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
+pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
+pub(crate) const MAX_RECORDED_VISION_FIELD_IMPRESSIONS: usize = 80;
 const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) sensations: Arc<RwLock<VecDeque<SensationRecord>>>,
+    pub(crate) raw_vision_frames: Arc<RwLock<VecDeque<RawVisionFrame>>>,
+    pub(crate) vision_field_impressions: Arc<RwLock<VecDeque<VisionFieldImpressionRecord>>>,
+    pub(crate) field_vision_active: Arc<AtomicBool>,
+    pub(crate) field_vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
     pub(crate) realtime_experience_active: Arc<AtomicBool>,
 }
@@ -42,6 +53,10 @@ pub async fn run() -> anyhow::Result<()> {
 
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
+        raw_vision_frames: Arc::new(RwLock::new(VecDeque::new())),
+        vision_field_impressions: Arc::new(RwLock::new(VecDeque::new())),
+        field_vision_active: Arc::new(AtomicBool::new(false)),
+        field_vision_last_sampled: Arc::new(RwLock::new(None)),
         realtime_experience_events: broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
     };
@@ -134,7 +149,12 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
         };
 
         let sequence = sequence_from_raw_json(&text);
-        match accept_frame(&socket_faculty, &text, &state.sensations) {
+        match accept_frame(
+            &socket_faculty,
+            &text,
+            &state.sensations,
+            &state.raw_vision_frames,
+        ) {
             Ok(record) => {
                 let ack = AckMessage {
                     r#type: "ack",
@@ -158,7 +178,11 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
                     break;
                 }
 
-                realtime_experience::spawn_trace(state.clone());
+                if socket_faculty == "vision-frame" {
+                    field_vision::spawn_field_vision(state.clone());
+                } else {
+                    realtime_experience::spawn_trace(state.clone());
+                }
             }
             Err(error) => {
                 let error = ErrorMessage {

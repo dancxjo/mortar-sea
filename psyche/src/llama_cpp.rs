@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
 
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
+static CUDA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct LlamaCppConfig {
@@ -332,11 +333,15 @@ impl LlamaGenerationWorker {
                 continue;
             }
 
-            let text = self
+            let token_bytes = self
                 .model
                 .token_to_bytes_with_size(token, 64, Special::Plaintext, None)
                 .context("failed to decode llama.cpp token")?;
-            let (text, _, _) = decoder.decode_to_string(&text);
+            let mut text = String::new();
+            let (_, _, had_errors) = decoder.decode_to_string(&token_bytes, &mut text, false);
+            if had_errors {
+                bail!("failed to decode llama.cpp token as UTF-8");
+            }
             if !text.is_empty() {
                 let outcome = stop_detector.push(&text);
                 if !outcome.text.is_empty()
@@ -600,18 +605,45 @@ fn llama_backend() -> Result<Arc<LlamaBackend>> {
 }
 
 fn selected_gpu_layers(config: &LlamaCppConfig) -> u32 {
-    if config.cpu_only || cpu_only_env_requested() || !supports_gpu_offload() || max_devices() == 0
-    {
+    if config.cpu_only || cpu_only_env_requested() || !cuda_available() {
         return 0;
     }
 
     config.gpu_layers.unwrap_or(u32::MAX)
 }
 
+pub fn cuda_available() -> bool {
+    *CUDA_AVAILABLE.get_or_init(probe_cuda_available)
+}
+
+fn probe_cuda_available() -> bool {
+    if !supports_gpu_offload() || max_devices() == 0 || cuda_hidden_by_env() {
+        return false;
+    }
+
+    std::process::Command::new("nvidia-smi")
+        .arg("-L")
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 fn cpu_only_env_requested() -> bool {
     std::env::var("MORTAR_LLAMA_CPU_ONLY")
         .ok()
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn cuda_hidden_by_env() -> bool {
+    std::env::var("CUDA_VISIBLE_DEVICES")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty()
+                || value == "-1"
+                || value.eq_ignore_ascii_case("none")
+                || value.eq_ignore_ascii_case("void")
+        })
 }
 
 fn checked_total_tokens(

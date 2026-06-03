@@ -10,7 +10,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::messages::{RealTimeExperienceEvent, SensationRecord};
+use crate::messages::{RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord};
 
 pub(crate) fn spawn_trace(state: AppState) {
     if state
@@ -27,6 +27,13 @@ pub(crate) fn spawn_trace(state: AppState) {
         .iter()
         .cloned()
         .collect::<Vec<_>>();
+    let impressions = state
+        .vision_field_impressions
+        .read()
+        .expect("field vision impression log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
 
     if records.is_empty() {
         state
@@ -36,7 +43,7 @@ pub(crate) fn spawn_trace(state: AppState) {
     }
 
     let generation_id = Uuid::new_v4();
-    let prompt = build_prompt_from_records(&records);
+    let prompt = build_prompt_from_records(&records, &impressions);
     let events = state.realtime_experience_events.clone();
     let active = state.realtime_experience_active.clone();
 
@@ -133,7 +140,10 @@ fn wrap_gemma4_prompt(prompt: &str) -> String {
     )
 }
 
-fn build_prompt_from_records(records: &[SensationRecord]) -> String {
+fn build_prompt_from_records(
+    records: &[SensationRecord],
+    impressions: &[VisionFieldImpressionRecord],
+) -> String {
     let mut frame = TimelineFrame::new();
 
     for record in records.iter().rev().take(12).rev() {
@@ -155,12 +165,25 @@ fn build_prompt_from_records(records: &[SensationRecord]) -> String {
             }),
         };
 
-        let impression = Impression::new(
-            vec![sensation.id],
-            sensation.occurred_at,
-            sensation.observed_at,
-            format!("I see something with my eye ({}).", record.source.sensor_id),
-        );
+        let impression = impressions
+            .iter()
+            .rev()
+            .find(|impression| impression.sensation_id == sensation.id)
+            .map(|impression| Impression {
+                id: impression.id,
+                sensation_ids: vec![sensation.id],
+                occurred_at: impression.occurred_at,
+                observed_at: impression.observed_at,
+                how: impression.how.clone(),
+            })
+            .unwrap_or_else(|| {
+                Impression::new(
+                    vec![sensation.id],
+                    sensation.occurred_at,
+                    sensation.observed_at,
+                    format!("I see something with my eye ({}).", record.source.sensor_id),
+                )
+            });
 
         frame.push(TimelineEntry::Sensation(sensation));
         frame.push(TimelineEntry::Impression(impression));

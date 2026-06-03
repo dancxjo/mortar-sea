@@ -30,6 +30,23 @@ pub(crate) struct SensationRecord {
     pub(crate) data_bytes: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RawVisionFrame {
+    pub(crate) sensation: SensationRecord,
+    pub(crate) data: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct VisionFieldImpressionRecord {
+    pub(crate) id: Uuid,
+    pub(crate) sensation_id: Uuid,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) source: SensationSource,
+    pub(crate) sequence: u64,
+    pub(crate) how: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct SensationSource {
     pub(crate) client_id: String,

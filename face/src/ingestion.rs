@@ -8,17 +8,19 @@ use uuid::Uuid;
 
 use crate::app::MAX_RECORDED_SENSATIONS;
 use crate::messages::{
-    FrameMessage, MediaRecord, ProvenanceRecord, SensationRecord, SensationSource,
+    FrameMessage, MediaRecord, ProvenanceRecord, RawVisionFrame, SensationRecord, SensationSource,
 };
 
 pub(crate) fn accept_frame(
     socket_faculty: &str,
     raw_json: &str,
     sensations: &RwLock<VecDeque<SensationRecord>>,
+    raw_vision_frames: &RwLock<VecDeque<RawVisionFrame>>,
 ) -> Result<SensationRecord, String> {
     let frame: FrameMessage =
         serde_json::from_str(raw_json).map_err(|err| format!("invalid json: {err}"))?;
     validate_frame(socket_faculty, &frame)?;
+    let data = frame.data.clone();
 
     let observed_at = Utc::now();
     if observed_at < frame.occurred_at {
@@ -50,6 +52,15 @@ pub(crate) fn accept_frame(
     };
 
     record_sensation(sensations, record.clone());
+    if socket_faculty == "vision-frame" {
+        record_raw_vision_frame(
+            raw_vision_frames,
+            RawVisionFrame {
+                sensation: record.clone(),
+                data,
+            },
+        );
+    }
     Ok(record)
 }
 
@@ -93,6 +104,19 @@ fn record_sensation(sensations: &RwLock<VecDeque<SensationRecord>>, record: Sens
         records.pop_front();
     }
     records.push_back(record);
+}
+
+fn record_raw_vision_frame(
+    raw_vision_frames: &RwLock<VecDeque<RawVisionFrame>>,
+    frame: RawVisionFrame,
+) {
+    let mut frames = raw_vision_frames
+        .write()
+        .expect("raw vision frame queue lock");
+    if frames.len() == crate::app::MAX_RECORDED_RAW_VISION_FRAMES {
+        frames.pop_front();
+    }
+    frames.push_back(frame);
 }
 
 pub(crate) fn sequence_from_raw_json(raw_json: &str) -> Option<u64> {
