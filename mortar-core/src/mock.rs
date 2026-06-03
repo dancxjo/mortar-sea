@@ -596,6 +596,99 @@ mod tests {
     }
 
     #[test]
+    fn behavior_timeline_query_and_reference_navigation() {
+        let mut cognition = MockCognition::new()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![MockFacultyRule::impression(
+                    "audio.utterance",
+                    "Heard utterance: {text}",
+                )],
+            ))
+            .with_wit(MockWit::new(
+                "intent",
+                vec![MockWitRule::new("Heard utterance", "A person spoke.")],
+            ));
+
+        let t0 = now();
+        let t1 = t0 + Duration::seconds(5);
+        let t2 = t0 + Duration::seconds(15);
+
+        cognition.observe(Sensation::new(
+            "audio.utterance",
+            "mic",
+            t0,
+            t0,
+            json!({ "text": "hello" }),
+        ));
+        cognition.observe(Sensation::new(
+            "audio.utterance",
+            "mic",
+            t1,
+            t1,
+            json!({ "text": "again" }),
+        ));
+        cognition.observe(Sensation::new("vision.frame", "camera", t2, t2, json!({})));
+
+        let frame = cognition.timeline();
+
+        let recent = frame.recent_entries(2);
+        assert_eq!(recent.len(), 2);
+        assert!(recent[0].occurred_at() <= recent[1].occurred_at());
+        assert_eq!(recent[1].occurred_at(), t2);
+
+        let impressions: Vec<_> = frame
+            .entries_by_kind(crate::timeline::TimelineEntryKind::Impression)
+            .collect();
+        assert_eq!(impressions.len(), 2);
+
+        let first_sensation = frame
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                TimelineEntry::Sensation(sensation)
+                    if sensation.kind == "audio.utterance" && sensation.occurred_at == t0 =>
+                {
+                    Some(sensation)
+                }
+                _ => None,
+            })
+            .expect("first utterance sensation should exist");
+
+        let sensation_refs: Vec<_> = frame
+            .entries_referencing_sensation(first_sensation.id)
+            .collect();
+        assert_eq!(sensation_refs.len(), 1);
+        let first_impression = match sensation_refs[0] {
+            TimelineEntry::Impression(impression) => impression,
+            _ => panic!("sensation references should point to impressions"),
+        };
+
+        let impression_refs: Vec<_> = frame
+            .entries_referencing_impression(first_impression.id)
+            .collect();
+        assert_eq!(impression_refs.len(), 1);
+        assert!(matches!(impression_refs[0], TimelineEntry::Experience(_)));
+
+        let bounded = frame.entries_between(t0, t1);
+        assert!(!bounded.is_empty());
+        assert!(bounded.iter().all(|entry| entry.occurred_at() <= t1));
+        assert!(bounded.iter().any(
+            |entry| matches!(entry, TimelineEntry::Sensation(s) if s.id == first_sensation.id)
+        ));
+
+        let related = frame.related_entries(first_impression.id);
+        assert_eq!(related.len(), 2);
+        assert!(related.iter().any(|entry| matches!(
+            entry,
+            TimelineEntry::Sensation(s) if s.id == first_sensation.id
+        )));
+        assert!(related
+            .iter()
+            .any(|entry| matches!(entry, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
     fn behavior_multiple_faculties_process_same_sensation() {
         let mut cognition = MockCognition::new()
             .with_faculty(MockFaculty::new(
