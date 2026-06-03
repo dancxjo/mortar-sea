@@ -52,6 +52,19 @@ impl TimelineEntry {
         }
     }
 
+    /// Returns the `observed_at` timestamp regardless of entry type.
+    ///
+    /// This is when the cognitive system first became aware of the event.
+    /// It may equal `occurred_at` for live sensors or be strictly later for
+    /// delayed delivery, replay, or memory recall.
+    pub fn observed_at(&self) -> DateTime<Utc> {
+        match self {
+            TimelineEntry::Sensation(s) => s.observed_at,
+            TimelineEntry::Impression(i) => i.observed_at,
+            TimelineEntry::Experience(e) => e.observed_at,
+        }
+    }
+
     /// Returns true when this entry directly references the sensation.
     pub fn references_sensation(&self, sensation_id: Uuid) -> bool {
         matches!(
@@ -75,6 +88,20 @@ impl TimelineEntry {
 /// sequence sorted strictly by `occurred_at`. Reasoning systems should consume
 /// a timeline rather than individual subsystem outputs; this ensures that
 /// temporal ordering—not type or source—governs cognition.
+///
+/// ## Ordering rules
+///
+/// Entries are always ordered by `occurred_at`, the time the underlying event
+/// took place. `observed_at` (when the system became aware) is **not** used for
+/// ordering. Consequences:
+///
+/// - A delayed sensation whose `occurred_at` is in the past is inserted before
+///   entries that were added to the timeline earlier but whose `occurred_at` is
+///   more recent.
+/// - Replayed or recalled entries sort according to when their events originally
+///   happened, not when they re-entered the pipeline.
+/// - Two entries with identical `occurred_at` retain stable relative insertion
+///   order (new entries are placed after existing ones with the same timestamp).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimelineFrame {
     entries: Vec<TimelineEntry>,
@@ -248,5 +275,173 @@ mod tests {
         assert!(matches!(frame.entries()[1], TimelineEntry::Impression(_)));
         assert!(matches!(frame.entries()[2], TimelineEntry::Sensation(_)));
         assert!(matches!(frame.entries()[3], TimelineEntry::Experience(_)));
+    }
+
+    /// A delayed sensation has `observed_at` after `occurred_at`.
+    ///
+    /// The timeline places it at its historical `occurred_at` position
+    /// regardless of when it arrived in the pipeline.
+    #[test]
+    fn delayed_sensation_is_ordered_by_occurred_at_not_observed_at() {
+        let t_past = now();
+        let t_current = t_past + Duration::seconds(60);
+
+        // A sensor delivers a past event late: occurred 60 s ago, observed now.
+        let delayed = Sensation::new(
+            "sensor.reading",
+            "delayed_source",
+            t_past,
+            t_current,
+            json!({}),
+        );
+        // A live event that entered the pipeline just before the delayed one.
+        let live = Sensation::new(
+            "sensor.reading",
+            "live_source",
+            t_current,
+            t_current,
+            json!({}),
+        );
+
+        let mut frame = TimelineFrame::new();
+        // Live entry is pushed first, then the late-arriving delayed entry.
+        frame.push(TimelineEntry::Sensation(live));
+        frame.push(TimelineEntry::Sensation(delayed));
+
+        // Despite being pushed second, the delayed entry must appear first.
+        assert_eq!(frame.entries()[0].occurred_at(), t_past);
+        assert_eq!(frame.entries()[1].occurred_at(), t_current);
+    }
+
+    /// Replayed data (old `occurred_at`) sorts before current-time entries.
+    ///
+    /// This verifies that batch replay or log ingestion preserves causal order
+    /// even when replayed events enter the pipeline long after they happened.
+    #[test]
+    fn replayed_data_sorts_before_current_entries() {
+        let now_t = now();
+        let replay_time = now_t - Duration::hours(1);
+        let replay_observed = now_t; // replayed data is observed now
+
+        let current = Sensation::new("vision.frame", "camera_0", now_t, now_t, json!({}));
+        let replayed = Sensation::new(
+            "replay.event",
+            "replay",
+            replay_time,
+            replay_observed,
+            json!({}),
+        );
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(current));
+        frame.push(TimelineEntry::Sensation(replayed));
+
+        assert_eq!(
+            frame.entries()[0].occurred_at(),
+            replay_time,
+            "replayed entry with past occurred_at must sort first"
+        );
+        // observed_at of the replayed entry is the current time, not replay_time
+        assert_eq!(frame.entries()[0].observed_at(), replay_observed);
+    }
+
+    /// Two entries with the same `occurred_at` retain stable relative order.
+    #[test]
+    fn same_occurred_at_preserves_insertion_order() {
+        let t = now();
+        let obs = t;
+
+        let s0 = Sensation::new("vision.frame", "camera_0", t, obs, json!({"seq": 0}));
+        let s1 = Sensation::new("vision.frame", "camera_0", t, obs, json!({"seq": 1}));
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(s0.clone()));
+        frame.push(TimelineEntry::Sensation(s1.clone()));
+
+        // Both have the same occurred_at; insertion order must be preserved.
+        match (&frame.entries()[0], &frame.entries()[1]) {
+            (TimelineEntry::Sensation(a), TimelineEntry::Sensation(b)) => {
+                assert_eq!(a.payload["seq"], 0);
+                assert_eq!(b.payload["seq"], 1);
+            }
+            _ => panic!("expected two sensations"),
+        }
+    }
+
+    /// `observed_at` is accessible on every entry type via the helper method.
+    #[test]
+    fn observed_at_is_accessible_on_all_entry_kinds() {
+        let occurred = now();
+        let observed = occurred + Duration::seconds(5);
+
+        let s = Sensation::new("vision.frame", "cam", occurred, observed, json!({}));
+        let imp = Impression::new(vec![s.id], occurred, observed, "Something seen.");
+        let exp = Experience::new(vec![imp.id], occurred, observed, "Someone was present.");
+
+        let se = TimelineEntry::Sensation(s);
+        let ie = TimelineEntry::Impression(imp);
+        let ee = TimelineEntry::Experience(exp);
+
+        for entry in [&se, &ie, &ee] {
+            assert_eq!(
+                entry.occurred_at(),
+                occurred,
+                "occurred_at must match for {:?}",
+                entry.kind()
+            );
+            assert_eq!(
+                entry.observed_at(),
+                observed,
+                "observed_at must match for {:?}",
+                entry.kind()
+            );
+        }
+    }
+
+    /// Derived sensations produced by a faculty inherit `occurred_at` from the
+    /// parent sensation so they are positioned correctly in historical time.
+    ///
+    /// For example: a face-crop derived from a delayed camera frame should
+    /// appear at the same point in the timeline as that frame, not at the time
+    /// the faculty ran.
+    #[test]
+    fn derived_sensation_inherits_parent_occurred_at() {
+        let frame_occurred = now();
+        let frame_observed = frame_occurred + Duration::seconds(5); // delivered late
+
+        let parent = Sensation::new(
+            "vision.frame",
+            "camera_0",
+            frame_occurred,
+            frame_observed,
+            json!({}),
+        );
+        // Faculty derives a face-crop from the frame, preserving timestamps.
+        let derived = Sensation::new(
+            "vision.face_crop",
+            "face_detector",
+            parent.occurred_at, // inherited from parent
+            parent.observed_at, // inherited from parent
+            json!({"face_id": 1}),
+        );
+
+        assert_eq!(
+            derived.occurred_at, parent.occurred_at,
+            "derived sensation must inherit parent's occurred_at"
+        );
+        assert_eq!(
+            derived.observed_at, parent.observed_at,
+            "derived sensation must inherit parent's observed_at"
+        );
+
+        // Both sort to the same position in the timeline.
+        let mut tl = TimelineFrame::new();
+        tl.push(TimelineEntry::Sensation(parent.clone()));
+        tl.push(TimelineEntry::Sensation(derived.clone()));
+
+        let times: Vec<_> = tl.entries().iter().map(|e| e.occurred_at()).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(times[0], frame_occurred);
+        assert_eq!(times[1], frame_occurred);
     }
 }
