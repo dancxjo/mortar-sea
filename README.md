@@ -275,6 +275,8 @@ This repository currently provides:
 - episode formation and temporal clustering (`Episode`, `LinkedMemory`)
 - a canonical cognition `Pipeline` abstraction
 - Faculty and Wit traits
+- a `mortar-face` web server for browser camera ingestion into faculty
+  WebSockets
 
 This repository intentionally does not yet provide concrete implementations for:
 
@@ -290,6 +292,37 @@ This repository intentionally does not yet provide concrete implementations for:
 Those capabilities belong in higher-level crates built on top of the same cognitive model.
 
 The long-term Mortar-Sea vision includes many of these systems.
+
+## Face frontend
+
+The `mortar-face` crate hosts a browser UI called the Face:
+
+```sh
+cargo run -p mortar-face
+```
+
+By default it listens at <http://127.0.0.1:3030>.
+
+The Face page requests camera permission, previews the stream, captures frames
+into a canvas, and sends JSON `vision.frame` Sensations to one WebSocket per
+enabled visual Faculty:
+
+- `/ws/faculties/vision-frame`
+- `/ws/faculties/face`
+- `/ws/faculties/motion`
+- `/ws/faculties/scene`
+
+The browser encodes image payloads as full `data:image/...;base64,...` data URLs
+because that is the simplest browser-native canvas output. The server records
+metadata plus a SHA-256 hash and byte count, rather than keeping full frame data
+in the in-memory recent Sensation log. Recent accepted frame records are exposed
+at `/api/sensations`.
+
+Each Faculty socket validates JSON, adds `observed_at`, records an accepted
+`vision.frame` Sensation, and sends either an acknowledgement or a validation
+error. Browser-side backpressure is per Faculty: if a Faculty has not
+acknowledged its previous frame, the next frame for that Faculty is dropped
+without blocking other Faculty sockets.
 
 ---
 

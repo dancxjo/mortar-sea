@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mortar Face</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body x-data="faceApp()" x-init="init()">
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">Mortar-Sea</p>
+          <h1>The Face</h1>
+        </div>
+        <div class="actions">
+          <button type="button" x-on:click="start()" x-bind:disabled="running">Start</button>
+          <button type="button" class="secondary" x-on:click="stop()" x-bind:disabled="!running">Stop</button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="preview">
+          <video x-ref="video" autoplay muted playsinline></video>
+          <canvas x-ref="canvas" hidden></canvas>
+          <div class="preview-status" x-show="!running" x-text="cameraMessage"></div>
+        </div>
+
+        <aside class="panel">
+          <div class="control-row">
+            <label>
+              Format
+              <select x-model="mime">
+                <option value="image/jpeg">JPEG</option>
+                <option value="image/webp">WebP</option>
+              </select>
+            </label>
+            <label>
+              FPS
+              <input type="number" min="1" max="12" x-model.number="fps" />
+            </label>
+          </div>
+
+          <div class="control-row">
+            <label>
+              Width
+              <input type="number" min="160" max="1280" step="80" x-model.number="targetWidth" />
+            </label>
+            <label>
+              Quality
+              <input type="range" min="0.35" max="0.95" step="0.05" x-model.number="quality" />
+            </label>
+          </div>
+
+          <div class="faculty-list">
+            <template x-for="faculty in faculties" x-bind:key="faculty.name">
+              <article class="faculty">
+                <header>
+                  <label class="toggle">
+                    <input type="checkbox" x-model="faculty.enabled" x-on:change="syncFaculty(faculty)" />
+                    <span x-text="faculty.name"></span>
+                  </label>
+                  <span class="status" x-bind:data-status="faculty.status" x-text="faculty.status"></span>
+                </header>
+                <dl>
+                  <div><dt>sent</dt><dd x-text="faculty.sent"></dd></div>
+                  <div><dt>acked</dt><dd x-text="faculty.acked"></dd></div>
+                  <div><dt>dropped</dt><dd x-text="faculty.dropped"></dd></div>
+                </dl>
+                <p class="error" x-text="faculty.lastError || 'ready'"></p>
+              </article>
+            </template>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>
