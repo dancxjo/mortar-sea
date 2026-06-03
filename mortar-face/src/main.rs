@@ -17,18 +17,27 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use mortar_core::{
+    realtime_experience::format_realtime_experience_prompt, Impression, Sensation, TimelineEntry,
+    TimelineFrame,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const FACULTIES: &[&str] = &["vision-frame", "face", "motion", "scene"];
 const MAX_RECORDED_SENSATIONS: usize = 200;
+const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 128;
 
 #[derive(Clone)]
 struct AppState {
     sensations: Arc<RwLock<VecDeque<SensationRecord>>>,
+    realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +104,26 @@ struct ErrorMessage {
     error: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum RealTimeExperienceEvent {
+    Prompt {
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        prompt: String,
+    },
+    ResponseStart {
+        generation_id: Uuid,
+    },
+    ResponseToken {
+        generation_id: Uuid,
+        text: String,
+    },
+    ResponseDone {
+        generation_id: Uuid,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -106,6 +135,7 @@ async fn main() {
 
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
+        realtime_experience_events: broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0,
     };
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
@@ -115,6 +145,7 @@ async fn main() {
         .route("/api/faculties", get(faculties))
         .route("/api/sensations", get(recent_sensations))
         .route("/ws/faculties/:faculty", get(faculty_ws))
+        .route("/ws/realtime-experience", get(realtime_experience_ws))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -134,6 +165,49 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("run Face server");
+}
+
+async fn realtime_experience_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_realtime_experience_socket(socket, state))
+        .into_response()
+}
+
+async fn handle_realtime_experience_socket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut events = state.realtime_experience_events.subscribe();
+    info!("real-time experience socket connected");
+
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+
+                if let Err(err) = send_json(&mut sender, &event).await {
+                    warn!(%err, "failed to send real-time experience event");
+                    break;
+                }
+            }
+            message = receiver.next() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
+                        warn!(%err, "real-time experience websocket receive error");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    info!("real-time experience socket disconnected");
 }
 
 async fn shutdown_signal() {
@@ -222,6 +296,8 @@ async fn handle_socket(socket: WebSocket, socket_faculty: String, state: AppStat
                     warn!(faculty = %socket_faculty, %err, "failed to send acknowledgement");
                     break;
                 }
+
+                spawn_realtime_experience_trace(state.clone());
             }
             Err(error) => {
                 let error = ErrorMessage {
@@ -324,6 +400,116 @@ fn record_sensation(state: &AppState, record: SensationRecord) {
         records.pop_front();
     }
     records.push_back(record);
+}
+
+fn spawn_realtime_experience_trace(state: AppState) {
+    let records = state
+        .sensations
+        .read()
+        .expect("sensation log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if records.is_empty() {
+        return;
+    }
+
+    let generation_id = Uuid::new_v4();
+    let prompt = build_realtime_experience_prompt_from_records(&records);
+    let response = provisional_experience_response(&records);
+    let events = state.realtime_experience_events.clone();
+
+    tokio::spawn(async move {
+        let _ = events.send(RealTimeExperienceEvent::Prompt {
+            generation_id,
+            observed_at: Utc::now(),
+            prompt,
+        });
+        let _ = events.send(RealTimeExperienceEvent::ResponseStart { generation_id });
+
+        for token in streamable_chunks(&response, 18) {
+            let _ = events.send(RealTimeExperienceEvent::ResponseToken {
+                generation_id,
+                text: token,
+            });
+            sleep(Duration::from_millis(26)).await;
+        }
+
+        let _ = events.send(RealTimeExperienceEvent::ResponseDone { generation_id });
+    });
+}
+
+fn build_realtime_experience_prompt_from_records(records: &[SensationRecord]) -> String {
+    let mut frame = TimelineFrame::new();
+
+    for record in records.iter().rev().take(12).rev() {
+        let sensation = Sensation {
+            id: record.id,
+            kind: record.kind.clone(),
+            source: format!(
+                "{}:{}:{}",
+                record.source.client_id, record.source.sensor_id, record.source.faculty
+            ),
+            occurred_at: record.occurred_at,
+            observed_at: record.observed_at,
+            payload: json!({
+                "sequence": record.sequence,
+                "media": record.media,
+                "provenance": record.provenance,
+                "data_sha256": record.data_sha256,
+                "data_bytes": record.data_bytes
+            }),
+        };
+
+        let impression = Impression::new(
+            vec![sensation.id],
+            sensation.occurred_at,
+            sensation.observed_at,
+            format!(
+                "A {} {} camera frame arrived from {} at {}x{}.",
+                record.source.faculty,
+                record.media.mime,
+                record.source.sensor_id,
+                record.media.width,
+                record.media.height
+            ),
+        );
+
+        frame.push(TimelineEntry::Sensation(sensation));
+        frame.push(TimelineEntry::Impression(impression));
+    }
+
+    format_realtime_experience_prompt(frame.entries())
+}
+
+fn provisional_experience_response(records: &[SensationRecord]) -> String {
+    let Some(latest) = records.last() else {
+        return "{\"experiences\":[]}".to_string();
+    };
+
+    format!(
+        "{{\"experiences\":[{{\"what\":\"A live {} view is updating through the {} faculty, so the system appears to be watching the room right now.\",\"impression_ids\":[]}}]}}",
+        latest.kind, latest.source.faculty
+    )
+}
+
+fn streamable_chunks(text: &str, chunk_size: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+
+    for character in text.chars() {
+        chunk.push(character);
+        if chunk.len() >= chunk_size && character.is_whitespace() {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+    }
+
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+
+    chunks
 }
 
 fn sequence_from_raw_json(raw_json: &str) -> Option<u64> {

@@ -5,6 +5,11 @@ window.faceApp = function faceApp() {
     sensorId: 'camera.default',
     faculties: [],
     fps: 3,
+    experiencePrompt: '',
+    experienceResponse: '',
+    experienceSocket: null,
+    experienceStatus: 'disconnected',
+    activeExperienceGenerationId: null,
     mime: 'image/jpeg',
     quality: 0.72,
     running: false,
@@ -27,6 +32,7 @@ window.faceApp = function faceApp() {
         dropped: 0,
         lastError: '',
       }));
+      this.connectRealtimeExperience();
     },
 
     async start() {
@@ -59,6 +65,50 @@ window.faceApp = function faceApp() {
         this.stream = null;
       }
       this.cameraMessage = 'Camera idle';
+    },
+
+    connectRealtimeExperience() {
+      if (this.experienceSocket && this.experienceSocket.readyState <= WebSocket.OPEN) return;
+
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws/realtime-experience`);
+      this.experienceSocket = socket;
+      this.experienceStatus = 'connecting';
+
+      socket.addEventListener('open', () => {
+        this.experienceStatus = 'connected';
+      });
+
+      socket.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'prompt') {
+          this.activeExperienceGenerationId = message.generation_id;
+          this.experiencePrompt = message.prompt;
+          this.experienceResponse = '';
+          return;
+        }
+        if (message.generation_id !== this.activeExperienceGenerationId) return;
+        if (message.type === 'response_start') {
+          this.experienceResponse = '';
+          return;
+        }
+        if (message.type === 'response_token') {
+          this.experienceResponse += message.text;
+          return;
+        }
+        if (message.type === 'response_done') {
+          this.experienceStatus = 'connected';
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        this.experienceStatus = 'disconnected';
+        window.setTimeout(() => this.connectRealtimeExperience(), 1000);
+      });
+
+      socket.addEventListener('error', () => {
+        this.experienceStatus = 'error';
+      });
     },
 
     scheduleCapture() {

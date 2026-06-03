@@ -22,10 +22,23 @@
       </section>
 
       <section class="workspace">
-        <div class="preview">
-          <video x-ref="video" autoplay muted playsinline></video>
-          <canvas x-ref="canvas" hidden></canvas>
-          <div class="preview-status" x-show="!running" x-text="cameraMessage"></div>
+        <div class="stage">
+          <div class="preview">
+            <video x-ref="video" autoplay muted playsinline></video>
+            <canvas x-ref="canvas" hidden></canvas>
+            <div class="preview-status" x-show="!running" x-text="cameraMessage"></div>
+          </div>
+
+          <div class="thinking-face" aria-live="polite">
+            <div class="thought-bubble">
+              <details open>
+                <summary>What's happening here?</summary>
+                <pre x-text="experiencePrompt || 'Waiting for the first real-time Experience prompt…'"></pre>
+              </details>
+              <pre class="response-stream" x-text="experienceResponse || 'Waiting for streamed response…'"></pre>
+            </div>
+            <div class="emoji-face" aria-label="thinking face">🤔</div>
+          </div>
         </div>
 
         <aside class="panel">
