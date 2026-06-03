@@ -407,21 +407,21 @@ mod tests {
                 vec![MockWitRule::new("Observed frame", "A frame was observed.")],
             ));
 
-        let t0 = now();
-        let later = t0 + Duration::seconds(10);
+        let earlier_time = now();
+        let later_time = earlier_time + Duration::seconds(10);
 
         cognition.observe(Sensation::new(
             "vision.frame",
             "camera_late",
-            later,
-            later,
+            later_time,
+            later_time,
             json!({}),
         ));
         cognition.observe(Sensation::new(
             "vision.frame",
             "camera_early",
-            t0,
-            t0,
+            earlier_time,
+            earlier_time,
             json!({}),
         ));
 
