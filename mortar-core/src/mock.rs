@@ -406,20 +406,67 @@ mod tests {
                 vec![MockWitRule::new("Heard utterance", "A person spoke.")],
             ));
 
-        let sensation = MockEmitter::text("mic", "hello")
-            .drain()
-            .pop()
-            .expect("scripted sensation");
-        cognition.observe(sensation);
+        let earlier_time = now();
+        let later_time = earlier_time + Duration::seconds(10);
+
+        cognition.observe(Sensation::new(
+            "audio.utterance",
+            "mic",
+            earlier_time,
+            earlier_time,
+            json!({ "text": "hello" }),
+        ));
+        cognition.observe(Sensation::new(
+            "vision.frame",
+            "camera_external",
+            later_time,
+            later_time,
+            json!({}),
+        ));
+
+        let sensation_count_before_recall = cognition
+            .timeline()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, TimelineEntry::Sensation(_)))
+            .count();
 
         let recalled = cognition.recall_into_timeline();
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].kind, "memory.related_experience");
         assert_eq!(recalled[0].source, "memory");
+        assert_eq!(recalled[0].occurred_at, earlier_time);
 
         let recovered: Experience =
             serde_json::from_value(recalled[0].payload.clone()).expect("experience payload");
         assert_eq!(recovered.what, "A person spoke.");
+
+        let entries = cognition.timeline().entries();
+        let sensation_count_after_recall = entries
+            .iter()
+            .filter(|entry| matches!(entry, TimelineEntry::Sensation(_)))
+            .count();
+        assert_eq!(sensation_count_after_recall, sensation_count_before_recall + 1);
+
+        let memory_sensation_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    TimelineEntry::Sensation(s) if s.kind == "memory.related_experience"
+                )
+            })
+            .expect("memory sensation should be inserted into timeline");
+        let external_sensation_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, TimelineEntry::Sensation(s) if s.source == "camera_external")
+            })
+            .expect("external sensation should be present in timeline");
+        assert!(
+            memory_sensation_index < external_sensation_index,
+            "memory sensations must follow the same chronological ordering as external sensations"
+        );
     }
 
     #[test]
