@@ -4,7 +4,7 @@ use inquire::Select;
 use owo_colors::OwoColorize;
 
 use crate::models::download::fetch_model;
-use crate::models::manifest::{find_bundle, MODEL_ASSETS, MODEL_BUNDLES};
+use crate::models::manifest::{MODEL_ASSETS, MODEL_BUNDLES, find_bundle};
 use crate::models::selection::{
     asset_path, bundle_present, is_non_empty_file, model_selection_path, resolve_mortar_home,
     selected_bundle, selected_llm_model_path, write_selected_model,

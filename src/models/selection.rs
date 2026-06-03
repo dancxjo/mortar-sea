@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::models::manifest::{
-    bundle_primary_asset, find_bundle, ModelAsset, ModelBundle, DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, bundle_primary_asset, find_bundle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Default)]

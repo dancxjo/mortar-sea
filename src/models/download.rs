@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
-use crate::models::manifest::{bundle_primary_asset, find_bundle, ModelAsset, ModelBundle};
+use crate::models::manifest::{ModelAsset, ModelBundle, bundle_primary_asset, find_bundle};
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
     write_selected_model,

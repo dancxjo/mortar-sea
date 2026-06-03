@@ -1,14 +1,12 @@
 use std::sync::atomic::Ordering;
 
 use psyche::{
-    realtime_experience::format_realtime_experience_prompt, Impression, Sensation, TimelineEntry,
-    TimelineFrame,
+    GenerationRequest, Impression, LlamaCppConfig, LlamaCppEngine, LlmEngine, LlmEvent, Sensation,
+    TimelineEntry, TimelineFrame, realtime_experience::format_realtime_experience_prompt,
 };
 use serde_json::json;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::broadcast;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::app::AppState;
@@ -50,9 +48,9 @@ pub(crate) fn spawn_trace(state: AppState) {
         });
         let _ = events.send(RealTimeExperienceEvent::ResponseStart { generation_id });
 
-        if let Err(err) = stream_generation(generation_id, &prompt, &events).await {
+        if let Err(err) = stream_generation(generation_id, prompt.clone(), events.clone()).await {
             let fallback = format!(
-                "{{\"experiences\":[{{\"what\":\"Gemma 4 Experience generation is not running yet: {}\",\"impression_ids\":[]}}]}}",
+                "{{\"experiences\":[{{\"what\":\"Gemma 4 Experience generation failed: {}\",\"impression_ids\":[]}}]}}",
                 escape_json_string(&err.to_string())
             );
             for token in streamable_chunks(&fallback, 18) {
@@ -71,10 +69,10 @@ pub(crate) fn spawn_trace(state: AppState) {
 
 async fn stream_generation(
     generation_id: Uuid,
-    prompt: &str,
-    events: &broadcast::Sender<RealTimeExperienceEvent>,
+    prompt: String,
+    events: broadcast::Sender<RealTimeExperienceEvent>,
 ) -> anyhow::Result<()> {
-    let model_path = mortar_sea::models::selected_llm_model_path()?;
+    let model_path = mortar_sea::models::ensure_selected_llm_available()?;
     if !model_path
         .metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
@@ -85,64 +83,48 @@ async fn stream_generation(
         );
     }
 
-    let llama_cli = std::env::var("MORTAR_LLAMA_CLI")
-        .or_else(|_| std::env::var("LLAMA_CLI"))
-        .unwrap_or_else(|_| "llama-cli".to_string());
-    let prompt = wrap_gemma4_prompt(prompt);
-    let mut child = Command::new(&llama_cli)
-        .arg("-m")
-        .arg(&model_path)
-        .arg("-p")
-        .arg(prompt)
-        .arg("-n")
-        .arg("256")
-        .arg("--temp")
-        .arg("0.2")
-        .arg("--no-display-prompt")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "failed to start `{}` for {}; set MORTAR_LLAMA_CLI to your llama.cpp binary ({err})",
-                llama_cli,
-                model_path.display()
-            )
+    tokio::task::spawn_blocking(move || {
+        let mut engine = LlamaCppEngine::new(LlamaCppConfig {
+            model_path,
+            context_size: 4096,
+            max_tokens: 256,
+            temperature: 0.2,
+            top_p: 0.9,
+            ..LlamaCppConfig::default()
+        })?;
+        let generation = engine.start(GenerationRequest {
+            prompt: wrap_gemma4_prompt(&prompt),
+            max_tokens: Some(256),
+            stop: vec![
+                "<turn|>".to_string(),
+                "<|turn>user".to_string(),
+                "<|turn>system".to_string(),
+                "<|turn>model".to_string(),
+            ],
         })?;
 
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
-    let stderr_task = tokio::spawn(async move {
-        let mut stderr_buffer = Vec::new();
-        let _ = stderr.read_to_end(&mut stderr_buffer).await;
-        stderr_buffer
-    });
+        loop {
+            let events_batch = engine.poll(generation)?;
+            if events_batch.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
 
-    let mut buffer = [0_u8; 512];
-    loop {
-        let read = stdout.read(&mut buffer).await?;
-        if read == 0 {
-            break;
+            for event in events_batch {
+                match event {
+                    LlmEvent::Token { text } => {
+                        let _ = events.send(RealTimeExperienceEvent::ResponseToken {
+                            generation_id,
+                            text,
+                        });
+                    }
+                    LlmEvent::Completed | LlmEvent::Cancelled => return Ok(()),
+                    LlmEvent::Error { message } => anyhow::bail!(message),
+                }
+            }
         }
-        let text = String::from_utf8_lossy(&buffer[..read]).to_string();
-        let _ = events.send(RealTimeExperienceEvent::ResponseToken {
-            generation_id,
-            text,
-        });
-    }
-
-    let status = child.wait().await?;
-    let stderr = stderr_task.await.unwrap_or_default();
-    if !status.success() {
-        anyhow::bail!(
-            "`{}` exited with {}; {}",
-            llama_cli,
-            status,
-            String::from_utf8_lossy(&stderr).trim()
-        );
-    }
-
-    Ok(())
+    })
+    .await?
 }
 
 fn wrap_gemma4_prompt(prompt: &str) -> String {

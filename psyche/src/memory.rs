@@ -296,10 +296,12 @@ mod tests {
 
         // Both sensations exist in the same frame with no special-casing.
         assert_eq!(frame.len(), 2);
-        assert!(frame
-            .entries()
-            .iter()
-            .all(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(
+            frame
+                .entries()
+                .iter()
+                .all(|e| matches!(e, TimelineEntry::Sensation(_)))
+        );
     }
 
     /// When recalling an experience from memory the resulting sensation keeps
@@ -384,9 +386,11 @@ mod tests {
         mem.link_experiences(ExperienceLink::new(a.id, b.id, ExperienceLinkKind::Social));
 
         let social_links = mem.links_from(a.id);
-        assert!(social_links
-            .iter()
-            .any(|l| l.kind == ExperienceLinkKind::Social));
+        assert!(
+            social_links
+                .iter()
+                .any(|l| l.kind == ExperienceLinkKind::Social)
+        );
     }
 
     #[test]

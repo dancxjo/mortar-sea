@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -354,8 +354,8 @@ fn scripted_epoch() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::time::now;
     use crate::Memory;
+    use crate::time::now;
     use chrono::Duration;
 
     #[test]
@@ -446,21 +446,27 @@ mod tests {
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].what, "A person spoke.");
 
-        assert!(cognition
-            .timeline()
-            .entries()
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Sensation(_))));
-        assert!(cognition
-            .timeline()
-            .entries()
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Impression(_))));
-        assert!(cognition
-            .timeline()
-            .entries()
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Experience(_))));
+        assert!(
+            cognition
+                .timeline()
+                .entries()
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Sensation(_)))
+        );
+        assert!(
+            cognition
+                .timeline()
+                .entries()
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Impression(_)))
+        );
+        assert!(
+            cognition
+                .timeline()
+                .entries()
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Experience(_)))
+        );
     }
 
     #[test]
@@ -584,15 +590,21 @@ mod tests {
         let entries = cognition.timeline().entries();
         let times: Vec<_> = entries.iter().map(TimelineEntry::occurred_at).collect();
         assert!(times.windows(2).all(|w| w[0] <= w[1]));
-        assert!(entries
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Sensation(_))));
-        assert!(entries
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Impression(_))));
-        assert!(entries
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Experience(_))));
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Sensation(_)))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Impression(_)))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, TimelineEntry::Experience(_)))
+        );
     }
 
     #[test]
@@ -683,9 +695,11 @@ mod tests {
             entry,
             TimelineEntry::Sensation(s) if s.id == first_sensation.id
         )));
-        assert!(related
-            .iter()
-            .any(|entry| matches!(entry, TimelineEntry::Experience(_))));
+        assert!(
+            related
+                .iter()
+                .any(|entry| matches!(entry, TimelineEntry::Experience(_)))
+        );
     }
 
     #[test]
@@ -723,12 +737,16 @@ mod tests {
             .collect();
 
         assert_eq!(impressions.len(), 2);
-        assert!(impressions
-            .iter()
-            .any(|i| i.how == "Speech faculty heard hello"));
-        assert!(impressions
-            .iter()
-            .any(|i| i.how == "Context faculty noticed source mic"));
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Speech faculty heard hello")
+        );
+        assert!(
+            impressions
+                .iter()
+                .any(|i| i.how == "Context faculty noticed source mic")
+        );
     }
 
     #[test]
@@ -761,9 +779,11 @@ mod tests {
 
         assert_eq!(experiences.len(), 2);
         assert!(experiences.iter().any(|e| e.what == "A person spoke."));
-        assert!(experiences
-            .iter()
-            .any(|e| e.what == "Someone attempted interaction."));
+        assert!(
+            experiences
+                .iter()
+                .any(|e| e.what == "Someone attempted interaction.")
+        );
         assert_eq!(cognition.memory().recall().len(), 2);
     }
 

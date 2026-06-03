@@ -186,11 +186,13 @@ mod tests {
 
         assert_eq!(experiences.len(), 1);
         assert_eq!(pipeline.memory().recall().len(), 1);
-        assert!(pipeline
-            .timeline()
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, TimelineEntry::Experience(_))));
+        assert!(
+            pipeline
+                .timeline()
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry, TimelineEntry::Experience(_)))
+        );
     }
 
     #[test]
@@ -285,9 +287,11 @@ mod tests {
         let experiences = pipeline.observe(sensation);
 
         assert!(experiences.iter().any(|e| e.what == "A person spoke."));
-        assert!(experiences
-            .iter()
-            .any(|e| e.what == "A layered meaning emerged."));
+        assert!(
+            experiences
+                .iter()
+                .any(|e| e.what == "A layered meaning emerged.")
+        );
         assert!(pipeline.timeline().entries().iter().any(|entry| {
             matches!(
                 entry,

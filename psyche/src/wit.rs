@@ -418,9 +418,11 @@ mod tests {
             .collect();
 
         assert_eq!(outputs.len(), 2);
-        assert!(outputs
-            .iter()
-            .any(|output| output == "semantic: understood"));
+        assert!(
+            outputs
+                .iter()
+                .any(|output| output == "semantic: understood")
+        );
         assert!(outputs.iter().any(|output| output == "social: understood"));
     }
 }
