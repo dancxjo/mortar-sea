@@ -1,4 +1,4 @@
-//! mortar-core — the foundational cognitive model for the mortar-sea system.
+//! psyche — the foundational cognitive model for the mortar-sea system.
 //!
 //! The central pipeline is:
 //!

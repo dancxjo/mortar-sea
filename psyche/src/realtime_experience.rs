@@ -236,8 +236,7 @@ fn parse_experiences(generated: &str, entries: &[TimelineEntry]) -> Vec<Experien
 
     let occurred_at = entries
         .iter()
-        .filter(|entry| matches!(entry, TimelineEntry::Impression(_)))
-        .next_back()
+        .rfind(|entry| matches!(entry, TimelineEntry::Impression(_)))
         .map(TimelineEntry::occurred_at)
         .or_else(|| entries.last().map(TimelineEntry::occurred_at))
         .unwrap_or_else(Utc::now);

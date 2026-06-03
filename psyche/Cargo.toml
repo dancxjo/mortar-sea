@@ -1,5 +1,5 @@
 [package]
-name = "mortar-core"
+name = "psyche"
 version = "0.1.0"
 edition = "2021"
 description = "Core cognitive model for mortar-sea"

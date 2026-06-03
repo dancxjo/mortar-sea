@@ -275,7 +275,7 @@ This repository currently provides:
 - episode formation and temporal clustering (`Episode`, `LinkedMemory`)
 - a canonical cognition `Pipeline` abstraction
 - Faculty and Wit traits
-- a `mortar-face` web server for browser camera ingestion into faculty
+- a `face` web server for browser camera ingestion into faculty
   WebSockets
 
 This repository intentionally does not yet provide concrete implementations for:
@@ -295,10 +295,10 @@ The long-term Mortar-Sea vision includes many of these systems.
 
 ## Face frontend
 
-The `mortar-face` crate hosts a browser UI called the Face:
+The `face` crate hosts a browser UI called the Face:
 
 ```sh
-cargo run -p mortar-face
+cargo run face
 ```
 
 By default it listens at <http://127.0.0.1:3030>.
@@ -354,7 +354,7 @@ cargo check
 
 ## Reference mock implementations
 
-`mortar-core::mock` provides deterministic, no-external-service components for
+`psyche::mock` provides deterministic, no-external-service components for
 behavior tests, local development, and examples:
 
 - `MockEmitter`
