@@ -102,7 +102,8 @@ impl TimelineFrame {
         &self.entries
     }
 
-    /// Returns the last `limit` entries in chronological order.
+    /// Returns the last `limit` entries in chronological order
+    /// (oldest-to-newest within that most-recent subset).
     pub fn recent_entries(&self, limit: usize) -> &[TimelineEntry] {
         let start = self.entries.len().saturating_sub(limit);
         &self.entries[start..]
@@ -155,11 +156,11 @@ impl TimelineFrame {
 
     /// Returns one-hop neighbors for future graph-style traversal.
     ///
-    /// Edges are inferred from direct references:
-    /// - impression -> sensation ids
-    /// - experience -> impression ids
-    /// - sensation <- impressions that reference it
-    /// - impression <- experiences that reference it
+    /// Neighbor relationships are inferred from direct references:
+    /// - impressions reference sensation ids
+    /// - experiences reference impression ids
+    /// - sensations connect to impressions that reference them
+    /// - impressions connect to experiences that reference them
     pub fn related_entries(&self, entry_id: Uuid) -> Vec<&TimelineEntry> {
         let mut related = Vec::new();
 
