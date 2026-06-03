@@ -195,3 +195,13 @@ cargo fmt
 cargo test
 cargo check
 ```
+
+## Reference mock implementations
+
+`mortar-core::mock` provides deterministic, no-external-service components for
+behavior tests, local development, and examples:
+
+- `MockEmitter`
+- `MockFaculty`
+- `MockWit`
+- `ScriptedMemory`
