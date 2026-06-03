@@ -2,149 +2,188 @@
 
 An experiment in cognition and meaning-making.
 
-mortar-sea is **not** a chatbot, assistant, agent, voice interface, speech
-synthesiser, operating system, or automation framework. It is a small, clean
-Rust library that defines a foundational cognitive model: a seed crystal, not a
-framework.
+Mortar-Sea is the cognitive substrate beneath Pete.
+
+The goal is not to build a chatbot. The goal is to model how observations become understanding, how understanding becomes memory, and how memory participates in future understanding.
+
+The current crate is intentionally small. It defines the core ontology and data flow. Future crates may add language models, memory systems, speech, vision, retrieval, networking, and embodiment, but those systems should all share the same cognitive vocabulary.
 
 ---
 
-## The pipeline
+## Core pipeline
 
 ```text
-Sensation → Impression → Experience → Memory → Sensation
-```
-
-| Stage        | Question answered          | Example                                    |
-|--------------|----------------------------|--------------------------------------------|
-| **Sensation**  | What entered cognition?  | A camera frame, a spoken word, a recalled fact |
-| **Impression** | What was noticed?        | "I'm seeing three faces."                  |
-| **Experience** | What does it mean?       | "A visitor may have arrived."              |
-
-Impressions **observe**. Experiences **explain**.
-
----
-
-## Why memory re-enters cognition as sensation
-
-Memory is not a separate cognitive pathway. When the system recalls an
-experience, that recollection becomes a new `Sensation` with
-`kind = "memory.related_experience"`. It enters the same `TimelineFrame` as any
-externally-sourced sensation—a face crop, a speech utterance, or a video
-frame—with no special-casing.
-
-This means the full pipeline applies to memories too:
-
-```text
+Sensation
+    ↓
+Impression
+    ↓
 Experience
-    ↓  stored
-    ↓  recalled
-    ↓  converted
-memory.related_experience  ←  Sensation
     ↓
-Impression (e.g. "That face resembles George.")
+Memory
     ↓
-Experience (e.g. "This may be a returning visitor.")
+Recollection
+    ↓
+Sensation
 ```
+
+A remembered thing re-enters cognition as something newly noticed.
+
+Memory is not a separate pathway.
 
 ---
 
-## Observation vs. explanation
+## Concepts
 
-| Concept       | Role        | Natural-language form                           |
-|---------------|-------------|-------------------------------------------------|
-| `Impression`  | Observation | "The speaker said hello."                       |
-| `Experience`  | Explanation | "Someone greeted the system."                   |
+### Sensation
 
-An impression is the raw *what happened*. An experience is the derived *what it
-means*. Keeping these separate prevents premature interpretation and preserves
-the ability to re-interpret the same observations later.
+A thing entering cognition.
+
+Examples:
+
+- camera frame
+- face crop
+- spoken utterance
+- GPS coordinate
+- memory recall
+- motion vector
+
+A sensation does not explain anything.
+
+It merely exists.
+
+### Impression
+
+An observation about one or more sensations.
+
+Examples:
+
+> I'm seeing three faces.
+
+> A person just entered the room.
+
+> The speaker said hello.
+
+Impressions answer:
+
+> What was noticed?
+
+### Experience
+
+Meaning extracted from impressions.
+
+Examples:
+
+> A visitor may have arrived.
+
+> Someone greeted the system.
+
+> The user appears to be returning to a previous task.
+
+Experiences answer:
+
+> What does this mean?
 
 ---
 
 ## Faculties
 
-A `Faculty` notices things. It sits at the boundary between the world and
-cognition: it consumes raw `Sensation`s and may emit new `Sensation`s or
-`Impression`s back into the pipeline.
+A Faculty notices things.
 
-Faculties are defined as a trait. No concrete implementations ship with this
-crate; they belong to higher-level crates that integrate real input sources.
+Faculties live at the boundary between raw input and cognition.
+
+Examples of future faculties might include:
+
+- face detection
+- speech transcription
+- motion extraction
+- location awareness
+- memory retrieval
+
+A Faculty may emit:
+
+- new sensations
+- impressions
 
 ---
 
 ## Wits
 
-A `Wit` understands things over time. It consumes a `TimelineFrame`—the
-ordered, heterogeneous stream of sensations, impressions, and experiences—and
-produces `Experience`s.
+A Wit understands things over time.
 
-Wits are also defined as a trait only. Language models, inference engines, and
-prompting are explicitly out of scope for this crate.
+Wits consume timelines and produce experiences.
+
+Examples of future Wits might include:
+
+- social understanding
+- navigation
+- object permanence
+- emotional interpretation
+- curiosity
+
+Multiple Wits may operate concurrently over the same timeline.
 
 ---
 
 ## Timeline
 
-A `TimelineFrame` holds sensations, impressions, and experiences together,
-sorted strictly by `occurred_at`. There is no grouping by source or type.
-Future reasoning systems should consume a timeline, not individual subsystem
-outputs.
+A TimelineFrame is a heterogeneous stream of cognitive events.
 
----
-
-## Non-goals
-
-This repository does **not** implement:
-
-- speech recognition or synthesis
-- language models or RAG
-- vector or graph databases
-- networking, web servers, or CLIs
-- background services, daemons, or process orchestration
-- agents, plugins, or automation systems
-
----
-
-## Usage
-
-```rust
-use mortar_core::{
-    Sensation, Impression, Experience,
-    TimelineFrame, TimelineEntry,
-    InMemory, Memory,
-};
-use serde_json::json;
-
-let t = mortar_core::time::now();
-
-// 1. Sense something.
-let frame_sensation = Sensation::new(
-    "vision.frame", "camera_0", t, t, json!({"width": 1920}),
-);
-
-// 2. Notice something about it.
-let impression = Impression::new(
-    vec![frame_sensation.id], t, t, "I'm seeing three faces.",
-);
-
-// 3. Understand what it means.
-let experience = Experience::new(
-    vec![impression.id], t, t, "A visitor may have arrived.",
-);
-
-// 4. Store it in memory and recall it as a new sensation.
-let mut memory = InMemory::new();
-memory.store(experience.clone());
-let memory_sensation = InMemory::experience_to_sensation(&experience);
-
-// 5. Both sensations live in the same timeline.
-let mut timeline = TimelineFrame::new();
-timeline.push(TimelineEntry::Sensation(frame_sensation));
-timeline.push(TimelineEntry::Impression(impression));
-timeline.push(TimelineEntry::Experience(experience));
-timeline.push(TimelineEntry::Sensation(memory_sensation));
+```text
+Sensation
+Impression
+Experience
+Sensation
+Experience
+Impression
 ```
+
+Entries are ordered by time rather than by subsystem.
+
+Reasoning should emerge from temporal relationships, not from isolated pipelines.
+
+---
+
+## Scope
+
+This repository currently provides:
+
+- cognitive data structures
+- timeline abstractions
+- memory abstractions
+- Faculty and Wit traits
+
+This repository intentionally does not yet provide concrete implementations for:
+
+- speech
+- vision
+- language models
+- vector databases
+- graph databases
+- retrieval systems
+- robotics
+- networking
+
+Those capabilities belong in higher-level crates built on top of the same cognitive model.
+
+The long-term Mortar-Sea vision includes many of these systems.
+
+---
+
+## Relationship to Pete
+
+Mortar-Sea defines the cognitive model.
+
+Pete is expected to provide:
+
+- sensors
+- embodiment
+- memory backends
+- language models
+- speech systems
+- vision systems
+- planning systems
+
+Pete should think in terms of sensations, impressions, experiences, memories, recollections, faculties, and wits.
 
 ---
 
