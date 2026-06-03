@@ -59,7 +59,7 @@ impl WitFilter {
             Self::ImpressionType(expected_type) => {
                 frame.entries().iter().any(|entry| match entry {
                     TimelineEntry::Impression(impression) => {
-                        timeline_text_type(&impression.how) == expected_type
+                        parse_type_prefix(&impression.how) == expected_type
                     }
                     _ => false,
                 })
@@ -67,7 +67,7 @@ impl WitFilter {
             Self::ExperienceType(expected_type) => {
                 frame.entries().iter().any(|entry| match entry {
                     TimelineEntry::Experience(experience) => {
-                        timeline_text_type(&experience.what) == expected_type
+                        parse_type_prefix(&experience.what) == expected_type
                     }
                     _ => false,
                 })
@@ -82,6 +82,7 @@ pub struct WitRegistry {
     entries: Vec<WitRegistryEntry>,
 }
 
+/// Internal registration record pairing static metadata with a wit factory.
 struct WitRegistryEntry {
     registered: RegisteredWit,
     build: Box<dyn Fn() -> Box<dyn Wit>>,
@@ -138,6 +139,8 @@ impl WitRegistry {
             .filter(|entry| entry.registered.filter.matches(frame))
             .collect();
 
+        // Higher numeric priority runs first; equal priorities keep a stable,
+        // deterministic order by wit name.
         selected.sort_by(|left, right| {
             right
                 .registered
@@ -150,7 +153,12 @@ impl WitRegistry {
     }
 }
 
-fn timeline_text_type(value: &str) -> &str {
+/// Extract the type prefix from a colon-delimited timeline description.
+///
+/// Examples:
+/// - `"social.intent: greeting"` -> `"social.intent"`
+/// - `"memory.recall"` -> `"memory.recall"`
+fn parse_type_prefix(value: &str) -> &str {
     value
         .split_once(':')
         .map(|(left, _)| left)
