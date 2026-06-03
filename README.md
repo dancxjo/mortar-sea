@@ -122,6 +122,14 @@ A Faculty may emit:
 - new sensations
 - impressions
 
+### Faculty registry
+
+`FacultyRegistry` supports declarative wiring by stable faculty name. It can:
+
+- register faculty builders with accepted sensation kinds
+- list registered faculties and their accepted kinds
+- select matching faculty instances for a given sensation kind
+
 ---
 
 ## Wits
