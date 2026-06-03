@@ -393,6 +393,8 @@ mod tests {
 
     #[test]
     fn behavior_experience_recall_becomes_memory_sensation() {
+        const TEST_TIME_DELTA_SECONDS: i64 = 10;
+
         let mut cognition = MockCognition::new()
             .with_faculty(MockFaculty::new(
                 "speech",
@@ -407,7 +409,7 @@ mod tests {
             ));
 
         let earlier_time = now();
-        let later_time = earlier_time + Duration::seconds(10);
+        let later_time = earlier_time + Duration::seconds(TEST_TIME_DELTA_SECONDS);
 
         cognition.observe(Sensation::new(
             "audio.utterance",
@@ -465,7 +467,9 @@ mod tests {
             .expect("external sensation should be present in timeline");
         assert!(
             memory_sensation_index < external_sensation_index,
-            "memory sensations must follow the same chronological ordering as external sensations"
+            "memory sensation at index {} must appear before external sensation at index {} for chronological ordering",
+            memory_sensation_index,
+            external_sensation_index
         );
     }
 
