@@ -21,6 +21,8 @@ pub struct Pipeline<M: Memory = InMemory> {
     wits: Vec<Box<dyn Wit>>,
 }
 
+const MAX_EXPERIENCE_FEEDBACK_LOOPS: usize = 32;
+
 impl Default for Pipeline<InMemory> {
     fn default() -> Self {
         Self::new(InMemory::new())
@@ -56,43 +58,54 @@ impl<M: Memory> Pipeline<M> {
     }
 
     /// Present a sensation and run the full cognitive loop:
-    /// sensation → faculty outputs → timeline → wit outputs → memory.
+    /// sensation → faculty outputs → timeline → wit outputs → memory → sensation.
     ///
     /// Wits interpret the full accumulated timeline on every call. To avoid
     /// duplicate accumulation across observations, experiences that match an
-    /// already-stored experience are skipped before storage.
+    /// already-stored experience are skipped before storage. Newly created
+    /// experiences are also reintroduced as sensations for recursive cognition,
+    /// bounded by a feedback loop cap to prevent runaway recursion.
     pub fn observe(&mut self, sensation: Sensation) -> Vec<Experience> {
         let mut pending = vec![sensation];
-
-        while let Some(sensation) = pending.pop() {
-            self.timeline
-                .push(TimelineEntry::Sensation(sensation.clone()));
-
-            for faculty in &mut self.faculties {
-                let (derived_sensations, impressions) = faculty.process(&sensation);
-
-                for impression in impressions {
-                    self.timeline.push(TimelineEntry::Impression(impression));
-                }
-
-                pending.extend(derived_sensations);
-            }
-        }
-
+        let mut feedback_loops = 0;
         let mut experiences = Vec::new();
         let mut known_experience_keys: HashSet<_> =
             self.memory.recall().iter().map(experience_key).collect();
-        for wit in &mut self.wits {
-            for experience in wit.interpret(&self.timeline) {
-                if !known_experience_keys.insert(experience_key(&experience)) {
-                    continue;
-                }
 
-                self.memory.store(experience.clone());
+        while !pending.is_empty() && feedback_loops < MAX_EXPERIENCE_FEEDBACK_LOOPS {
+            feedback_loops += 1;
+            let mut next_pending = Vec::new();
+
+            while let Some(sensation) = pending.pop() {
                 self.timeline
-                    .push(TimelineEntry::Experience(experience.clone()));
-                experiences.push(experience);
+                    .push(TimelineEntry::Sensation(sensation.clone()));
+
+                for faculty in &mut self.faculties {
+                    let (derived_sensations, impressions) = faculty.process(&sensation);
+
+                    for impression in impressions {
+                        self.timeline.push(TimelineEntry::Impression(impression));
+                    }
+
+                    next_pending.extend(derived_sensations);
+                }
             }
+
+            for wit in &mut self.wits {
+                for experience in wit.interpret(&self.timeline) {
+                    if !known_experience_keys.insert(experience_key(&experience)) {
+                        continue;
+                    }
+
+                    self.memory.store(experience.clone());
+                    self.timeline
+                        .push(TimelineEntry::Experience(experience.clone()));
+                    next_pending.push(M::experience_to_sensation(&experience));
+                    experiences.push(experience);
+                }
+            }
+
+            pending = next_pending;
         }
 
         experiences
@@ -142,6 +155,7 @@ fn experience_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::impression::Impression;
     use crate::mock::{
         MockEmitter, MockFaculty, MockFacultyRule, MockWit, MockWitRule, ScriptedMemory,
     };
@@ -241,5 +255,112 @@ mod tests {
             })
             .collect();
         assert_eq!(memory_sensation_times, vec![t0, t2]);
+    }
+
+    #[test]
+    fn observe_supports_recursive_experience_feedback() {
+        let mut pipeline = Pipeline::default()
+            .with_faculty(MockFaculty::new(
+                "speech",
+                vec![
+                    MockFacultyRule::impression("audio.utterance", "Heard utterance: {text}"),
+                    MockFacultyRule::impression(
+                        "memory.related_experience",
+                        "Memory sensation observed.",
+                    ),
+                ],
+            ))
+            .with_wit(MockWit::new(
+                "semantic",
+                vec![
+                    MockWitRule::new("Heard utterance", "A person spoke."),
+                    MockWitRule::new("Memory sensation observed", "A layered meaning emerged."),
+                ],
+            ));
+
+        let sensation = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let experiences = pipeline.observe(sensation);
+
+        assert!(experiences.iter().any(|e| e.what == "A person spoke."));
+        assert!(experiences
+            .iter()
+            .any(|e| e.what == "A layered meaning emerged."));
+        assert!(pipeline.timeline().entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TimelineEntry::Sensation(s) if s.kind == "memory.related_experience"
+            )
+        }));
+    }
+
+    #[test]
+    fn observe_caps_recursive_feedback_loops() {
+        #[derive(Default)]
+        struct LoopFaculty;
+
+        impl Faculty for LoopFaculty {
+            fn process(&mut self, sensation: &Sensation) -> (Vec<Sensation>, Vec<Impression>) {
+                if sensation.kind != "audio.utterance"
+                    && sensation.kind != "memory.related_experience"
+                {
+                    return (vec![], vec![]);
+                }
+
+                (
+                    vec![],
+                    vec![Impression::new(
+                        vec![sensation.id],
+                        sensation.occurred_at,
+                        sensation.observed_at,
+                        "loop impression",
+                    )],
+                )
+            }
+        }
+
+        #[derive(Default)]
+        struct LoopWit {
+            count: usize,
+        }
+
+        impl Wit for LoopWit {
+            fn interpret(&mut self, frame: &TimelineFrame) -> Vec<Experience> {
+                let Some(impression) = frame.entries().iter().rev().find_map(|entry| match entry {
+                    TimelineEntry::Impression(impression) => Some(impression),
+                    _ => None,
+                }) else {
+                    return vec![];
+                };
+
+                self.count += 1;
+                vec![Experience::new(
+                    vec![impression.id],
+                    impression.occurred_at,
+                    impression.observed_at,
+                    format!("loop meaning {}", self.count),
+                )]
+            }
+        }
+
+        let t0 = now();
+        let mut pipeline = Pipeline::default()
+            .with_faculty(LoopFaculty)
+            .with_wit(LoopWit::default());
+        let experiences = pipeline.observe(Sensation::new(
+            "audio.utterance",
+            "mic",
+            t0,
+            t0,
+            json!({ "text": "hello" }),
+        ));
+
+        assert_eq!(experiences.len(), MAX_EXPERIENCE_FEEDBACK_LOOPS);
+        assert_eq!(
+            pipeline.memory().recall().len(),
+            MAX_EXPERIENCE_FEEDBACK_LOOPS
+        );
     }
 }

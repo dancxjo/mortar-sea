@@ -39,8 +39,14 @@ Memory is not a separate pathway.
   - `source = "memory"`
   - JSON payload containing the serialized `Experience`
   - `occurred_at` copied from the original experience
-- **Trigger mode:** explicit pull (not automatic, scheduled, or event-driven in `observe`).
+- **Trigger mode for stored memory:** explicit pull via `recall_into_timeline`.
 - **Timeline ordering:** recalled sensations are inserted through normal `TimelineFrame` insertion and therefore ordered by `occurred_at` with all other entries.
+
+`observe` also performs bounded recursive cognition for newly generated
+experiences within the same call: each new experience is converted to a
+`memory.related_experience` sensation and reprocessed so additional
+impressions and higher-order experiences can emerge. This internal feedback is
+capped to prevent runaway loops.
 
 ---
 
