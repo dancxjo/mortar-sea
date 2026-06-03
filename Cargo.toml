@@ -1,0 +1,3 @@
+[workspace]
+members = ["mortar-core"]
+resolver = "2"
