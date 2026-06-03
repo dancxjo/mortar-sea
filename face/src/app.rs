@@ -37,6 +37,9 @@ pub(crate) struct AppState {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    let model_path = mortar_sea::models::ensure_selected_llm_available()?;
+    info!(model = %model_path.display(), "selected LLM model is available");
+
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
         realtime_experience_events: broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0,

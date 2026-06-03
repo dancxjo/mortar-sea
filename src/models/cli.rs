@@ -34,8 +34,7 @@ pub struct ModelsUseCommand {
 
 #[derive(Debug, Args)]
 pub struct ModelsFetchCommand {
-    #[arg(default_value = "gemma4")]
-    model: String,
+    model: Option<String>,
     #[arg(long)]
     force: bool,
 }
@@ -47,7 +46,10 @@ pub fn run(command: Option<ModelsCommand>) -> Result<()> {
         ModelsCommand::Path => print_paths(),
         ModelsCommand::Status => print_status(),
         ModelsCommand::Use(command) => select_model(&command.model),
-        ModelsCommand::Fetch(command) => fetch_model(&command.model, command.force),
+        ModelsCommand::Fetch(command) => {
+            fetch_model(command.model.as_deref(), command.force)?;
+            Ok(())
+        }
     }
 }
 

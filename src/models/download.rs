@@ -1,21 +1,73 @@
 use std::{
     fs::{self, File},
     io::{Read, Write},
+    path::PathBuf,
 };
 
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
-use crate::models::manifest::{bundle_primary_asset, find_bundle};
+use crate::models::manifest::{bundle_primary_asset, find_bundle, ModelAsset, ModelBundle};
 use crate::models::selection::{
-    asset_path, is_non_empty_file, resolve_mortar_home, write_selected_model,
+    asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
+    write_selected_model,
 };
 
-pub fn fetch_model(model: &str, force: bool) -> Result<()> {
-    let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+pub fn ensure_selected_llm_available() -> Result<PathBuf> {
+    let path = selected_llm_model_path()?;
+    if std::env::var_os("MORTAR_LLM_MODEL").is_some() {
+        if is_non_empty_file(&path) {
+            return Ok(path);
+        }
+        anyhow::bail!(
+            "MORTAR_LLM_MODEL points to a missing or empty file: {}",
+            path.display()
+        );
+    }
+
+    let bundle = selected_bundle()?;
+    ensure_bundle_available(bundle)?;
+    selected_llm_model_path()
+}
+
+pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
+    if let Some(model) = model {
+        let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+        write_selected_model(bundle.id)?;
+        fetch_bundle(bundle, force)?;
+        println!("{} {}", "selected".green(), bundle.display_name.bold());
+        return selected_llm_model_path();
+    }
+
+    let bundle = selected_bundle()?;
+    fetch_bundle(bundle, force)?;
+    selected_llm_model_path()
+}
+
+fn fetch_bundle(bundle: &ModelBundle, force: bool) -> Result<()> {
     write_selected_model(bundle.id)?;
     let asset = bundle_primary_asset(bundle)?;
+    fetch_asset(asset, force)?;
+    Ok(())
+}
+
+fn ensure_bundle_available(bundle: &ModelBundle) -> Result<()> {
+    let asset = bundle_primary_asset(bundle)?;
+    let home = resolve_mortar_home()?;
+    let path = asset_path(&home, asset);
+    if is_non_empty_file(&path) {
+        return Ok(());
+    }
+
+    eprintln!(
+        "LLM model `{}` is missing locally; downloading it now. This can take a while...",
+        bundle.display_name
+    );
+    fetch_asset(asset, false)
+}
+
+fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
     let home = resolve_mortar_home()?;
     let path = asset_path(&home, asset);
     if is_non_empty_file(&path) && !force {
@@ -66,7 +118,6 @@ pub fn fetch_model(model: &str, force: bool) -> Result<()> {
 
     println!("{} {}", "downloaded".green(), path.display());
     println!("{} {:x}", "sha256".cyan(), hasher.finalize());
-    println!("{} {}", "selected".green(), bundle.display_name.bold());
     Ok(())
 }
 

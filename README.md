@@ -303,6 +303,15 @@ cargo run face
 
 By default it listens at <http://127.0.0.1:3030>.
 
+On startup, the Face ensures the selected local LLM is present. If the selected
+Gemma GGUF is missing, it downloads it before binding the server, following the
+same "selected model just works" shape as Listenbury. To preflight the selected
+model download without launching the browser server, run:
+
+```sh
+cargo run models fetch
+```
+
 The Face page requests camera permission, previews the stream, captures frames
 into a canvas, and sends JSON `vision.frame` Sensations to one WebSocket per
 enabled visual Faculty:
