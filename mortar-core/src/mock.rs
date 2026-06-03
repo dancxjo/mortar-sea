@@ -1,13 +1,14 @@
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::{
     experience::Experience,
     faculty::Faculty,
     impression::Impression,
-    memory::InMemory,
+    memory::{InMemory, Memory},
     pipeline::Pipeline,
     sensation::Sensation,
-    time::now,
     timeline::{TimelineEntry, TimelineFrame},
     wit::Wit,
 };
@@ -28,14 +29,29 @@ impl MockEmitter {
     }
 
     pub fn text(source: impl Into<String>, text: impl Into<String>) -> Self {
-        let t = now();
-        Self::new(vec![Sensation::new(
-            "audio.utterance",
+        Self::text_at(source, text, scripted_epoch())
+    }
+
+    pub fn text_at(
+        source: impl Into<String>,
+        text: impl Into<String>,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        let source = source.into();
+        let text = text.into();
+        Self::new(vec![Sensation {
+            id: deterministic_uuid(format!(
+                "mock-emitter:text:{}:{}:{}",
+                source,
+                text,
+                occurred_at.to_rfc3339()
+            )),
+            kind: "audio.utterance".to_owned(),
             source,
-            t,
-            t,
-            json!({ "text": text.into() }),
-        )])
+            occurred_at,
+            observed_at: occurred_at,
+            payload: json!({ "text": text }),
+        }])
     }
 
     pub fn drain(&mut self) -> Vec<Sensation> {
@@ -112,23 +128,36 @@ impl Faculty for MockFaculty {
         let mut sensations = Vec::new();
         let mut impressions = Vec::new();
 
-        for rule in self.rules.iter().filter(|rule| rule.input_kind == sensation.kind) {
-            let observed_at = now();
-            impressions.push(Impression::new(
-                vec![sensation.id],
-                sensation.occurred_at,
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| rule.input_kind == sensation.kind)
+        {
+            let how = render_template(&rule.impression, sensation);
+            let observed_at = sensation.observed_at;
+            impressions.push(Impression {
+                id: deterministic_uuid(format!(
+                    "mock-faculty:{}:{}:{}",
+                    self.name, sensation.id, how
+                )),
+                sensation_ids: vec![sensation.id],
+                occurred_at: sensation.occurred_at,
                 observed_at,
-                render_template(&rule.impression, sensation),
-            ));
+                how,
+            });
 
             if let Some(derived) = &rule.derived_sensation {
-                sensations.push(Sensation::new(
-                    derived.kind.clone(),
-                    self.name.clone(),
-                    sensation.occurred_at,
+                sensations.push(Sensation {
+                    id: deterministic_uuid(format!(
+                        "mock-faculty-derived:{}:{}:{}:{}",
+                        self.name, sensation.id, derived.kind, derived.payload
+                    )),
+                    kind: derived.kind.clone(),
+                    source: self.name.clone(),
+                    occurred_at: sensation.occurred_at,
                     observed_at,
-                    derived.payload.clone(),
-                ));
+                    payload: derived.payload.clone(),
+                });
             }
         }
 
@@ -186,16 +215,59 @@ impl Wit for MockWit {
                 .iter()
                 .filter(|rule| impression.how.contains(&rule.impression_contains))
             {
-                experiences.push(Experience::new(
-                    vec![impression.id],
-                    impression.occurred_at,
-                    now(),
-                    rule.experience.clone(),
-                ));
+                experiences.push(Experience {
+                    id: deterministic_uuid(format!(
+                        "mock-wit:{}:{}:{}",
+                        self.name, impression.id, rule.experience
+                    )),
+                    impression_ids: vec![impression.id],
+                    occurred_at: impression.occurred_at,
+                    observed_at: impression.observed_at,
+                    what: rule.experience.clone(),
+                });
             }
         }
 
         experiences
+    }
+}
+
+/// A deterministic memory backend for scripted tests and examples.
+///
+/// `ScriptedMemory` starts with a known set of experiences and appends any
+/// newly stored experiences in insertion order.
+#[derive(Debug, Default, Clone)]
+pub struct ScriptedMemory {
+    experiences: Vec<Experience>,
+}
+
+impl ScriptedMemory {
+    pub fn new(experiences: Vec<Experience>) -> Self {
+        Self { experiences }
+    }
+}
+
+impl Memory for ScriptedMemory {
+    fn store(&mut self, experience: Experience) {
+        self.experiences.push(experience);
+    }
+
+    fn recall(&self) -> Vec<Experience> {
+        self.experiences.clone()
+    }
+
+    fn experience_to_sensation(experience: &Experience) -> Sensation {
+        let payload = serde_json::to_value(experience).unwrap_or_else(|err| {
+            panic!("failed to serialize Experience to JSON payload: {}", err)
+        });
+        Sensation {
+            id: deterministic_uuid(format!("mock-memory:{}", experience.id)),
+            kind: "memory.related_experience".to_owned(),
+            source: "memory".to_owned(),
+            occurred_at: experience.occurred_at,
+            observed_at: experience.observed_at,
+            payload,
+        }
     }
 }
 
@@ -257,11 +329,51 @@ fn render_template(template: &str, sensation: &Sensation) -> String {
         .replace("{text}", text)
 }
 
+fn deterministic_uuid(seed: impl AsRef<str>) -> Uuid {
+    // Non-cryptographic FNV-1a 128-bit hash to obtain a stable UUID-shaped
+    // identifier for deterministic test/example data generation.
+    // Not suitable for cryptographic or collision-resistant identity needs.
+    // Constants are the standard FNV-1a offset basis and prime for 128-bit.
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    let mut hash = OFFSET;
+    for byte in seed.as_ref().as_bytes() {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+
+    Uuid::from_u128(hash)
+}
+
+fn scripted_epoch() -> DateTime<Utc> {
+    // Use a fixed timestamp so mock-generated sensations are reproducible.
+    DateTime::UNIX_EPOCH
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::time::now;
     use crate::Memory;
     use chrono::Duration;
+
+    #[test]
+    fn mock_emitter_text_is_deterministic() {
+        let first = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+        let second = MockEmitter::text("mic", "hello")
+            .drain()
+            .pop()
+            .expect("scripted sensation");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.occurred_at, second.occurred_at);
+        assert_eq!(first.observed_at, second.observed_at);
+        assert_eq!(first.payload, second.payload);
+    }
 
     #[test]
     fn mock_faculty_renders_text_impression() {
@@ -279,6 +391,31 @@ mod tests {
 
         assert_eq!(impressions.len(), 1);
         assert_eq!(impressions[0].how, "The speaker said hello.");
+    }
+
+    #[test]
+    fn scripted_memory_recall_and_sensation_are_deterministic() {
+        let occurred_at = now();
+        let observed_at = occurred_at + Duration::seconds(1);
+        let experience = Experience {
+            id: deterministic_uuid("seeded-experience"),
+            impression_ids: vec![],
+            occurred_at,
+            observed_at,
+            what: "Scripted meaning.".to_owned(),
+        };
+
+        let memory = ScriptedMemory::new(vec![experience.clone()]);
+        let recalled = memory.recall();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].id, experience.id);
+        assert_eq!(recalled[0].what, experience.what);
+
+        let first = ScriptedMemory::experience_to_sensation(&experience);
+        let second = ScriptedMemory::experience_to_sensation(&experience);
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.observed_at, second.observed_at);
+        assert_eq!(first.payload, second.payload);
     }
 
     #[test]
@@ -383,7 +520,10 @@ mod tests {
             .iter()
             .filter(|entry| matches!(entry, TimelineEntry::Sensation(_)))
             .count();
-        assert_eq!(sensation_count_after_recall, sensation_count_before_recall + 1);
+        assert_eq!(
+            sensation_count_after_recall,
+            sensation_count_before_recall + 1
+        );
 
         let memory_sensation_index = entries
             .iter()
@@ -444,9 +584,15 @@ mod tests {
         let entries = cognition.timeline().entries();
         let times: Vec<_> = entries.iter().map(TimelineEntry::occurred_at).collect();
         assert!(times.windows(2).all(|w| w[0] <= w[1]));
-        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Sensation(_))));
-        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Impression(_))));
-        assert!(entries.iter().any(|e| matches!(e, TimelineEntry::Experience(_))));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Sensation(_))));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Impression(_))));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Experience(_))));
     }
 
     #[test]
@@ -484,16 +630,12 @@ mod tests {
             .collect();
 
         assert_eq!(impressions.len(), 2);
-        assert!(
-            impressions
-                .iter()
-                .any(|i| i.how == "Speech faculty heard hello")
-        );
-        assert!(
-            impressions
-                .iter()
-                .any(|i| i.how == "Context faculty noticed source mic")
-        );
+        assert!(impressions
+            .iter()
+            .any(|i| i.how == "Speech faculty heard hello"));
+        assert!(impressions
+            .iter()
+            .any(|i| i.how == "Context faculty noticed source mic"));
     }
 
     #[test]
@@ -512,7 +654,10 @@ mod tests {
             ))
             .with_wit(MockWit::new(
                 "social",
-                vec![MockWitRule::new("Heard utterance", "Someone attempted interaction.")],
+                vec![MockWitRule::new(
+                    "Heard utterance",
+                    "Someone attempted interaction.",
+                )],
             ));
 
         let sensation = MockEmitter::text("mic", "hello")
@@ -523,11 +668,9 @@ mod tests {
 
         assert_eq!(experiences.len(), 2);
         assert!(experiences.iter().any(|e| e.what == "A person spoke."));
-        assert!(
-            experiences
-                .iter()
-                .any(|e| e.what == "Someone attempted interaction.")
-        );
+        assert!(experiences
+            .iter()
+            .any(|e| e.what == "Someone attempted interaction."));
         assert_eq!(cognition.memory().recall().len(), 2);
     }
 
