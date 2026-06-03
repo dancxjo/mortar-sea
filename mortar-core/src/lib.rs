@@ -27,5 +27,5 @@ pub use memory::{InMemory, Memory};
 pub use mock::*;
 pub use pipeline::Pipeline;
 pub use sensation::Sensation;
-pub use timeline::{TimelineEntry, TimelineFrame};
+pub use timeline::{TimelineEntry, TimelineEntryKind, TimelineFrame};
 pub use wit::{RegisteredWit, Wit, WitCadence, WitFilter, WitRegistry, WitRegistryError};

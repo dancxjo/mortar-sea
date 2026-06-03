@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{experience::Experience, impression::Impression, sensation::Sensation};
 
@@ -15,7 +16,33 @@ pub enum TimelineEntry {
     Experience(Experience),
 }
 
+/// A coarse type discriminator for [`TimelineEntry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineEntryKind {
+    Sensation,
+    Impression,
+    Experience,
+}
+
 impl TimelineEntry {
+    /// Returns this entry's stable identifier.
+    pub fn id(&self) -> Uuid {
+        match self {
+            TimelineEntry::Sensation(s) => s.id,
+            TimelineEntry::Impression(i) => i.id,
+            TimelineEntry::Experience(e) => e.id,
+        }
+    }
+
+    /// Returns the coarse entry type.
+    pub fn kind(&self) -> TimelineEntryKind {
+        match self {
+            TimelineEntry::Sensation(_) => TimelineEntryKind::Sensation,
+            TimelineEntry::Impression(_) => TimelineEntryKind::Impression,
+            TimelineEntry::Experience(_) => TimelineEntryKind::Experience,
+        }
+    }
+
     /// Returns the `occurred_at` timestamp regardless of entry type.
     pub fn occurred_at(&self) -> DateTime<Utc> {
         match self {
@@ -23,6 +50,22 @@ impl TimelineEntry {
             TimelineEntry::Impression(i) => i.occurred_at,
             TimelineEntry::Experience(e) => e.occurred_at,
         }
+    }
+
+    /// Returns true when this entry directly references the sensation.
+    pub fn references_sensation(&self, sensation_id: Uuid) -> bool {
+        matches!(
+            self,
+            TimelineEntry::Impression(impression) if impression.sensation_ids.contains(&sensation_id)
+        )
+    }
+
+    /// Returns true when this entry directly references the impression.
+    pub fn references_impression(&self, impression_id: Uuid) -> bool {
+        matches!(
+            self,
+            TimelineEntry::Experience(experience) if experience.impression_ids.contains(&impression_id)
+        )
     }
 }
 
@@ -57,6 +100,99 @@ impl TimelineFrame {
     /// Returns a slice of all entries in chronological order.
     pub fn entries(&self) -> &[TimelineEntry] {
         &self.entries
+    }
+
+    /// Returns the last `limit` entries in chronological order.
+    pub fn recent_entries(&self, limit: usize) -> &[TimelineEntry] {
+        let start = self.entries.len().saturating_sub(limit);
+        &self.entries[start..]
+    }
+
+    /// Returns all entries matching a single type discriminator.
+    pub fn entries_by_kind(
+        &self,
+        kind: TimelineEntryKind,
+    ) -> impl Iterator<Item = &TimelineEntry> + '_ {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.kind() == kind)
+    }
+
+    /// Returns entries that directly reference a sensation id.
+    pub fn entries_referencing_sensation(
+        &self,
+        sensation_id: Uuid,
+    ) -> impl Iterator<Item = &TimelineEntry> + '_ {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.references_sensation(sensation_id))
+    }
+
+    /// Returns entries that directly reference an impression id.
+    pub fn entries_referencing_impression(
+        &self,
+        impression_id: Uuid,
+    ) -> impl Iterator<Item = &TimelineEntry> + '_ {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.references_impression(impression_id))
+    }
+
+    /// Returns entries with `occurred_at` in the inclusive window.
+    pub fn entries_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> &[TimelineEntry] {
+        if start > end {
+            return &[];
+        }
+
+        let start_idx = self
+            .entries
+            .partition_point(|entry| entry.occurred_at() < start);
+        let end_idx = self
+            .entries
+            .partition_point(|entry| entry.occurred_at() <= end);
+        &self.entries[start_idx..end_idx]
+    }
+
+    /// Returns one-hop neighbors for future graph-style traversal.
+    ///
+    /// Edges are inferred from direct references:
+    /// - impression -> sensation ids
+    /// - experience -> impression ids
+    /// - sensation <- impressions that reference it
+    /// - impression <- experiences that reference it
+    pub fn related_entries(&self, entry_id: Uuid) -> Vec<&TimelineEntry> {
+        let mut related = Vec::new();
+
+        let Some(target) = self.entries.iter().find(|entry| entry.id() == entry_id) else {
+            return related;
+        };
+
+        match target {
+            TimelineEntry::Sensation(sensation) => {
+                related.extend(self.entries_referencing_sensation(sensation.id));
+            }
+            TimelineEntry::Impression(impression) => {
+                related.extend(self.entries.iter().filter(|entry| {
+                    matches!(
+                        entry,
+                        TimelineEntry::Sensation(sensation)
+                        if impression.sensation_ids.contains(&sensation.id)
+                    )
+                }));
+                related.extend(self.entries_referencing_impression(impression.id));
+            }
+            TimelineEntry::Experience(experience) => {
+                related.extend(self.entries.iter().filter(|entry| {
+                    matches!(
+                        entry,
+                        TimelineEntry::Impression(impression)
+                        if experience.impression_ids.contains(&impression.id)
+                    )
+                }));
+            }
+        }
+
+        related
     }
 
     /// Returns the number of entries in the frame.
