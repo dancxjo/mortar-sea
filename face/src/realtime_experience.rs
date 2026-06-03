@@ -159,14 +159,7 @@ fn build_prompt_from_records(records: &[SensationRecord]) -> String {
             vec![sensation.id],
             sensation.occurred_at,
             sensation.observed_at,
-            format!(
-                "A {} {} camera frame arrived from {} at {}x{}.",
-                record.source.faculty,
-                record.media.mime,
-                record.source.sensor_id,
-                record.media.width,
-                record.media.height
-            ),
+            format!("I see something with my eye ({}).", record.source.sensor_id),
         );
 
         frame.push(TimelineEntry::Sensation(sensation));

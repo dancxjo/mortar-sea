@@ -7,14 +7,14 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, bail};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, unbounded};
-use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::sampling::LlamaSampler;
-use llama_cpp_2::{LogOptions, send_logs_to_tracing};
+use llama_cpp_4::context::LlamaContext;
+use llama_cpp_4::context::params::LlamaContextParams;
+use llama_cpp_4::llama_backend::LlamaBackend;
+use llama_cpp_4::llama_batch::LlamaBatch;
+use llama_cpp_4::model::params::LlamaModelParams;
+use llama_cpp_4::model::{AddBos, LlamaModel, Special};
+use llama_cpp_4::sampling::LlamaSampler;
+use llama_cpp_4::{max_devices, supports_gpu_offload};
 use uuid::Uuid;
 
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
@@ -88,11 +88,8 @@ impl LlamaCppEngine {
         }
         let backend = llama_backend()?;
         let mut model_params = LlamaModelParams::default();
-        if config.cpu_only {
-            model_params = model_params.with_n_gpu_layers(0);
-        } else if let Some(gpu_layers) = config.gpu_layers {
-            model_params = model_params.with_n_gpu_layers(gpu_layers);
-        }
+        let gpu_layers = selected_gpu_layers(&config);
+        model_params = model_params.with_n_gpu_layers(gpu_layers);
         let model = LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
             .with_context(|| {
                 format!(
@@ -249,8 +246,7 @@ impl LlamaGenerationWorker {
         let ctx_params = if self.config.cpu_only {
             ctx_params
                 .with_offload_kqv(false)
-                .with_op_offload(false)
-                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED)
+                .with_flash_attention(false)
         } else {
             ctx_params
         };
@@ -338,8 +334,9 @@ impl LlamaGenerationWorker {
 
             let text = self
                 .model
-                .token_to_piece(token, &mut decoder, true, None)
+                .token_to_bytes_with_size(token, 64, Special::Plaintext, None)
                 .context("failed to decode llama.cpp token")?;
+            let (text, _, _) = decoder.decode_to_string(&text);
             if !text.is_empty() {
                 let outcome = stop_detector.push(&text);
                 if !outcome.text.is_empty()
@@ -372,7 +369,7 @@ fn within_generation_limit(generated_tokens: usize, max_tokens: Option<usize>) -
 fn commit_sampled_token(
     ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch<'_>,
-    token: llama_cpp_2::token::LlamaToken,
+    token: llama_cpp_4::token::LlamaToken,
     n_cur: &mut i32,
 ) -> Result<()> {
     batch.clear();
@@ -469,7 +466,7 @@ fn decode_appended_prompt(
 fn decode_prompt_tokens(
     ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch<'_>,
-    tokens: &[llama_cpp_2::token::LlamaToken],
+    tokens: &[llama_cpp_4::token::LlamaToken],
     n_cur: &mut i32,
     n_ctx: usize,
     label: &str,
@@ -597,10 +594,24 @@ fn llama_backend() -> Result<Arc<LlamaBackend>> {
         return Ok(Arc::clone(backend));
     }
 
-    send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
     let backend = Arc::new(LlamaBackend::init().context("failed to initialize llama.cpp backend")?);
     let _ = LLAMA_BACKEND.set(Arc::clone(&backend));
     Ok(backend)
+}
+
+fn selected_gpu_layers(config: &LlamaCppConfig) -> u32 {
+    if config.cpu_only || cpu_only_env_requested() || !supports_gpu_offload() || max_devices() == 0
+    {
+        return 0;
+    }
+
+    config.gpu_layers.unwrap_or(u32::MAX)
+}
+
+fn cpu_only_env_requested() -> bool {
+    std::env::var("MORTAR_LLAMA_CPU_ONLY")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn checked_total_tokens(
