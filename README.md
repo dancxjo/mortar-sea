@@ -30,6 +30,18 @@ A remembered thing re-enters cognition as something newly noticed.
 
 Memory is not a separate pathway.
 
+### Canonical memory recall semantics
+
+- **When recall occurs:** only when `Pipeline::recall_into_timeline` is called.
+- **How experiences are selected:** all experiences returned by `Memory::recall` at call time.
+- **Representation:** each recalled experience is reintroduced as one sensation with:
+  - `kind = "memory.related_experience"`
+  - `source = "memory"`
+  - JSON payload containing the serialized `Experience`
+  - `occurred_at` copied from the original experience
+- **Trigger mode:** explicit pull (not automatic, scheduled, or event-driven in `observe`).
+- **Timeline ordering:** recalled sensations are inserted through normal `TimelineFrame` insertion and therefore ordered by `occurred_at` with all other entries.
+
 ---
 
 ## Concepts

@@ -98,7 +98,15 @@ impl<M: Memory> Pipeline<M> {
         experiences
     }
 
-    /// Re-enter every recalled experience as an ordinary memory sensation.
+    /// Re-enter every currently recalled experience as an ordinary memory sensation.
+    ///
+    /// Canonical recall semantics:
+    /// - Recall is explicit pull, not automatic during [`Self::observe`].
+    /// - Selection is a full snapshot of `memory.recall()` at call time.
+    /// - Each recalled experience becomes one sensation with
+    ///   `kind = "memory.related_experience"` and `source = "memory"`.
+    /// - Recalled sensations are inserted into the [`TimelineFrame`] using normal
+    ///   timeline ordering by `occurred_at`.
     pub fn recall_into_timeline(&mut self) -> Vec<Sensation> {
         let sensations: Vec<Sensation> = self
             .memory
@@ -134,7 +142,12 @@ fn experience_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::{MockEmitter, MockFaculty, MockFacultyRule, MockWit, MockWitRule};
+    use crate::mock::{
+        MockEmitter, MockFaculty, MockFacultyRule, MockWit, MockWitRule, ScriptedMemory,
+    };
+    use crate::time::now;
+    use chrono::Duration;
+    use serde_json::json;
 
     #[test]
     fn pipeline_orchestrates_sensation_to_experience_storage() {
@@ -164,5 +177,69 @@ mod tests {
             .entries()
             .iter()
             .any(|entry| matches!(entry, TimelineEntry::Experience(_))));
+    }
+
+    #[test]
+    fn recall_is_explicit_pull_not_observe_side_effect() {
+        let earlier = now();
+        let remembered = Experience::new(vec![], earlier, earlier, "Remembered meaning.");
+        let later = earlier + Duration::seconds(5);
+
+        let mut pipeline = Pipeline::new(ScriptedMemory::new(vec![remembered]));
+        pipeline.observe(Sensation::new(
+            "vision.frame",
+            "camera",
+            later,
+            later,
+            json!({}),
+        ));
+
+        assert!(!pipeline.timeline().entries().iter().any(|entry| {
+            matches!(
+                entry,
+                TimelineEntry::Sensation(s) if s.kind == "memory.related_experience"
+            )
+        }));
+
+        let recalled = pipeline.recall_into_timeline();
+        assert_eq!(recalled.len(), 1);
+        assert_eq!(recalled[0].kind, "memory.related_experience");
+        assert_eq!(recalled[0].source, "memory");
+    }
+
+    #[test]
+    fn recall_selection_and_timeline_order_are_canonical() {
+        let t0 = now();
+        let t1 = t0 + Duration::seconds(1);
+        let t2 = t0 + Duration::seconds(2);
+
+        let late = Experience::new(vec![], t2, t2, "Late meaning.");
+        let early = Experience::new(vec![], t0, t0, "Early meaning.");
+        let mut pipeline = Pipeline::new(ScriptedMemory::new(vec![late.clone(), early.clone()]));
+
+        let recalled = pipeline.recall_into_timeline();
+        assert_eq!(recalled.len(), 2);
+
+        let recalled_experiences: Vec<Experience> = recalled
+            .iter()
+            .map(|s| serde_json::from_value(s.payload.clone()).expect("experience payload"))
+            .collect();
+        assert_eq!(recalled_experiences[0].what, late.what);
+        assert_eq!(recalled_experiences[1].what, early.what);
+
+        pipeline.observe(Sensation::new("vision.frame", "camera", t1, t1, json!({})));
+
+        let memory_sensation_times: Vec<_> = pipeline
+            .timeline()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Sensation(s) if s.kind == "memory.related_experience" => {
+                    Some(s.occurred_at)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(memory_sensation_times, vec![t0, t2]);
     }
 }
