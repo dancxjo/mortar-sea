@@ -150,6 +150,7 @@ This repository currently provides:
 - cognitive data structures
 - timeline abstractions
 - memory abstractions
+- a canonical cognition `Pipeline` abstraction
 - Faculty and Wit traits
 
 This repository intentionally does not yet provide concrete implementations for:

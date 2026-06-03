@@ -1,11 +1,11 @@
 use serde_json::{json, Value};
-use std::collections::HashSet;
 
 use crate::{
     experience::Experience,
     faculty::Faculty,
     impression::Impression,
-    memory::{InMemory, Memory},
+    memory::InMemory,
+    pipeline::Pipeline,
     sensation::Sensation,
     time::now,
     timeline::{TimelineEntry, TimelineFrame},
@@ -202,10 +202,7 @@ impl Wit for MockWit {
 /// A small end-to-end harness backed by deterministic mock components.
 #[derive(Default)]
 pub struct MockCognition {
-    timeline: TimelineFrame,
-    memory: InMemory,
-    faculties: Vec<Box<dyn Faculty>>,
-    wits: Vec<Box<dyn Wit>>,
+    pipeline: Pipeline<InMemory>,
 }
 
 impl MockCognition {
@@ -214,21 +211,21 @@ impl MockCognition {
     }
 
     pub fn with_faculty(mut self, faculty: impl Faculty + 'static) -> Self {
-        self.faculties.push(Box::new(faculty));
+        self.pipeline = self.pipeline.with_faculty(faculty);
         self
     }
 
     pub fn with_wit(mut self, wit: impl Wit + 'static) -> Self {
-        self.wits.push(Box::new(wit));
+        self.pipeline = self.pipeline.with_wit(wit);
         self
     }
 
     pub fn timeline(&self) -> &TimelineFrame {
-        &self.timeline
+        self.pipeline.timeline()
     }
 
     pub fn memory(&self) -> &InMemory {
-        &self.memory
+        self.pipeline.memory()
     }
 
     /// Present a sensation to the mock system and run the full core loop:
@@ -238,56 +235,12 @@ impl MockCognition {
     /// duplicate accumulation across observations, experiences that match an
     /// already-stored experience are skipped before storage.
     pub fn observe(&mut self, sensation: Sensation) -> Vec<Experience> {
-        let mut pending = vec![sensation];
-
-        while let Some(sensation) = pending.pop() {
-            self.timeline
-                .push(TimelineEntry::Sensation(sensation.clone()));
-
-            for faculty in &mut self.faculties {
-                let (derived_sensations, impressions) = faculty.process(&sensation);
-
-                for impression in impressions {
-                    self.timeline.push(TimelineEntry::Impression(impression));
-                }
-
-                pending.extend(derived_sensations);
-            }
-        }
-
-        let mut experiences = Vec::new();
-        let mut known_experience_keys: HashSet<_> =
-            self.memory.recall().iter().map(experience_key).collect();
-        for wit in &mut self.wits {
-            for experience in wit.interpret(&self.timeline) {
-                if !known_experience_keys.insert(experience_key(&experience)) {
-                    continue;
-                }
-
-                self.memory.store(experience.clone());
-                self.timeline.push(TimelineEntry::Experience(experience.clone()));
-                experiences.push(experience);
-            }
-        }
-
-        experiences
+        self.pipeline.observe(sensation)
     }
 
     /// Re-enter every recalled experience as an ordinary memory sensation.
     pub fn recall_into_timeline(&mut self) -> Vec<Sensation> {
-        let sensations: Vec<Sensation> = self
-            .memory
-            .recall()
-            .iter()
-            .map(InMemory::experience_to_sensation)
-            .collect();
-
-        for sensation in &sensations {
-            self.timeline
-                .push(TimelineEntry::Sensation(sensation.clone()));
-        }
-
-        sensations
+        self.pipeline.recall_into_timeline()
     }
 }
 
@@ -304,28 +257,10 @@ fn render_template(template: &str, sensation: &Sensation) -> String {
         .replace("{text}", text)
 }
 
-/// Canonical identity for deduplicating reinterpretation results.
-///
-/// Two experiences are treated as equivalent when they represent the same
-/// meaning (`what`), drawn from the same impression IDs, at the same
-/// `occurred_at` instant, regardless of generated UUID or `observed_at`.
-fn experience_key(
-    experience: &Experience,
-) -> (
-    Vec<uuid::Uuid>,
-    chrono::DateTime<chrono::Utc>,
-    String,
-) {
-    (
-        experience.impression_ids.clone(),
-        experience.occurred_at,
-        experience.what.clone(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Memory;
     use chrono::Duration;
 
     #[test]
