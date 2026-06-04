@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 
 use psyche::{
-    GenerationRequest, Impression, Sensation, TimelineEntry, TimelineFrame,
-    realtime_experience::format_realtime_experience_prompt,
+    ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest, Impression, Sensation,
+    TimelineEntry, TimelineFrame, realtime_experience::format_realtime_experience_prompt,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -179,7 +179,9 @@ fn build_prompt_from_records(
         frame.push(TimelineEntry::Impression(impression));
     }
 
-    format_realtime_experience_prompt(frame.entries())
+    let context_frame =
+        ContextFrame::from_timeline(&frame, frame.entries(), DEFAULT_CONTEXT_FRAME_ITEMS);
+    format_realtime_experience_prompt(&context_frame, frame.entries())
 }
 
 fn fallback_impression_for_record(record: &SensationRecord) -> String {
