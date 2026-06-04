@@ -17,6 +17,7 @@ const DEFAULT_CLUSTER_GAP_MS: i64 = 1_000;
 const DEFAULT_MAX_PROMPT_ENTRIES: usize = 48;
 const DEFAULT_MAX_TOKENS: usize = 256;
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+const MILLIS_PER_SECOND: f64 = 1_000.0;
 
 /// First-pass real-time comprehension Wit.
 ///
@@ -33,6 +34,7 @@ pub struct RealTimeExperienceConfig {
     /// Temporal window ending at the latest timeline event.
     pub window_ms: i64,
     /// Maximum gap between neighboring events before they split into clusters.
+    /// Negative values are treated as zero.
     pub cluster_gap_ms: i64,
     /// Hard cap to keep prompts bounded when many events share a short window.
     pub max_prompt_entries: usize,
@@ -201,8 +203,8 @@ fn format_cluster_boundary(cluster: &EventCluster, start: DateTime<Utc>) -> Stri
         .signed_duration_since(start)
         .num_milliseconds();
     let end_elapsed_ms = cluster.end.signed_duration_since(start).num_milliseconds();
-    let start_seconds = start_elapsed_ms as f64 / 1000.0;
-    let end_seconds = end_elapsed_ms as f64 / 1000.0;
+    let start_seconds = start_elapsed_ms as f64 / MILLIS_PER_SECOND;
+    let end_seconds = end_elapsed_ms as f64 / MILLIS_PER_SECOND;
 
     format!("[T+{start_seconds:06.3} - T+{end_seconds:06.3}]\n")
 }
@@ -212,7 +214,7 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
         .occurred_at()
         .signed_duration_since(start)
         .num_milliseconds();
-    let seconds = elapsed_ms as f64 / 1000.0;
+    let seconds = elapsed_ms as f64 / MILLIS_PER_SECOND;
 
     match entry {
         TimelineEntry::Sensation(sensation) => format!(
