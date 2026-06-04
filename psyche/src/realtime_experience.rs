@@ -8,11 +8,12 @@ use crate::{
     context_frame::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS},
     experience::Experience,
     llm::{GenerationRequest, LlmEngine, LlmEvent},
-    timeline::{TimelineEntry, TimelineFrame},
+    timeline::{EventCluster, TimelineEntry, TimelineFrame, event_clusters},
     wit::Wit,
 };
 
 const DEFAULT_WINDOW_MS: i64 = 2_000;
+const DEFAULT_CLUSTER_GAP_MS: i64 = 1_000;
 const DEFAULT_MAX_PROMPT_ENTRIES: usize = 48;
 const DEFAULT_MAX_TOKENS: usize = 256;
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,6 +32,8 @@ pub struct RealTimeExperienceWit<E> {
 pub struct RealTimeExperienceConfig {
     /// Temporal window ending at the latest timeline event.
     pub window_ms: i64,
+    /// Maximum gap between neighboring events before they split into clusters.
+    pub cluster_gap_ms: i64,
     /// Hard cap to keep prompts bounded when many events share a short window.
     pub max_prompt_entries: usize,
     pub max_tokens: usize,
@@ -41,6 +44,7 @@ impl Default for RealTimeExperienceConfig {
     fn default() -> Self {
         Self {
             window_ms: DEFAULT_WINDOW_MS,
+            cluster_gap_ms: DEFAULT_CLUSTER_GAP_MS,
             max_prompt_entries: DEFAULT_MAX_PROMPT_ENTRIES,
             max_tokens: DEFAULT_MAX_TOKENS,
             poll_timeout: DEFAULT_POLL_TIMEOUT,
@@ -83,7 +87,11 @@ impl<E: LlmEngine> Wit for RealTimeExperienceWit<E> {
 
         let context_frame =
             ContextFrame::from_timeline(frame, &window, DEFAULT_CONTEXT_FRAME_ITEMS);
-        let prompt = format_realtime_experience_prompt(&context_frame, &window);
+        let prompt = format_realtime_experience_prompt_with_cluster_gap(
+            &context_frame,
+            &window,
+            self.config.cluster_gap_ms,
+        );
         let request = GenerationRequest {
             prompt,
             max_tokens: Some(self.config.max_tokens),
@@ -142,6 +150,18 @@ pub fn format_realtime_experience_prompt(
     context_frame: &ContextFrame,
     entries: &[TimelineEntry],
 ) -> String {
+    format_realtime_experience_prompt_with_cluster_gap(
+        context_frame,
+        entries,
+        DEFAULT_CLUSTER_GAP_MS,
+    )
+}
+
+fn format_realtime_experience_prompt_with_cluster_gap(
+    context_frame: &ContextFrame,
+    entries: &[TimelineEntry],
+    cluster_gap_ms: i64,
+) -> String {
     let Some(first) = entries.first() else {
         return String::new();
     };
@@ -158,11 +178,33 @@ pub fn format_realtime_experience_prompt(
     prompt.push_str(&context_frame.render());
     prompt.push_str("Timeline:\n");
 
-    for entry in entries {
-        prompt.push_str(&format_timeline_entry(entry, start));
+    let clusters = event_clusters(
+        entries,
+        chrono::Duration::milliseconds(cluster_gap_ms.max(0)),
+    );
+    for (index, cluster) in clusters.iter().enumerate() {
+        if index > 0 {
+            prompt.push('\n');
+        }
+        prompt.push_str(&format_cluster_boundary(cluster, start));
+        for entry in &cluster.entries {
+            prompt.push_str(&format_timeline_entry(entry, start));
+        }
     }
 
     prompt
+}
+
+fn format_cluster_boundary(cluster: &EventCluster, start: DateTime<Utc>) -> String {
+    let start_elapsed_ms = cluster
+        .start
+        .signed_duration_since(start)
+        .num_milliseconds();
+    let end_elapsed_ms = cluster.end.signed_duration_since(start).num_milliseconds();
+    let start_seconds = start_elapsed_ms as f64 / 1000.0;
+    let end_seconds = end_elapsed_ms as f64 / 1000.0;
+
+    format!("[T+{start_seconds:06.3} - T+{end_seconds:06.3}]\n")
 }
 
 fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String {
@@ -370,6 +412,96 @@ mod tests {
         assert!(prompt.contains("WHEN\n- "));
         assert!(prompt.contains("HOW\n- ASR Faculty\n"));
         assert!(prompt.contains("\nTimeline:\n"));
+    }
+
+    #[test]
+    fn prompt_renders_converging_events_inside_one_cluster() {
+        let t0 = Utc::now();
+        let face = Sensation::new("vision.face_crop", "camera", t0, t0, json!({}));
+        let recognition = Impression::new(
+            vec![face.id],
+            t0 + ChronoDuration::milliseconds(180),
+            t0 + ChronoDuration::milliseconds(180),
+            "That face looks like Tim.",
+        );
+        let speech = Sensation::new(
+            "audio.utterance",
+            "mic",
+            t0 + ChronoDuration::milliseconds(420),
+            t0 + ChronoDuration::milliseconds(420),
+            json!({"text": "hello"}),
+        );
+        let recall = Sensation::new(
+            "memory.related_experience",
+            "memory",
+            t0 + ChronoDuration::milliseconds(650),
+            t0 + ChronoDuration::milliseconds(650),
+            json!({"what": "Tim often says hello first."}),
+        );
+        let later = Sensation::new(
+            "vision.frame",
+            "camera",
+            t0 + ChronoDuration::seconds(3),
+            t0 + ChronoDuration::seconds(3),
+            json!({}),
+        );
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(later.clone()));
+        frame.push(TimelineEntry::Sensation(speech.clone()));
+        frame.push(TimelineEntry::Impression(recognition.clone()));
+        frame.push(TimelineEntry::Sensation(face.clone()));
+        frame.push(TimelineEntry::Sensation(recall.clone()));
+
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt_with_cluster_gap(
+            &context_frame,
+            frame.entries(),
+            800,
+        );
+
+        assert!(prompt.contains("[T+00.000 - T+00.650]"));
+        assert!(prompt.contains("[T+03.000 - T+03.000]"));
+        let first_cluster_end = prompt.find("[T+03.000 - T+03.000]").unwrap();
+        assert!(prompt[..first_cluster_end].contains("SENSATION vision.face_crop"));
+        assert!(prompt[..first_cluster_end].contains("That face looks like Tim."));
+        assert!(prompt[..first_cluster_end].contains("SENSATION audio.utterance"));
+        assert!(prompt[..first_cluster_end].contains("SENSATION memory.related_experience"));
+    }
+
+    #[test]
+    fn prompt_keeps_contradictory_evidence_visible_inside_same_cluster() {
+        let t0 = Utc::now();
+        let face = Sensation::new("vision.face_crop", "camera", t0, t0, json!({}));
+        let likely_tim = Impression::new(
+            vec![face.id],
+            t0 + ChronoDuration::milliseconds(120),
+            t0 + ChronoDuration::milliseconds(120),
+            "That face looks like Tim.",
+        );
+        let not_tim = Impression::new(
+            vec![face.id],
+            t0 + ChronoDuration::milliseconds(260),
+            t0 + ChronoDuration::milliseconds(260),
+            "That face may not be Tim after all.",
+        );
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(face));
+        frame.push(TimelineEntry::Impression(likely_tim));
+        frame.push(TimelineEntry::Impression(not_tim));
+
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt_with_cluster_gap(
+            &context_frame,
+            frame.entries(),
+            500,
+        );
+
+        assert!(prompt.contains("[T+00.000 - T+00.260]"));
+        assert!(prompt.contains("That face looks like Tim."));
+        assert!(prompt.contains("That face may not be Tim after all."));
+        assert_eq!(prompt.matches("[T+").count(), 1);
     }
 
     #[test]
