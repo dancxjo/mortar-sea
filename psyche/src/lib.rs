@@ -39,5 +39,5 @@ pub use mock::*;
 pub use pipeline::Pipeline;
 pub use realtime_experience::{RealTimeExperienceConfig, RealTimeExperienceWit};
 pub use sensation::{Provenance, ProvenanceKind, Sensation};
-pub use timeline::{TimelineEntry, TimelineEntryKind, TimelineFrame};
+pub use timeline::{EventCluster, TimelineEntry, TimelineEntryKind, TimelineFrame, event_clusters};
 pub use wit::{RegisteredWit, Wit, WitCadence, WitFilter, WitRegistry, WitRegistryError};

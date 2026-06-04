@@ -16,6 +16,14 @@ pub enum TimelineEntry {
     Experience(Experience),
 }
 
+/// A temporally local group of nearby timeline entries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventCluster {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub entries: Vec<TimelineEntry>,
+}
+
 /// A coarse type discriminator for [`TimelineEntry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimelineEntryKind {
@@ -91,6 +99,41 @@ impl TimelineEntry {
             TimelineEntry::Sensation(sensation) if sensation.provenance.references_experience(experience_id)
         )
     }
+}
+
+/// Partition a chronologically ordered slice of timeline entries into nearby
+/// clusters.
+///
+/// A new cluster begins whenever the gap between consecutive entries exceeds
+/// `max_gap`. The original entry ordering is preserved inside each cluster.
+pub fn event_clusters(entries: &[TimelineEntry], max_gap: chrono::Duration) -> Vec<EventCluster> {
+    let Some(first) = entries.first() else {
+        return Vec::new();
+    };
+
+    let mut clusters = vec![EventCluster {
+        start: first.occurred_at(),
+        end: first.occurred_at(),
+        entries: vec![first.clone()],
+    }];
+
+    for entry in &entries[1..] {
+        let cluster = clusters.last_mut().expect("clusters is never empty");
+        let gap = entry.occurred_at().signed_duration_since(cluster.end);
+
+        if gap <= max_gap {
+            cluster.end = entry.occurred_at();
+            cluster.entries.push(entry.clone());
+        } else {
+            clusters.push(EventCluster {
+                start: entry.occurred_at(),
+                end: entry.occurred_at(),
+                entries: vec![entry.clone()],
+            });
+        }
+    }
+
+    clusters
 }
 
 /// A heterogeneous, time-ordered collection of cognitive events.
@@ -297,6 +340,73 @@ mod tests {
         assert!(matches!(frame.entries()[1], TimelineEntry::Impression(_)));
         assert!(matches!(frame.entries()[2], TimelineEntry::Sensation(_)));
         assert!(matches!(frame.entries()[3], TimelineEntry::Experience(_)));
+    }
+
+    #[test]
+    fn event_clusters_group_nearby_entries_and_preserve_order() {
+        let t0 = now();
+        let s0 = Sensation::new("vision.face_crop", "camera", t0, t0, json!({}));
+        let i0 = Impression::new(
+            vec![s0.id],
+            t0 + Duration::milliseconds(180),
+            t0 + Duration::milliseconds(180),
+            "That face looks like Tim.",
+        );
+        let s1 = Sensation::new(
+            "audio.utterance",
+            "mic",
+            t0 + Duration::milliseconds(420),
+            t0 + Duration::milliseconds(420),
+            json!({"text": "hello"}),
+        );
+        let i1 = Impression::new(
+            vec![s0.id],
+            t0 + Duration::seconds(2),
+            t0 + Duration::seconds(2),
+            "The speaker may be someone else.",
+        );
+
+        let entries = vec![
+            TimelineEntry::Sensation(s0.clone()),
+            TimelineEntry::Impression(i0.clone()),
+            TimelineEntry::Sensation(s1.clone()),
+            TimelineEntry::Impression(i1.clone()),
+        ];
+
+        let clusters = event_clusters(&entries, Duration::milliseconds(500));
+
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0].start, s0.occurred_at);
+        assert_eq!(clusters[0].end, s1.occurred_at);
+        assert_eq!(clusters[0].entries.len(), 3);
+        assert_eq!(clusters[0].entries[0].id(), s0.id);
+        assert_eq!(clusters[0].entries[1].id(), i0.id);
+        assert_eq!(clusters[0].entries[2].id(), s1.id);
+        assert_eq!(clusters[1].start, i1.occurred_at);
+        assert_eq!(clusters[1].end, i1.occurred_at);
+    }
+
+    #[test]
+    fn event_clusters_obey_configured_gap_threshold() {
+        let t0 = now();
+        let a =
+            TimelineEntry::Sensation(Sensation::new("vision.frame", "camera", t0, t0, json!({})));
+        let b = TimelineEntry::Sensation(Sensation::new(
+            "vision.face_crop",
+            "camera",
+            t0 + Duration::milliseconds(600),
+            t0 + Duration::milliseconds(600),
+            json!({}),
+        ));
+
+        assert_eq!(
+            event_clusters(&[a.clone(), b.clone()], Duration::milliseconds(300)).len(),
+            2
+        );
+        assert_eq!(
+            event_clusters(&[a, b], Duration::milliseconds(800)).len(),
+            1
+        );
     }
 
     /// A delayed sensation has `observed_at` after `occurred_at`.
