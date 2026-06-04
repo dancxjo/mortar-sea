@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use psyche::Provenance;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,7 +26,7 @@ pub(crate) struct SensationRecord {
     pub(crate) source: SensationSource,
     pub(crate) sequence: u64,
     pub(crate) media: MediaRecord,
-    pub(crate) provenance: ProvenanceRecord,
+    pub(crate) provenance: Provenance,
     pub(crate) data_sha256: String,
     pub(crate) data_bytes: usize,
 }
@@ -60,11 +61,6 @@ pub(crate) struct MediaRecord {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) encoding: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub(crate) struct ProvenanceRecord {
-    pub(crate) r#type: String,
 }
 
 #[derive(Debug, Serialize)]

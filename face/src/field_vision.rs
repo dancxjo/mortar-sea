@@ -192,9 +192,7 @@ mod tests {
                     height: 224,
                     encoding: "base64-data-url".to_string(),
                 },
-                provenance: crate::messages::ProvenanceRecord {
-                    r#type: "direct".to_string(),
-                },
+                provenance: psyche::Provenance::direct(),
                 data_sha256: "abc".to_string(),
                 data_bytes: data.len(),
             },

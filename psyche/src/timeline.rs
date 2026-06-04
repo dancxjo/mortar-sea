@@ -67,10 +67,15 @@ impl TimelineEntry {
 
     /// Returns true when this entry directly references the sensation.
     pub fn references_sensation(&self, sensation_id: Uuid) -> bool {
-        matches!(
-            self,
-            TimelineEntry::Impression(impression) if impression.sensation_ids.contains(&sensation_id)
-        )
+        match self {
+            TimelineEntry::Sensation(sensation) => {
+                sensation.provenance.references_sensation(sensation_id)
+            }
+            TimelineEntry::Impression(impression) => {
+                impression.sensation_ids.contains(&sensation_id)
+            }
+            TimelineEntry::Experience(_) => false,
+        }
     }
 
     /// Returns true when this entry directly references the impression.
@@ -78,6 +83,14 @@ impl TimelineEntry {
         matches!(
             self,
             TimelineEntry::Experience(experience) if experience.impression_ids.contains(&impression_id)
+        )
+    }
+
+    /// Returns true when this entry directly references the experience.
+    pub fn references_experience(&self, experience_id: Uuid) -> bool {
+        matches!(
+            self,
+            TimelineEntry::Sensation(sensation) if sensation.provenance.references_experience(experience_id)
         )
     }
 }
@@ -166,6 +179,16 @@ impl TimelineFrame {
             .filter(move |entry| entry.references_impression(impression_id))
     }
 
+    /// Returns entries that directly reference an experience id.
+    pub fn entries_referencing_experience(
+        &self,
+        experience_id: Uuid,
+    ) -> impl Iterator<Item = &TimelineEntry> + '_ {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.references_experience(experience_id))
+    }
+
     /// Returns entries with `occurred_at` in the inclusive window.
     pub fn entries_between(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> &[TimelineEntry] {
         if start > end {
@@ -217,6 +240,7 @@ impl TimelineFrame {
                         if experience.impression_ids.contains(&impression.id)
                     )
                 }));
+                related.extend(self.entries_referencing_experience(experience.id));
             }
         }
 
@@ -423,6 +447,10 @@ mod tests {
             parent.occurred_at, // inherited from parent
             parent.observed_at, // inherited from parent
             json!({"face_id": 1}),
+        )
+        .with_provenance(
+            crate::sensation::Provenance::derived_from_sensation(parent.id)
+                .with_faculty("face_detector"),
         );
 
         assert_eq!(
@@ -443,5 +471,42 @@ mod tests {
         assert!(times.windows(2).all(|w| w[0] <= w[1]));
         assert_eq!(times[0], frame_occurred);
         assert_eq!(times[1], frame_occurred);
+        let related = tl.related_entries(parent.id);
+        assert_eq!(related.len(), 1);
+        assert!(matches!(
+            related[0],
+            TimelineEntry::Sensation(sensation)
+            if sensation.kind == "vision.face_crop" && sensation.provenance.references_sensation(parent.id)
+        ));
+    }
+
+    #[test]
+    fn memory_recall_provenance_links_back_to_experience() {
+        let t0 = now();
+        let experience = Experience::new(vec![], t0, t0, "A recalled memory.");
+        let recalled = Sensation::new(
+            "memory.related_experience",
+            "memory",
+            t0,
+            t0 + Duration::seconds(1),
+            json!({}),
+        )
+        .with_provenance(crate::sensation::Provenance::memory_recall(experience.id));
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Experience(experience.clone()));
+        frame.push(TimelineEntry::Sensation(recalled.clone()));
+
+        let related = frame.related_entries(experience.id);
+        assert_eq!(related.len(), 1);
+        assert!(matches!(
+            related[0],
+            TimelineEntry::Sensation(sensation)
+            if sensation.id == recalled.id && sensation.provenance.references_experience(experience.id)
+        ));
+        assert_eq!(
+            frame.entries_referencing_experience(experience.id).count(),
+            1
+        );
     }
 }
