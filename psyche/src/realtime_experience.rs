@@ -96,6 +96,7 @@ impl<E: LlmEngine> Wit for RealTimeExperienceWit<E> {
         );
         let request = GenerationRequest {
             prompt,
+            messages: Vec::new(),
             max_tokens: Some(self.config.max_tokens),
             stop: Vec::new(),
         };

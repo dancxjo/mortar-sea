@@ -33,7 +33,7 @@ pub use faculty::{Faculty, FacultyRegistry, FacultyRegistryError, RegisteredFacu
 pub use impression::Impression;
 pub use link::{ExperienceLink, ExperienceLinkKind};
 pub use llama_cpp::{LlamaCppConfig, LlamaCppEngine};
-pub use llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent, MockLlmEngine};
+pub use llm::{ChatMessage, GenerationId, GenerationRequest, LlmEngine, LlmEvent, MockLlmEngine};
 pub use memory::{InMemory, InMemoryLinked, LinkedMemory, Memory};
 pub use mock::*;
 pub use pipeline::Pipeline;

@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use psyche::GenerationRequest;
+use psyche::{ChatMessage, GenerationRequest};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -71,7 +71,11 @@ async fn describe_field_of_vision(
         .generate(
             LlmJobKind::FieldVision,
             GenerationRequest {
-                prompt,
+                prompt: String::new(),
+                messages: vec![
+                    ChatMessage::new("system", field_vision_system_prompt()),
+                    ChatMessage::new("user", prompt),
+                ],
                 max_tokens: Some(MAX_FIELD_VISION_TOKENS),
                 stop: llm_stop_markers(),
             },
@@ -89,26 +93,23 @@ fn oversized_field_impression(frame: &RawVisionFrame) -> String {
 }
 
 fn llm_stop_markers() -> Vec<String> {
-    vec![
-        "<turn|>".to_string(),
-        "<|turn>user".to_string(),
-        "<|turn>system".to_string(),
-        "<|turn>model".to_string(),
-    ]
+    vec!["<turn|>".to_string()]
+}
+
+fn field_vision_system_prompt() -> &'static str {
+    "You are the field-vision faculty between the eye and the Wit. \
+You receive my live field of vision, not a detached image.\n\
+Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
+If people are visible, do not assume any visible person is me unless the field of vision is clearly a mirror or reflection.\n\
+Do not mention screenshots, photos, frames, cameras, metadata, data URLs, or analysis. Return only the impression sentence."
 }
 
 fn build_field_vision_prompt(frame: &RawVisionFrame) -> String {
     format!(
-        "<|turn>system\n\
-You are the field-vision faculty between the eye and the Wit. You receive my live field of vision, not a detached image.\n\
-Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
-If people are visible, do not assume any visible person is me unless the field of vision is clearly a mirror or reflection.\n\
-Do not mention screenshots, photos, frames, cameras, metadata, data URLs, or analysis. Return only the impression sentence.<turn|>\n\
-<|turn>user\n\
-The next visual payload is my current field of vision.\n\
+        "The next visual payload is my current field of vision.\n\
 source={} sequence={} occurred_at={} size={}x{} mime={}\n\
-<start_of_image>\n{}\n<end_of_image><turn|>\n\
-<|turn>model\n",
+<start_of_image>\n{}\n<end_of_image>\n\
+",
         frame.sensation.source.sensor_id,
         frame.sensation.sequence,
         frame.sensation.occurred_at.to_rfc3339(),
@@ -206,10 +207,11 @@ mod tests {
     #[test]
     fn field_vision_prompt_names_live_field_of_vision() {
         let prompt = build_field_vision_prompt(&raw_frame("data:image/jpeg;base64,abc123"));
+        let system = field_vision_system_prompt();
 
-        assert!(prompt.contains("my live field of vision"));
-        assert!(prompt.contains("not a detached image"));
-        assert!(prompt.contains("unless the field of vision is clearly a mirror or reflection"));
+        assert!(system.contains("my live field of vision"));
+        assert!(system.contains("not a detached image"));
+        assert!(system.contains("unless the field of vision is clearly a mirror or reflection"));
         assert!(prompt.contains("<start_of_image>\ndata:image/jpeg;base64,abc123\n<end_of_image>"));
     }
 

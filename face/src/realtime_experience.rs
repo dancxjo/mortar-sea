@@ -1,8 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use psyche::{
-    ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest, Impression, Sensation,
-    TimelineEntry, TimelineFrame, realtime_experience::format_realtime_experience_prompt,
+    ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest, Impression,
+    Sensation, TimelineEntry, TimelineFrame,
+    realtime_experience::format_realtime_experience_prompt,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -90,7 +91,14 @@ async fn stream_generation(
         .stream(
             LlmJobKind::RealtimeExperience,
             GenerationRequest {
-                prompt: wrap_gemma4_prompt(&prompt),
+                prompt: String::new(),
+                messages: vec![
+                    ChatMessage::new(
+                        "system",
+                        "You are the real-time Experience generator. Return only the requested JSON.",
+                    ),
+                    ChatMessage::new("user", prompt),
+                ],
                 max_tokens: Some(256),
                 stop: llm_stop_markers(),
             },
@@ -104,19 +112,8 @@ async fn stream_generation(
         .await
 }
 
-fn wrap_gemma4_prompt(prompt: &str) -> String {
-    format!(
-        "<|turn>system\nYou are the real-time Experience generator. Return only the requested JSON.<turn|>\n<|turn>user\n{prompt}<turn|>\n<|turn>model\n"
-    )
-}
-
 fn llm_stop_markers() -> Vec<String> {
-    vec![
-        "<turn|>".to_string(),
-        "<|turn>user".to_string(),
-        "<|turn>system".to_string(),
-        "<|turn>model".to_string(),
-    ]
+    vec!["<turn|>".to_string()]
 }
 
 fn build_prompt_from_records(

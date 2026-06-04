@@ -12,9 +12,25 @@ pub struct GenerationId(pub Uuid);
 #[derive(Debug, Clone, Default)]
 pub struct GenerationRequest {
     pub prompt: String,
+    pub messages: Vec<ChatMessage>,
     /// Maximum generated tokens, or no explicit generation cap.
     pub max_tokens: Option<usize>,
     pub stop: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +126,7 @@ mod tests {
         let id = engine
             .start(GenerationRequest {
                 prompt: "say hello".to_owned(),
+                messages: Vec::new(),
                 max_tokens: None,
                 stop: Vec::new(),
             })

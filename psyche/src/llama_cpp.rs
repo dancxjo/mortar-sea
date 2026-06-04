@@ -12,7 +12,7 @@ use llama_cpp_4::context::params::LlamaContextParams;
 use llama_cpp_4::llama_backend::LlamaBackend;
 use llama_cpp_4::llama_batch::LlamaBatch;
 use llama_cpp_4::model::params::LlamaModelParams;
-use llama_cpp_4::model::{AddBos, LlamaModel, Special};
+use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::{max_devices, supports_gpu_offload};
 use tracing::{debug, trace};
@@ -254,8 +254,13 @@ impl LlamaGenerationWorker {
     fn run(self, sender: &crossbeam_channel::Sender<LlmEvent>) -> Result<GenerationOutcome> {
         let context_size = NonZeroU32::new(self.config.context_size)
             .context("llama.cpp context_size must be greater than zero")?;
-        let max_total_tokens =
-            checked_total_tokens(&self.request.prompt, &self.model, self.request.max_tokens)?;
+        let prompt = resolve_prompt(&self.model, &self.request)?;
+        let max_total_tokens = checked_total_tokens(
+            &prompt.text,
+            prompt.add_bos,
+            &self.model,
+            self.request.max_tokens,
+        )?;
 
         let thread_count =
             i32::try_from(self.config.threads).context("threads exceeds i32::MAX")?;
@@ -277,7 +282,7 @@ impl LlamaGenerationWorker {
 
         let prompt_tokens = self
             .model
-            .str_to_token(&self.request.prompt, AddBos::Always)
+            .str_to_token(&prompt.text, prompt.add_bos)
             .context("failed to tokenize prompt")?;
         if prompt_tokens.is_empty() {
             bail!("prompt produced no tokens");
@@ -351,6 +356,13 @@ impl LlamaGenerationWorker {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             sampler.accept(token);
             if self.model.is_eog_token(token) {
+                debug!(
+                    generation_id = %self.id.0,
+                    generated_tokens,
+                    token_id = token.0,
+                    token_text = ?token_text_lossy(&self.model, token),
+                    "llama.cpp generation sampled end-of-generation token"
+                );
                 if self.request.max_tokens.is_some() {
                     debug!(
                         generation_id = %self.id.0,
@@ -421,6 +433,34 @@ impl LlamaGenerationWorker {
         );
         Ok(GenerationOutcome::Completed)
     }
+}
+
+struct ResolvedPrompt {
+    text: String,
+    add_bos: AddBos,
+}
+
+fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<ResolvedPrompt> {
+    if request.messages.is_empty() {
+        return Ok(ResolvedPrompt {
+            text: request.prompt.clone(),
+            add_bos: AddBos::Always,
+        });
+    }
+
+    let messages = request
+        .messages
+        .iter()
+        .map(|message| LlamaChatMessage::new(message.role.clone(), message.content.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to build llama.cpp chat messages")?;
+    let text = model
+        .apply_chat_template(None, &messages, true)
+        .context("failed to apply llama.cpp chat template")?;
+    Ok(ResolvedPrompt {
+        text,
+        add_bos: AddBos::Never,
+    })
 }
 
 fn within_generation_limit(generated_tokens: usize, max_tokens: Option<usize>) -> bool {
@@ -715,11 +755,12 @@ fn cuda_hidden_by_env() -> bool {
 
 fn checked_total_tokens(
     prompt: &str,
+    add_bos: AddBos,
     model: &LlamaModel,
     max_tokens: Option<usize>,
 ) -> Result<usize> {
     let prompt_tokens = model
-        .str_to_token(prompt, AddBos::Always)
+        .str_to_token(prompt, add_bos)
         .context("failed to tokenize prompt")?
         .len();
     match max_tokens {
@@ -733,6 +774,13 @@ fn checked_total_tokens(
         }
         None => Ok(prompt_tokens),
     }
+}
+
+fn token_text_lossy(model: &LlamaModel, token: llama_cpp_4::token::LlamaToken) -> Option<String> {
+    model
+        .token_to_bytes_with_size(token, 64, Special::Tokenize, None)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn build_sampler(temperature: f32, top_p: f32) -> LlamaSampler {
