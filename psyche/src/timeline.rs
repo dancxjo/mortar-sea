@@ -71,9 +71,7 @@ impl TimelineEntry {
             TimelineEntry::Sensation(sensation) => {
                 sensation.provenance.references_sensation(sensation_id)
             }
-            TimelineEntry::Impression(impression) => {
-                impression.sensation_ids.contains(&sensation_id)
-            }
+            TimelineEntry::Impression(impression) => impression.about.contains(&sensation_id),
             TimelineEntry::Experience(_) => false,
         }
     }
@@ -227,7 +225,7 @@ impl TimelineFrame {
                     matches!(
                         entry,
                         TimelineEntry::Sensation(sensation)
-                        if impression.sensation_ids.contains(&sensation.id)
+                        if impression.about.contains(&sensation.id)
                     )
                 }));
                 related.extend(self.entries_referencing_impression(impression.id));

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use psyche::Provenance;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +46,11 @@ pub(crate) struct VisionFieldImpressionRecord {
     pub(crate) observed_at: DateTime<Utc>,
     pub(crate) source: SensationSource,
     pub(crate) sequence: u64,
-    pub(crate) how: String,
+    pub(crate) text: String,
+    pub(crate) kind: String,
+    pub(crate) faculty: String,
+    pub(crate) confidence: f32,
+    pub(crate) payload: Value,
 }
 
 #[derive(Debug, Serialize, Clone)]

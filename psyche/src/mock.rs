@@ -142,10 +142,14 @@ impl Faculty for MockFaculty {
                     "mock-faculty:{}:{}:{}",
                     self.name, sensation.id, how
                 )),
-                sensation_ids: vec![sensation.id],
+                text: how,
+                kind: format!("mock.{}", self.name),
                 occurred_at: sensation.occurred_at,
                 observed_at,
-                how,
+                faculty: self.name.clone(),
+                about: vec![sensation.id],
+                confidence: 1.0,
+                payload: serde_json::Value::Null,
             });
 
             if let Some(derived) = &rule.derived_sensation {
@@ -218,7 +222,7 @@ impl Wit for MockWit {
             for rule in self
                 .rules
                 .iter()
-                .filter(|rule| impression.how.contains(&rule.impression_contains))
+                .filter(|rule| impression.text.contains(&rule.impression_contains))
             {
                 experiences.push(Experience {
                     id: deterministic_uuid(format!(
@@ -397,7 +401,7 @@ mod tests {
         let (_sensations, impressions) = faculty.process(&sensation);
 
         assert_eq!(impressions.len(), 1);
-        assert_eq!(impressions[0].how, "The speaker said hello.");
+        assert_eq!(impressions[0].text, "The speaker said hello.");
     }
 
     #[test]
@@ -747,12 +751,12 @@ mod tests {
         assert!(
             impressions
                 .iter()
-                .any(|i| i.how == "Speech faculty heard hello")
+                .any(|i| i.text == "Speech faculty heard hello")
         );
         assert!(
             impressions
                 .iter()
-                .any(|i| i.how == "Context faculty noticed source mic")
+                .any(|i| i.text == "Context faculty noticed source mic")
         );
     }
 
