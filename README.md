@@ -48,6 +48,44 @@ docker compose up -d
 The backing stores live in `qdrant_data/` and `neo4j_data/`, which are ignored
 by git.
 
+Persistent memory is opt-in. Normal development and tests use no external
+databases unless configured:
+
+```sh
+MEMORY_BACKEND=disabled        # default; no memory writes
+MEMORY_BACKEND=mock            # in-process adapter for behavior tests
+MEMORY_BACKEND=qdrant-neo4j    # Qdrant vectors plus Neo4j graph
+```
+
+Face memory currently stores one vector record per accepted `vision.face_crop`
+sensation. The vector comes from the local `face_id` recognizer embedding, and
+the payload records the source frame, face sensation id, bbox, landmarks,
+detection confidence, detector model, embedding model, and any possible person
+candidate. Qdrant answers "what nearby face vectors have I seen?" while Neo4j
+stores the frame/sensation/face-observation relationships and possible
+candidate evidence.
+
+To run the persistent path locally:
+
+```sh
+cp .env.example .env
+# edit .env and set:
+# MEMORY_BACKEND=qdrant-neo4j
+# NEO4J_PASSWORD=...
+docker compose up -d qdrant neo4j
+cargo run -p face
+```
+
+The default face vector collection is `faces`; override it with
+`QDRANT_COLLECTION_FACES`. Similarity links are evidence, not identity claims,
+and memory write failures are logged without stopping live sensing.
+
+There is also an ignored live-backend test for this path:
+
+```sh
+cargo test -p face live_qdrant_neo4j -- --ignored
+```
+
 ### `occurred_at` vs `observed_at`
 
 Every cognitive event carries two timestamps:
@@ -321,11 +359,9 @@ This repository currently provides:
 This repository intentionally does not yet provide concrete implementations for:
 
 - speech
-- vision
+- full-scene vision
 - language models
-- vector databases
-- graph databases
-- retrieval systems
+- general-purpose retrieval systems
 - robotics
 - networking
 

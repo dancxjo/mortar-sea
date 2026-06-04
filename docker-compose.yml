@@ -6,6 +6,11 @@ services:
       - "127.0.0.1:6334:6334"
     volumes:
       - ./qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   neo4j:
     image: neo4j:5-community
@@ -13,6 +18,15 @@ services:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
     environment:
-      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASS:-CHANGE_ME_NOW}
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-CHANGE_ME_NOW}
     volumes:
       - ./neo4j_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-CHANGE_ME_NOW} 'RETURN 1'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 24

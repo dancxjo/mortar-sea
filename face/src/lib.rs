@@ -3,6 +3,7 @@ mod face_detection;
 mod field_vision;
 mod ingestion;
 mod llm_scheduler;
+mod memory;
 mod messages;
 mod realtime_experience;
 

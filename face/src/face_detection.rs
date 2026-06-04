@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::app::{AppState, MAX_RECORDED_FACE_CROPS};
 use crate::ingestion::record_sensation;
+use crate::memory::{BBox, FaceVectorRecord};
 use crate::messages::{MediaRecord, RawFaceCrop, RawVisionFrame, SensationRecord, SensationSource};
 
 const SIMILAR_FACE_THRESHOLD: f32 = 0.95;
@@ -29,6 +30,9 @@ struct DetectedFaceCrop {
     width: u32,
     height: u32,
     embedding: Vec<f32>,
+    bbox: BBox,
+    landmarks: Option<Vec<[f32; 2]>>,
+    confidence: f32,
 }
 
 impl FaceDetector {
@@ -142,7 +146,8 @@ fn crop_face(
     embedding: Vec<f32>,
 ) -> Result<DetectedFaceCrop> {
     let (width, height) = img.dimensions();
-    let bbox = detection.to_absolute(width, height).bbox;
+    let absolute_detection = detection.to_absolute(width, height);
+    let bbox = absolute_detection.bbox;
 
     let x1 = bbox.x1.floor().clamp(0.0, width.saturating_sub(1) as f32) as u32;
     let y1 = bbox.y1.floor().clamp(0.0, height.saturating_sub(1) as f32) as u32;
@@ -167,6 +172,19 @@ fn crop_face(
         width: crop.width(),
         height: crop.height(),
         embedding,
+        bbox: BBox {
+            x1: bbox.x1,
+            y1: bbox.y1,
+            x2: bbox.x2,
+            y2: bbox.y2,
+        },
+        landmarks: absolute_detection.landmarks.map(|landmarks| {
+            landmarks
+                .into_iter()
+                .map(|(x, y)| [x, y])
+                .collect::<Vec<_>>()
+        }),
+        confidence: detection.score,
     })
 }
 
@@ -184,6 +202,7 @@ fn record_face_crops(
 
         let record = face_crop_sensation(&frame, &crop, face_index);
         record_sensation(&state.sensations, record.clone());
+        spawn_face_memory_write(state.clone(), &frame, &record, &crop, face_index);
         record_raw_face_crop(
             &state.raw_face_crops,
             RawFaceCrop {
@@ -197,6 +216,42 @@ fn record_face_crops(
         emitted += 1;
     }
     emitted
+}
+
+fn spawn_face_memory_write(
+    state: AppState,
+    frame: &RawVisionFrame,
+    face_sensation: &SensationRecord,
+    crop: &DetectedFaceCrop,
+    face_index: usize,
+) {
+    let Some(face_memory) = state.face_memory.clone() else {
+        return;
+    };
+    let source = format!(
+        "{}/{}/{}",
+        face_sensation.source.client_id,
+        face_sensation.source.sensor_id,
+        face_sensation.source.faculty
+    );
+    let record = FaceVectorRecord::new(
+        face_sensation.id,
+        frame.sensation.id,
+        face_sensation.id,
+        face_index,
+        crop.embedding.clone(),
+        face_sensation.observed_at,
+        source,
+        Some(crop.bbox),
+        crop.landmarks.clone(),
+        crop.confidence,
+    );
+
+    tokio::spawn(async move {
+        if let Err(err) = face_memory.remember_face_observation(record).await {
+            warn!(%err, "face memory write failed");
+        }
+    });
 }
 
 fn is_similar_to_last_face(last_embedding: &RwLock<Option<Vec<f32>>>, embedding: &[f32]) -> bool {
@@ -321,6 +376,14 @@ mod tests {
             width: 64,
             height: 48,
             embedding: vec![0.1, 0.2],
+            bbox: BBox {
+                x1: 1.0,
+                y1: 2.0,
+                x2: 3.0,
+                y2: 4.0,
+            },
+            landmarks: None,
+            confidence: 0.9,
         };
 
         let record = face_crop_sensation(&frame, &crop, 2);

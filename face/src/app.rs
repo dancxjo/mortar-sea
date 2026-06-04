@@ -26,6 +26,7 @@ use crate::face_detection::{self, FaceDetector};
 use crate::field_vision;
 use crate::ingestion::{accept_frame, sequence_from_raw_json};
 use crate::llm_scheduler::LlmScheduler;
+use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
     AckMessage, ErrorMessage, RawFaceCrop, RawVisionFrame, RealTimeExperienceEvent,
     SensationRecord, VisionFieldImpressionRecord,
@@ -50,6 +51,7 @@ pub(crate) struct AppState {
     pub(crate) face_detection_active: Arc<AtomicBool>,
     pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) face_detection_last_embedding: Arc<RwLock<Option<Vec<f32>>>>,
+    pub(crate) face_memory: Option<Arc<FaceMemory>>,
     pub(crate) field_vision_active: Arc<AtomicBool>,
     pub(crate) field_vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
@@ -70,6 +72,18 @@ pub async fn run() -> anyhow::Result<()> {
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
+    let face_memory_config = FaceMemoryConfig::from_env()?;
+    let face_memory = FaceMemory::from_config(&face_memory_config)?;
+    match face_memory_config.backend {
+        MemoryBackend::Disabled => info!("face memory backend disabled"),
+        MemoryBackend::Mock => info!("face memory backend using in-process mock"),
+        MemoryBackend::QdrantNeo4j => info!(
+            qdrant_url = %face_memory_config.qdrant_url,
+            qdrant_collection = %face_memory_config.qdrant_collection_faces,
+            neo4j_uri = %face_memory_config.neo4j_uri,
+            "face memory backend using Qdrant and Neo4j"
+        ),
+    }
 
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
@@ -81,6 +95,7 @@ pub async fn run() -> anyhow::Result<()> {
         face_detection_active: Arc::new(AtomicBool::new(false)),
         face_detection_last_sampled: Arc::new(RwLock::new(None)),
         face_detection_last_embedding: Arc::new(RwLock::new(None)),
+        face_memory,
         field_vision_active: Arc::new(AtomicBool::new(false)),
         field_vision_last_sampled: Arc::new(RwLock::new(None)),
         realtime_experience_events,
