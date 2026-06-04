@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 
 use psyche::{
-    GenerationRequest, Impression, LlamaCppConfig, LlamaCppEngine, LlmEngine, LlmEvent, Sensation,
-    TimelineEntry, TimelineFrame, realtime_experience::format_realtime_experience_prompt,
+    GenerationRequest, Impression, Sensation, TimelineEntry, TimelineFrame,
+    realtime_experience::format_realtime_experience_prompt,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -10,6 +10,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::app::AppState;
+use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord};
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
@@ -57,7 +58,9 @@ pub(crate) fn spawn_trace(state: AppState) {
         });
         let _ = events.send(RealTimeExperienceEvent::ResponseStart { generation_id });
 
-        if let Err(err) = stream_generation(generation_id, prompt.clone(), events.clone()).await {
+        if let Err(err) =
+            stream_generation(&state, generation_id, prompt.clone(), events.clone()).await
+        {
             let fallback = format!(
                 "{{\"experiences\":[{{\"what\":\"Gemma 4 Experience generation failed: {}\",\"impression_ids\":[]}}]}}",
                 escape_json_string(&err.to_string())
@@ -77,69 +80,43 @@ pub(crate) fn spawn_trace(state: AppState) {
 }
 
 async fn stream_generation(
+    state: &AppState,
     generation_id: Uuid,
     prompt: String,
     events: broadcast::Sender<RealTimeExperienceEvent>,
 ) -> anyhow::Result<()> {
-    let model_path = mortar_sea::models::ensure_selected_llm_available()?;
-    if !model_path
-        .metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-    {
-        anyhow::bail!(
-            "selected model is missing at {}; run `cargo run models fetch gemma4`",
-            model_path.display()
-        );
-    }
-
-    tokio::task::spawn_blocking(move || {
-        let mut engine = LlamaCppEngine::new(LlamaCppConfig {
-            model_path,
-            context_size: 4096,
-            max_tokens: 256,
-            temperature: 0.2,
-            top_p: 0.9,
-            ..LlamaCppConfig::default()
-        })?;
-        let generation = engine.start(GenerationRequest {
-            prompt: wrap_gemma4_prompt(&prompt),
-            max_tokens: Some(256),
-            stop: vec![
-                "<turn|>".to_string(),
-                "<|turn>user".to_string(),
-                "<|turn>system".to_string(),
-                "<|turn>model".to_string(),
-            ],
-        })?;
-
-        loop {
-            let events_batch = engine.poll(generation)?;
-            if events_batch.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
-
-            for event in events_batch {
-                match event {
-                    LlmEvent::Token { text } => {
-                        let _ = events.send(RealTimeExperienceEvent::ResponseToken {
-                            generation_id,
-                            text,
-                        });
-                    }
-                    LlmEvent::Completed | LlmEvent::Cancelled => return Ok(()),
-                    LlmEvent::Error { message } => anyhow::bail!(message),
-                }
-            }
-        }
-    })
-    .await?
+    state
+        .llm_scheduler
+        .stream(
+            LlmJobKind::RealtimeExperience,
+            GenerationRequest {
+                prompt: wrap_gemma4_prompt(&prompt),
+                max_tokens: Some(256),
+                stop: llm_stop_markers(),
+            },
+            move |text| {
+                let _ = events.send(RealTimeExperienceEvent::ResponseToken {
+                    generation_id,
+                    text,
+                });
+            },
+        )
+        .await
 }
 
 fn wrap_gemma4_prompt(prompt: &str) -> String {
     format!(
         "<|turn>system\nYou are the real-time Experience generator. Return only the requested JSON.<turn|>\n<|turn>user\n{prompt}<turn|>\n<|turn>model\n"
     )
+}
+
+fn llm_stop_markers() -> Vec<String> {
+    vec![
+        "<turn|>".to_string(),
+        "<|turn>user".to_string(),
+        "<|turn>system".to_string(),
+        "<|turn>model".to_string(),
+    ]
 }
 
 fn build_prompt_from_records(
@@ -163,7 +140,8 @@ fn build_prompt_from_records(
             payload: json!({
                 "media": record.media,
                 "data_sha256": record.data_sha256,
-                "data_bytes": record.data_bytes
+                "data_bytes": record.data_bytes,
+                "detail": record.detail.clone()
             }),
         };
 
@@ -187,7 +165,7 @@ fn build_prompt_from_records(
                     vec![sensation.id],
                     sensation.occurred_at,
                     sensation.observed_at,
-                    format!("I see something with my eye ({}).", record.source.sensor_id),
+                    fallback_impression_for_record(record),
                 );
                 impression.kind = "vision.field".to_string();
                 impression.faculty = "Field Vision Faculty".to_string();
@@ -202,6 +180,14 @@ fn build_prompt_from_records(
     }
 
     format_realtime_experience_prompt(frame.entries())
+}
+
+fn fallback_impression_for_record(record: &SensationRecord) -> String {
+    match record.kind.as_str() {
+        "vision.face_crop" => format!("I see a face (in my eye \"{}\").", record.source.sensor_id),
+        "vision.frame" => format!("I see something with my eye ({}).", record.source.sensor_id),
+        _ => format!("I sense {} from {}.", record.kind, record.source.sensor_id),
+    }
 }
 
 fn streamable_chunks(text: &str, chunk_size: usize) -> Vec<String> {

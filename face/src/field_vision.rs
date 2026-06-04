@@ -1,14 +1,16 @@
 use std::sync::atomic::Ordering;
 
-use psyche::{GenerationRequest, LlamaCppConfig, LlamaCppEngine, LlmEngine, LlmEvent};
+use psyche::GenerationRequest;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::app::AppState;
+use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{RawVisionFrame, VisionFieldImpressionRecord};
 
 const MAX_FIELD_VISION_TOKENS: usize = 96;
 const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
+const MAX_FIELD_VISION_DATA_CHARS: usize = 32_000;
 
 pub(crate) fn spawn_field_vision(state: AppState) {
     if state.field_vision_active.swap(true, Ordering::AcqRel) {
@@ -22,7 +24,7 @@ pub(crate) fn spawn_field_vision(state: AppState) {
                 return;
             };
 
-            match describe_field_of_vision(frame.clone()).await {
+            match describe_field_of_vision(&state, frame.clone()).await {
                 Ok(how) => {
                     record_impression(&state, frame, how);
                     crate::realtime_experience::spawn_trace(state.clone());
@@ -55,49 +57,44 @@ fn latest_unsampled_frame(state: &AppState) -> Option<RawVisionFrame> {
     Some(latest)
 }
 
-async fn describe_field_of_vision(frame: RawVisionFrame) -> anyhow::Result<String> {
+async fn describe_field_of_vision(
+    state: &AppState,
+    frame: RawVisionFrame,
+) -> anyhow::Result<String> {
+    if frame.data.len() > MAX_FIELD_VISION_DATA_CHARS {
+        return Ok(oversized_field_impression(&frame));
+    }
+
     let prompt = build_field_vision_prompt(&frame);
+    let generated = state
+        .llm_scheduler
+        .generate(
+            LlmJobKind::FieldVision,
+            GenerationRequest {
+                prompt,
+                max_tokens: Some(MAX_FIELD_VISION_TOKENS),
+                stop: llm_stop_markers(),
+            },
+        )
+        .await?;
 
-    tokio::task::spawn_blocking(move || {
-        let model_path = mortar_sea::models::ensure_selected_llm_available()?;
-        let mut engine = LlamaCppEngine::new(LlamaCppConfig {
-            model_path,
-            context_size: 8192,
-            max_tokens: MAX_FIELD_VISION_TOKENS,
-            temperature: 0.15,
-            top_p: 0.85,
-            ..LlamaCppConfig::default()
-        })?;
-        let generation = engine.start(GenerationRequest {
-            prompt,
-            max_tokens: Some(MAX_FIELD_VISION_TOKENS),
-            stop: vec![
-                "<turn|>".to_string(),
-                "<|turn>user".to_string(),
-                "<|turn>system".to_string(),
-                "<|turn>model".to_string(),
-            ],
-        })?;
+    Ok(clean_impression(&generated))
+}
 
-        let mut generated = String::new();
-        loop {
-            let events = engine.poll(generation)?;
-            if events.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
+fn oversized_field_impression(frame: &RawVisionFrame) -> String {
+    format!(
+        "I am receiving a live visual field from my camera, but the {}x{} payload is too large to inspect directly.",
+        frame.sensation.media.width, frame.sensation.media.height
+    )
+}
 
-            for event in events {
-                match event {
-                    LlmEvent::Token { text } => generated.push_str(&text),
-                    LlmEvent::Completed => return Ok(clean_impression(&generated)),
-                    LlmEvent::Cancelled => anyhow::bail!("field vision generation was cancelled"),
-                    LlmEvent::Error { message } => anyhow::bail!(message),
-                }
-            }
-        }
-    })
-    .await?
+fn llm_stop_markers() -> Vec<String> {
+    vec![
+        "<turn|>".to_string(),
+        "<|turn>user".to_string(),
+        "<|turn>system".to_string(),
+        "<|turn>model".to_string(),
+    ]
 }
 
 fn build_field_vision_prompt(frame: &RawVisionFrame) -> String {
@@ -200,6 +197,7 @@ mod tests {
                 provenance: psyche::Provenance::direct(),
                 data_sha256: "abc".to_string(),
                 data_bytes: data.len(),
+                detail: serde_json::json!({}),
             },
             data: data.to_string(),
         }
@@ -213,6 +211,15 @@ mod tests {
         assert!(prompt.contains("not a detached image"));
         assert!(prompt.contains("unless the field of vision is clearly a mirror or reflection"));
         assert!(prompt.contains("<start_of_image>\ndata:image/jpeg;base64,abc123\n<end_of_image>"));
+    }
+
+    #[test]
+    fn oversized_field_impression_does_not_embed_payload() {
+        let frame = raw_frame(&"x".repeat(MAX_FIELD_VISION_DATA_CHARS + 1));
+        let impression = oversized_field_impression(&frame);
+
+        assert!(impression.contains("too large to inspect directly"));
+        assert!(!impression.contains(&"x".repeat(128)));
     }
 
     #[test]

@@ -7,6 +7,7 @@
   --muted: #aab7ad;
   --line: #35403b;
   --accent: #6ed0a6;
+  --info: #78a8ff;
   --warning: #efb15c;
   --error: #ee746d;
 }
@@ -232,11 +233,17 @@ input[type="range"] {
   gap: 10px;
 }
 
+.llm-monitor,
 .faculty {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 13px;
   background: var(--panel);
+}
+
+.llm-monitor {
+  display: grid;
+  gap: 12px;
 }
 
 .faculty header {
@@ -281,9 +288,91 @@ input[type="range"] {
   color: var(--warning);
 }
 
+.status[data-status="running"],
+.status[data-status="queued"],
+.status[data-status="generating"] {
+  border-color: rgba(120, 168, 255, 0.65);
+  color: var(--info);
+}
+
 .status[data-status="error"] {
   border-color: rgba(238, 116, 109, 0.7);
   color: var(--error);
+}
+
+.status[data-status="failed"] {
+  border-color: rgba(238, 116, 109, 0.7);
+  color: var(--error);
+}
+
+.llm-monitor header,
+.llm-job div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.llm-monitor header p {
+  margin: 0 0 0.18rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.llm-monitor header strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.llm-job-list {
+  display: grid;
+  gap: 8px;
+}
+
+.llm-job {
+  border-left: 3px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: var(--panel-strong);
+}
+
+.llm-job[data-phase="queued"] {
+  border-left-color: var(--warning);
+}
+
+.llm-job[data-phase="running"] {
+  border-left-color: var(--info);
+}
+
+.llm-job[data-phase="completed"] {
+  border-left-color: var(--accent);
+}
+
+.llm-job[data-phase="failed"] {
+  border-left-color: var(--error);
+}
+
+.llm-job strong {
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.llm-job span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.llm-job p,
+.empty {
+  margin: 0.28rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 dl {

@@ -30,12 +30,24 @@ pub(crate) struct SensationRecord {
     pub(crate) provenance: Provenance,
     pub(crate) data_sha256: String,
     pub(crate) data_bytes: usize,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub(crate) detail: Value,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RawVisionFrame {
     pub(crate) sensation: SensationRecord,
     pub(crate) data: String,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct RawFaceCrop {
+    pub(crate) sensation: SensationRecord,
+    pub(crate) source_frame_id: Uuid,
+    pub(crate) face_index: usize,
+    pub(crate) data: String,
+    pub(crate) embedding: Vec<f32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -101,5 +113,32 @@ pub(crate) enum RealTimeExperienceEvent {
     },
     ResponseDone {
         generation_id: Uuid,
+    },
+    LlmJobQueued {
+        job_id: Uuid,
+        job_kind: String,
+        observed_at: DateTime<Utc>,
+        prompt_chars: usize,
+        max_tokens: Option<usize>,
+    },
+    LlmJobStarted {
+        job_id: Uuid,
+        job_kind: String,
+        observed_at: DateTime<Utc>,
+        queue_wait_ms: u64,
+    },
+    LlmJobCompleted {
+        job_id: Uuid,
+        job_kind: String,
+        observed_at: DateTime<Utc>,
+        response_chars: usize,
+        token_events: usize,
+        elapsed_ms: u64,
+    },
+    LlmJobFailed {
+        job_id: Uuid,
+        job_kind: String,
+        observed_at: DateTime<Utc>,
+        error: String,
     },
 }

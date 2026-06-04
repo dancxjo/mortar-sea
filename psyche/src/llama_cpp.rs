@@ -15,6 +15,7 @@ use llama_cpp_4::model::params::LlamaModelParams;
 use llama_cpp_4::model::{AddBos, LlamaModel, Special};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::{max_devices, supports_gpu_offload};
+use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
@@ -98,6 +99,15 @@ impl LlamaCppEngine {
                     config.model_path.display()
                 )
             })?;
+        debug!(
+            model = %config.model_path.display(),
+            gpu_layers,
+            context_size = config.context_size,
+            max_tokens = config.max_tokens,
+            temperature = config.temperature,
+            top_p = config.top_p,
+            "llama.cpp model loaded"
+        );
 
         Ok(Self {
             backend,
@@ -111,10 +121,18 @@ impl LlamaCppEngine {
 impl LlmEngine for LlamaCppEngine {
     fn start(&mut self, request: GenerationRequest) -> Result<GenerationId> {
         let id = GenerationId(Uuid::new_v4());
+        debug!(
+            generation_id = %id.0,
+            prompt_chars = request.prompt.chars().count(),
+            max_tokens = ?request.max_tokens,
+            stop_count = request.stop.len(),
+            "llama.cpp generation starting"
+        );
         let (sender, receiver) = unbounded();
         let (control_sender, control_receiver) = unbounded();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker = LlamaGenerationWorker {
+            id,
             backend: Arc::clone(&self.backend),
             model: Arc::clone(&self.model),
             config: self.config.clone(),
@@ -217,6 +235,7 @@ impl Drop for LlamaCppEngine {
 
 #[derive(Debug)]
 struct LlamaGenerationWorker {
+    id: GenerationId,
     backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
     config: LlamaCppConfig,
@@ -265,6 +284,13 @@ impl LlamaGenerationWorker {
         }
 
         let n_ctx = ctx.n_ctx() as usize;
+        debug!(
+            generation_id = %self.id.0,
+            prompt_tokens = prompt_tokens.len(),
+            context_size = n_ctx,
+            max_total_tokens,
+            "llama.cpp prompt tokenized"
+        );
         if max_total_tokens > n_ctx {
             bail!(
                 "generation needs {max_total_tokens} context tokens, but context_size is {n_ctx}"
@@ -326,6 +352,11 @@ impl LlamaGenerationWorker {
             sampler.accept(token);
             if self.model.is_eog_token(token) {
                 if self.request.max_tokens.is_some() {
+                    debug!(
+                        generation_id = %self.id.0,
+                        generated_tokens,
+                        "llama.cpp generation completed at end-of-generation token"
+                    );
                     return Ok(GenerationOutcome::Completed);
                 }
                 commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
@@ -347,9 +378,24 @@ impl LlamaGenerationWorker {
                 if !outcome.text.is_empty()
                     && sender.send(LlmEvent::Token { text: outcome.text }).is_err()
                 {
+                    debug!(
+                        generation_id = %self.id.0,
+                        generated_tokens,
+                        "llama.cpp generation cancelled because token receiver closed"
+                    );
                     return Ok(GenerationOutcome::Cancelled);
                 }
+                trace!(
+                    generation_id = %self.id.0,
+                    generated_tokens = generated_tokens + 1,
+                    "llama.cpp sampled token emitted"
+                );
                 if outcome.stopped {
+                    debug!(
+                        generation_id = %self.id.0,
+                        generated_tokens = generated_tokens + 1,
+                        "llama.cpp generation completed at stop marker"
+                    );
                     return Ok(GenerationOutcome::Completed);
                 }
             }
@@ -360,9 +406,19 @@ impl LlamaGenerationWorker {
 
         let trailing = stop_detector.finish();
         if !trailing.is_empty() && sender.send(LlmEvent::Token { text: trailing }).is_err() {
+            debug!(
+                generation_id = %self.id.0,
+                generated_tokens,
+                "llama.cpp generation cancelled because token receiver closed"
+            );
             return Ok(GenerationOutcome::Cancelled);
         }
 
+        debug!(
+            generation_id = %self.id.0,
+            generated_tokens,
+            "llama.cpp generation completed"
+        );
         Ok(GenerationOutcome::Completed)
     }
 }
@@ -599,9 +655,20 @@ fn llama_backend() -> Result<Arc<LlamaBackend>> {
         return Ok(Arc::clone(backend));
     }
 
-    let backend = Arc::new(LlamaBackend::init().context("failed to initialize llama.cpp backend")?);
+    let mut backend = LlamaBackend::init().context("failed to initialize llama.cpp backend")?;
+    if !llama_native_logs_enabled() {
+        backend.void_logs();
+    }
+
+    let backend = Arc::new(backend);
     let _ = LLAMA_BACKEND.set(Arc::clone(&backend));
     Ok(backend)
+}
+
+fn llama_native_logs_enabled() -> bool {
+    std::env::var("MORTAR_LLAMA_LOG")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn selected_gpu_layers(config: &LlamaCppConfig) -> u32 {

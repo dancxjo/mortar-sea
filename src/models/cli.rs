@@ -4,7 +4,7 @@ use inquire::Select;
 use owo_colors::OwoColorize;
 
 use crate::models::download::fetch_model;
-use crate::models::manifest::{MODEL_ASSETS, MODEL_BUNDLES, find_bundle};
+use crate::models::manifest::{MODEL_ASSETS, MODEL_BUNDLES, ModelKind, find_bundle};
 use crate::models::selection::{
     asset_path, bundle_present, is_non_empty_file, model_selection_path, resolve_mortar_home,
     selected_bundle, selected_llm_model_path, write_selected_model,
@@ -57,6 +57,7 @@ fn model_menu() -> Result<()> {
     let selected = selected_bundle()?;
     let choices = MODEL_BUNDLES
         .iter()
+        .filter(|bundle| bundle.kind == ModelKind::Llm)
         .map(|bundle| {
             let state = if bundle_present(bundle)? {
                 "present".green().to_string()
@@ -107,17 +108,22 @@ impl std::fmt::Display for ModelChoice {
 
 fn list_models() -> Result<()> {
     let selected = selected_bundle()?;
-    println!("{}", "LLM".bold());
+    println!("{}", "Models".bold());
     for bundle in MODEL_BUNDLES {
-        let marker = if bundle.id == selected.id { "*" } else { " " };
+        let marker = if bundle.kind == ModelKind::Llm && bundle.id == selected.id {
+            "*"
+        } else {
+            " "
+        };
         let state = if bundle_present(bundle)? {
             "present".green().to_string()
         } else {
             "missing".red().to_string()
         };
         println!(
-            "{} {} {:<28} {}",
+            "{} {:<4} {} {:<32} {}",
             marker,
+            model_kind_label(bundle.kind),
             bundle.id.bold(),
             bundle.display_name,
             state
@@ -157,18 +163,41 @@ fn print_status() -> Result<()> {
     );
     println!("{} {}", state, path.display());
     if !is_non_empty_file(&path) {
-        println!(
-            "{} cargo run models fetch {}",
-            "fetch with:".dimmed(),
-            bundle.id
-        );
+        println!("{} cargo run models fetch", "fetch with:".dimmed());
+    }
+
+    println!();
+    println!("{}", "Face".bold());
+    for bundle in MODEL_BUNDLES
+        .iter()
+        .filter(|bundle| bundle.kind == ModelKind::Face)
+    {
+        let state = if bundle_present(bundle)? {
+            "present".green().to_string()
+        } else {
+            "missing".red().to_string()
+        };
+        println!("{} {} ({})", state, bundle.display_name.bold(), bundle.id);
+        if !bundle_present(bundle)? {
+            println!("{} cargo run models fetch", "fetch with:".dimmed());
+        }
     }
     Ok(())
 }
 
 fn select_model(model: &str) -> Result<()> {
     let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+    if bundle.kind != ModelKind::Llm {
+        anyhow::bail!("`{model}` is not an LLM model; use `cargo run models fetch`");
+    }
     write_selected_model(bundle.id)?;
     println!("{} LLM {}", "selected".green(), bundle.display_name.bold());
     Ok(())
+}
+
+fn model_kind_label(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Llm => "llm",
+        ModelKind::Face => "face",
+    }
 }

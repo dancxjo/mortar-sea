@@ -10,12 +10,13 @@ window.faceApp = function faceApp() {
     experienceSocket: null,
     experienceStatus: 'disconnected',
     activeExperienceGenerationId: null,
+    llmJobs: [],
     mime: 'image/jpeg',
-    quality: 0.72,
+    quality: 0.45,
     running: false,
     sequence: 0,
     stream: null,
-    targetWidth: 640,
+    targetWidth: 160,
     timer: null,
 
     async init() {
@@ -81,6 +82,10 @@ window.faceApp = function faceApp() {
 
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(event.data);
+        if (this.isLlmJobEvent(message.type)) {
+          this.upsertLlmJob(message);
+          return;
+        }
         if (message.type === 'prompt') {
           this.activeExperienceGenerationId = message.generation_id;
           this.experiencePrompt = message.prompt;
@@ -90,6 +95,7 @@ window.faceApp = function faceApp() {
         if (message.generation_id !== this.activeExperienceGenerationId) return;
         if (message.type === 'response_start') {
           this.experienceResponse = '';
+          this.experienceStatus = 'generating';
           return;
         }
         if (message.type === 'response_token') {
@@ -109,6 +115,101 @@ window.faceApp = function faceApp() {
       socket.addEventListener('error', () => {
         this.experienceStatus = 'error';
       });
+    },
+
+    isLlmJobEvent(type) {
+      return [
+        'llm_job_queued',
+        'llm_job_started',
+        'llm_job_completed',
+        'llm_job_failed',
+      ].includes(type);
+    },
+
+    upsertLlmJob(message) {
+      const phase = {
+        llm_job_queued: 'queued',
+        llm_job_started: 'running',
+        llm_job_completed: 'completed',
+        llm_job_failed: 'failed',
+      }[message.type];
+      const index = this.llmJobs.findIndex((job) => job.id === message.job_id);
+      const existing = index >= 0 ? this.llmJobs[index] : {};
+      const next = {
+        ...existing,
+        id: message.job_id,
+        kind: message.job_kind || existing.kind || 'llm',
+        phase,
+        observedAt: message.observed_at,
+      };
+
+      if (message.type === 'llm_job_queued') {
+        next.promptChars = message.prompt_chars;
+        next.maxTokens = message.max_tokens;
+      } else if (message.type === 'llm_job_started') {
+        next.queueWaitMs = message.queue_wait_ms;
+      } else if (message.type === 'llm_job_completed') {
+        next.responseChars = message.response_chars;
+        next.tokenEvents = message.token_events;
+        next.elapsedMs = message.elapsed_ms;
+      } else if (message.type === 'llm_job_failed') {
+        next.error = message.error;
+      }
+
+      if (index >= 0) {
+        this.llmJobs.splice(index, 1);
+      }
+      this.llmJobs.unshift(next);
+      this.llmJobs = this.llmJobs.slice(0, 24);
+    },
+
+    visibleLlmJobs() {
+      return this.llmJobs.slice(0, 8);
+    },
+
+    llmActivityLabel() {
+      const running = this.llmJobs.filter((job) => job.phase === 'running').length;
+      const queued = this.llmJobs.filter((job) => job.phase === 'queued').length;
+      if (running && queued) return `${running} running, ${queued} queued`;
+      if (running) return `${running} running`;
+      if (queued) return `${queued} queued`;
+      if (this.llmJobs.length) return 'idle';
+      return 'waiting';
+    },
+
+    llmActivityStatus() {
+      if (this.llmJobs.some((job) => job.phase === 'running')) return 'running';
+      if (this.llmJobs.some((job) => job.phase === 'queued')) return 'queued';
+      if (this.llmJobs.some((job) => job.phase === 'failed')) return 'failed';
+      return 'idle';
+    },
+
+    formatJobKind(kind) {
+      return kind.replaceAll('_', ' ');
+    },
+
+    formatJobMetric(job) {
+      if (job.phase === 'queued') {
+        const tokenLabel = job.maxTokens ? `max ${job.maxTokens} tokens` : 'uncapped';
+        return `${job.promptChars || 0} prompt chars, ${tokenLabel}`;
+      }
+      if (job.phase === 'running') {
+        return `started after ${this.formatDuration(job.queueWaitMs || 0)}`;
+      }
+      if (job.phase === 'completed') {
+        const empty = job.responseChars === 0 ? ', empty response' : '';
+        return `${job.tokenEvents || 0} token events, ${job.responseChars || 0} chars${empty}, ${this.formatDuration(job.elapsedMs || 0)}`;
+      }
+      if (job.phase === 'failed') {
+        return job.error || 'failed';
+      }
+      return '';
+    },
+
+    formatDuration(milliseconds) {
+      if (milliseconds < 1000) return `${milliseconds}ms`;
+      if (milliseconds < 10000) return `${(milliseconds / 1000).toFixed(1)}s`;
+      return `${Math.round(milliseconds / 1000)}s`;
     },
 
     scheduleCapture() {

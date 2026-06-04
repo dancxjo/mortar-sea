@@ -67,6 +67,28 @@
             </label>
           </div>
 
+          <section class="llm-monitor" aria-live="polite">
+            <header>
+              <div>
+                <p>LLM jobs</p>
+                <strong x-text="llmActivityLabel()"></strong>
+              </div>
+              <span class="status" x-bind:data-status="llmActivityStatus()" x-text="llmActivityStatus()"></span>
+            </header>
+            <div class="llm-job-list">
+              <template x-for="job in visibleLlmJobs()" x-bind:key="job.id">
+                <article class="llm-job" x-bind:data-phase="job.phase">
+                  <div>
+                    <strong x-text="formatJobKind(job.kind)"></strong>
+                    <span x-text="job.phase"></span>
+                  </div>
+                  <p x-text="formatJobMetric(job)"></p>
+                </article>
+              </template>
+              <p class="empty" x-show="llmJobs.length === 0">No jobs yet</p>
+            </div>
+          </section>
+
           <div class="faculty-list">
             <template x-for="faculty in faculties" x-bind:key="faculty.name">
               <article class="faculty">

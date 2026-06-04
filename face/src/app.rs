@@ -19,28 +19,37 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::face_detection::{self, FaceDetector};
 use crate::field_vision;
 use crate::ingestion::{accept_frame, sequence_from_raw_json};
+use crate::llm_scheduler::LlmScheduler;
 use crate::messages::{
-    AckMessage, ErrorMessage, RawVisionFrame, RealTimeExperienceEvent, SensationRecord,
-    VisionFieldImpressionRecord,
+    AckMessage, ErrorMessage, RawFaceCrop, RawVisionFrame, RealTimeExperienceEvent,
+    SensationRecord, VisionFieldImpressionRecord,
 };
 use crate::realtime_experience;
 
 pub(crate) const FACULTIES: &[&str] = &["vision-frame", "face", "motion", "scene"];
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
 pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
+pub(crate) const MAX_RECORDED_FACE_CROPS: usize = 24;
 pub(crate) const MAX_RECORDED_VISION_FIELD_IMPRESSIONS: usize = 80;
-const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 128;
+const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) sensations: Arc<RwLock<VecDeque<SensationRecord>>>,
     pub(crate) raw_vision_frames: Arc<RwLock<VecDeque<RawVisionFrame>>>,
+    pub(crate) raw_face_crops: Arc<RwLock<VecDeque<RawFaceCrop>>>,
     pub(crate) vision_field_impressions: Arc<RwLock<VecDeque<VisionFieldImpressionRecord>>>,
+    pub(crate) llm_scheduler: LlmScheduler,
+    pub(crate) face_detector: Arc<FaceDetector>,
+    pub(crate) face_detection_active: Arc<AtomicBool>,
+    pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
+    pub(crate) face_detection_last_embedding: Arc<RwLock<Option<Vec<f32>>>>,
     pub(crate) field_vision_active: Arc<AtomicBool>,
     pub(crate) field_vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
@@ -48,16 +57,31 @@ pub(crate) struct AppState {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let model_path = mortar_sea::models::ensure_selected_llm_available()?;
-    info!(model = %model_path.display(), "selected LLM model is available");
+    let models = mortar_sea::models::ensure_runtime_models_available()?;
+    info!(model = %models.llm.display(), "selected LLM model is available");
+    info!(
+        detector = %models.face.detector.display(),
+        recognizer = %models.face.recognizer.display(),
+        attributes = %models.face.attributes.display(),
+        "face models are available"
+    );
+    let realtime_experience_events = broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0;
+    let llm_scheduler = LlmScheduler::start(models.llm, realtime_experience_events.clone())?;
+    let face_detector = Arc::new(FaceDetector::new(models.face)?);
 
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
         raw_vision_frames: Arc::new(RwLock::new(VecDeque::new())),
+        raw_face_crops: Arc::new(RwLock::new(VecDeque::new())),
         vision_field_impressions: Arc::new(RwLock::new(VecDeque::new())),
+        llm_scheduler,
+        face_detector,
+        face_detection_active: Arc::new(AtomicBool::new(false)),
+        face_detection_last_sampled: Arc::new(RwLock::new(None)),
+        face_detection_last_embedding: Arc::new(RwLock::new(None)),
         field_vision_active: Arc::new(AtomicBool::new(false)),
         field_vision_last_sampled: Arc::new(RwLock::new(None)),
-        realtime_experience_events: broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0,
+        realtime_experience_events,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
     };
 
@@ -163,7 +187,7 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
                     observed_at: record.observed_at,
                 };
 
-                debug!(
+                trace!(
                     faculty = %socket_faculty,
                     sequence = record.sequence,
                     width = record.media.width,
@@ -180,6 +204,7 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
 
                 if socket_faculty == "vision-frame" {
                     field_vision::spawn_field_vision(state.clone());
+                    face_detection::spawn_face_detection(state.clone());
                 } else {
                     realtime_experience::spawn_trace(state.clone());
                 }

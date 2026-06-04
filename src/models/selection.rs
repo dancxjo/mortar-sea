@@ -5,7 +5,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::models::manifest::{
-    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, bundle_primary_asset, find_bundle,
+    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_primary_asset,
+    bundle_required_assets, find_bundle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -29,10 +30,21 @@ pub fn selected_llm_model_label() -> Result<&'static str> {
 pub fn selected_bundle() -> Result<&'static ModelBundle> {
     let selection = read_selection()?;
     let selected = selection.llm.as_deref().unwrap_or(DEFAULT_LLM_MODEL_ID);
-    find_bundle(selected).with_context(|| format!("selected model `{selected}` is not registered"))
+    let bundle = find_bundle(selected)
+        .with_context(|| format!("selected model `{selected}` is not registered"))?;
+    if bundle.kind != ModelKind::Llm {
+        bail!("selected model `{selected}` is not an LLM bundle");
+    }
+    Ok(bundle)
 }
 
 pub fn write_selected_model(model_id: &str) -> Result<()> {
+    let bundle = find_bundle(model_id)
+        .with_context(|| format!("selected model `{model_id}` is not registered"))?;
+    if bundle.kind != ModelKind::Llm {
+        bail!("selected model `{model_id}` is not an LLM bundle");
+    }
+
     let path = model_selection_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -66,10 +78,10 @@ pub fn asset_path(home: &Path, asset: &ModelAsset) -> PathBuf {
 }
 
 pub fn bundle_present(bundle: &ModelBundle) -> Result<bool> {
-    Ok(is_non_empty_file(&asset_path(
-        &resolve_mortar_home()?,
-        bundle_primary_asset(bundle)?,
-    )))
+    let home = resolve_mortar_home()?;
+    Ok(bundle_required_assets(bundle)?
+        .iter()
+        .all(|asset| is_non_empty_file(&asset_path(&home, asset))))
 }
 
 pub fn is_non_empty_file(path: &Path) -> bool {

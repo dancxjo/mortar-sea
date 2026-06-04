@@ -4,12 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Browser Face frontend and WebSocket ingestion server for mortar-sea"
 
+[features]
+default = ["llama-cuda"]
+llama-cuda = ["psyche/llama-cuda"]
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.7", features = ["ws"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+face_id = { version = "0.4.1", default-features = false, features = ["download-binaries", "copy-dylibs", "hf-hub"] }
 futures-util = "0.3"
-psyche = { path = "../psyche" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "webp"] }
+psyche = { path = "../psyche", default-features = false }
 mortar-sea = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelKind {
     Llm,
+    Face,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -9,6 +10,7 @@ pub struct ModelAsset {
     pub filename: &'static str,
     pub relative_path: &'static str,
     pub url: &'static str,
+    pub sha256: Option<&'static str>,
     pub license: Option<&'static str>,
     pub source: Option<&'static str>,
 }
@@ -19,10 +21,12 @@ pub struct ModelBundle {
     pub display_name: &'static str,
     pub kind: ModelKind,
     pub primary_asset_id: &'static str,
+    pub required_asset_ids: &'static [&'static str],
     pub aliases: &'static [&'static str],
 }
 
 pub const DEFAULT_LLM_MODEL_ID: &str = "gemma-4-e4b-it-q4-k-m";
+pub const DEFAULT_FACE_MODEL_ID: &str = "face-insightface-buffalo-l";
 
 pub const MODEL_ASSETS: &[ModelAsset] = &[
     ModelAsset {
@@ -30,6 +34,7 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         filename: "gemma-4-E4B-it-Q4_K_M.gguf",
         relative_path: "models/gemma/gemma-4-E4B-it-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf",
+        sha256: None,
         license: Some("LicenseRef-Gemma"),
         source: Some("https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF"),
     },
@@ -38,8 +43,36 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         filename: "gemma-3-4b-it-Q4_K_M.gguf",
         relative_path: "models/gemma/gemma-3-4b-it-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+        sha256: None,
         license: Some("LicenseRef-Gemma"),
         source: Some("https://huggingface.co/unsloth/gemma-3-4b-it-GGUF"),
+    },
+    ModelAsset {
+        id: "face-scrfd-34g-gnkps",
+        filename: "34g_gnkps.onnx",
+        relative_path: "models/face/scrfd/34g_gnkps.onnx",
+        url: "https://huggingface.co/RuteNL/SCRFD-face-detection-ONNX/resolve/main/34g_gnkps.onnx",
+        sha256: None,
+        license: None,
+        source: Some("https://huggingface.co/RuteNL/SCRFD-face-detection-ONNX"),
+    },
+    ModelAsset {
+        id: "face-buffalo-l-w600k-r50",
+        filename: "w600k_r50.onnx",
+        relative_path: "models/face/buffalo_l/w600k_r50.onnx",
+        url: "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/w600k_r50.onnx",
+        sha256: None,
+        license: None,
+        source: Some("https://huggingface.co/public-data/insightface"),
+    },
+    ModelAsset {
+        id: "face-buffalo-l-genderage",
+        filename: "genderage.onnx",
+        relative_path: "models/face/buffalo_l/genderage.onnx",
+        url: "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/genderage.onnx",
+        sha256: None,
+        license: None,
+        source: Some("https://huggingface.co/public-data/insightface"),
     },
 ];
 
@@ -49,6 +82,7 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
         display_name: "Gemma 4 E4B IT Q4_K_M",
         kind: ModelKind::Llm,
         primary_asset_id: "gemma-4-e4b-it-q4-k-m",
+        required_asset_ids: &["gemma-4-e4b-it-q4-k-m"],
         aliases: &["gemma4", "gemma-4", "gemma-4-e4b", "gemma"],
     },
     ModelBundle {
@@ -56,7 +90,20 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
         display_name: "Gemma 3 4B IT Q4_K_M",
         kind: ModelKind::Llm,
         primary_asset_id: "gemma-3-4b-it-q4-k-m",
+        required_asset_ids: &["gemma-3-4b-it-q4-k-m"],
         aliases: &["gemma3", "gemma-3", "gemma-3-4b"],
+    },
+    ModelBundle {
+        id: DEFAULT_FACE_MODEL_ID,
+        display_name: "InsightFace Buffalo_L Face Stack",
+        kind: ModelKind::Face,
+        primary_asset_id: "face-scrfd-34g-gnkps",
+        required_asset_ids: &[
+            "face-scrfd-34g-gnkps",
+            "face-buffalo-l-w600k-r50",
+            "face-buffalo-l-genderage",
+        ],
+        aliases: &["face", "faces", "insightface", "buffalo-l"],
     },
 ];
 
@@ -72,10 +119,27 @@ pub fn find_bundle(name: &str) -> Option<&'static ModelBundle> {
 }
 
 pub fn bundle_primary_asset(bundle: &ModelBundle) -> anyhow::Result<&'static ModelAsset> {
-    MODEL_ASSETS
-        .iter()
-        .find(|asset| asset.id == bundle.primary_asset_id)
+    find_asset(bundle.primary_asset_id)
         .ok_or_else(|| anyhow::anyhow!("bundle `{}` references unknown primary asset", bundle.id))
+}
+
+pub fn bundle_required_assets(bundle: &ModelBundle) -> anyhow::Result<Vec<&'static ModelAsset>> {
+    bundle
+        .required_asset_ids
+        .iter()
+        .map(|asset_id| {
+            find_asset(asset_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "bundle `{}` references unknown asset `{asset_id}`",
+                    bundle.id
+                )
+            })
+        })
+        .collect()
+}
+
+pub fn find_asset(asset_id: &str) -> Option<&'static ModelAsset> {
+    MODEL_ASSETS.iter().find(|asset| asset.id == asset_id)
 }
 
 fn normalize_model_name(name: &str) -> String {

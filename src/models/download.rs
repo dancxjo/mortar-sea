@@ -1,18 +1,34 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
-use crate::models::manifest::{ModelAsset, ModelBundle, bundle_primary_asset, find_bundle};
+use crate::models::manifest::{
+    DEFAULT_FACE_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_primary_asset,
+    bundle_required_assets, find_asset, find_bundle,
+};
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
     write_selected_model,
 };
+
+#[derive(Debug, Clone)]
+pub struct FaceModelPaths {
+    pub detector: PathBuf,
+    pub recognizer: PathBuf,
+    pub attributes: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeModelPaths {
+    pub llm: PathBuf,
+    pub face: FaceModelPaths,
+}
 
 pub fn ensure_selected_llm_available() -> Result<PathBuf> {
     let path = selected_llm_model_path()?;
@@ -31,69 +47,135 @@ pub fn ensure_selected_llm_available() -> Result<PathBuf> {
     selected_llm_model_path()
 }
 
+pub fn ensure_face_models_available() -> Result<FaceModelPaths> {
+    let bundle = find_bundle(DEFAULT_FACE_MODEL_ID)
+        .context("default face model bundle is not registered")?;
+    ensure_bundle_available(bundle)?;
+    face_model_paths()
+}
+
+pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
+    Ok(RuntimeModelPaths {
+        llm: ensure_selected_llm_available()?,
+        face: ensure_face_models_available()?,
+    })
+}
+
 pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
     if let Some(model) = model {
         let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
-        write_selected_model(bundle.id)?;
+        if bundle.kind == ModelKind::Llm {
+            write_selected_model(bundle.id)?;
+        }
         fetch_bundle(bundle, force)?;
-        println!("{} {}", "selected".green(), bundle.display_name.bold());
-        return selected_llm_model_path();
+        if bundle.kind == ModelKind::Llm {
+            println!("{} {}", "selected".green(), bundle.display_name.bold());
+            return selected_llm_model_path();
+        }
+
+        let primary = bundle_primary_asset(bundle)?;
+        return Ok(asset_path(&resolve_mortar_home()?, primary));
     }
 
-    let bundle = selected_bundle()?;
-    fetch_bundle(bundle, force)?;
+    fetch_all_runtime_bundles(force)?;
     selected_llm_model_path()
 }
 
+fn fetch_all_runtime_bundles(force: bool) -> Result<()> {
+    fetch_bundle(selected_bundle()?, force)?;
+    fetch_bundle(
+        find_bundle(DEFAULT_FACE_MODEL_ID)
+            .context("default face model bundle is not registered")?,
+        force,
+    )?;
+    Ok(())
+}
+
 fn fetch_bundle(bundle: &ModelBundle, force: bool) -> Result<()> {
-    write_selected_model(bundle.id)?;
-    let asset = bundle_primary_asset(bundle)?;
-    fetch_asset(asset, force)?;
+    if bundle.kind == ModelKind::Llm {
+        write_selected_model(bundle.id)?;
+    }
+    for asset in bundle_required_assets(bundle)? {
+        fetch_asset(asset, force)?;
+    }
     Ok(())
 }
 
 fn ensure_bundle_available(bundle: &ModelBundle) -> Result<()> {
-    let asset = bundle_primary_asset(bundle)?;
     let home = resolve_mortar_home()?;
-    let path = asset_path(&home, asset);
-    if is_non_empty_file(&path) {
-        return Ok(());
+    let assets = bundle_required_assets(bundle)?;
+    let missing = assets
+        .iter()
+        .any(|asset| !is_non_empty_file(&asset_path(&home, asset)));
+
+    if missing {
+        eprintln!(
+            "model bundle `{}` is missing locally; downloading it now. This can take a while...",
+            bundle.display_name
+        );
     }
 
-    eprintln!(
-        "LLM model `{}` is missing locally; downloading it now. This can take a while...",
-        bundle.display_name
-    );
-    fetch_asset(asset, false)
+    for asset in assets {
+        fetch_asset(asset, false)?;
+    }
+    Ok(())
 }
 
 fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
     let home = resolve_mortar_home()?;
     let path = asset_path(&home, asset);
+    let metadata = remote_metadata(asset).unwrap_or_default();
+    let expected_sha256 = asset.sha256.map(str::to_string).or(metadata.etag_sha256);
+
     if is_non_empty_file(&path) && !force {
+        verify_existing_asset(&path, expected_sha256.as_deref())?;
         println!("{} {}", "already present".green(), path.display());
         return Ok(());
     }
 
     fs::create_dir_all(path.parent().context("model path has no parent")?)?;
-    let part_path = path.with_extension("gguf.part");
+    let part_path = path.with_file_name(format!("{}.part", asset.filename));
+    if force {
+        let _ = fs::remove_file(&part_path);
+    }
+
+    let mut resume_from = file_len(&part_path).unwrap_or(0);
+    let mut request = ureq::get(asset.url);
+    if resume_from > 0 {
+        request = request.header("Range", &format!("bytes={resume_from}-"));
+    }
+
     println!(
         "{} {}",
         "fetching".cyan(),
         format!("{} -> {}", asset.url, path.display()).dimmed()
     );
 
-    let response = ureq::get(asset.url)
+    let response = request
         .call()
         .with_context(|| format!("failed to download {}", asset.url))?;
-    let total = response.body().content_length();
+    if resume_from > 0 && response.status().as_u16() != 206 {
+        resume_from = 0;
+        let _ = fs::remove_file(&part_path);
+    }
+
+    let total = metadata.content_length.or_else(|| {
+        response
+            .body()
+            .content_length()
+            .map(|length| length + resume_from)
+    });
     let mut body = response.into_body();
     let mut reader = body.as_reader();
-    let mut file = File::create(&part_path)
-        .with_context(|| format!("failed to create {}", part_path.display()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(resume_from > 0)
+        .write(true)
+        .truncate(resume_from == 0)
+        .open(&part_path)
+        .with_context(|| format!("failed to open {}", part_path.display()))?;
     let mut buffer = [0_u8; 128 * 1024];
-    let mut downloaded = 0_u64;
-    let mut hasher = Sha256::new();
+    let mut downloaded = resume_from;
 
     loop {
         let read = reader.read(&mut buffer)?;
@@ -101,7 +183,6 @@ fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
             break;
         }
         file.write_all(&buffer[..read])?;
-        hasher.update(&buffer[..read]);
         downloaded += read as u64;
         print_progress(downloaded, total);
     }
@@ -116,9 +197,122 @@ fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
         )
     })?;
 
+    let sha256 = sha256_file(&path)?;
+    if let Some(expected) = expected_sha256.as_deref() {
+        anyhow::ensure!(
+            sha256.eq_ignore_ascii_case(expected),
+            "checksum mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected,
+            sha256
+        );
+    }
+    write_checksum_sidecar(&path, &sha256)?;
+
     println!("{} {}", "downloaded".green(), path.display());
-    println!("{} {:x}", "sha256".cyan(), hasher.finalize());
+    println!("{} {}", "sha256".cyan(), sha256);
     Ok(())
+}
+
+#[derive(Default)]
+struct RemoteMetadata {
+    content_length: Option<u64>,
+    etag_sha256: Option<String>,
+}
+
+fn remote_metadata(asset: &ModelAsset) -> Result<RemoteMetadata> {
+    let response = ureq::head(asset.url)
+        .call()
+        .with_context(|| format!("failed to inspect {}", asset.url))?;
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let etag_sha256 = response
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_matches('"').to_string())
+        .filter(|value| is_hex_sha256(value));
+
+    Ok(RemoteMetadata {
+        content_length,
+        etag_sha256,
+    })
+}
+
+fn verify_existing_asset(path: &Path, expected_sha256: Option<&str>) -> Result<()> {
+    let sidecar_sha256 = read_checksum_sidecar(path)?;
+    if let Some(expected) = expected_sha256.or(sidecar_sha256.as_deref()) {
+        let actual = sha256_file(path)?;
+        anyhow::ensure!(
+            actual.eq_ignore_ascii_case(expected),
+            "checksum mismatch for {}; rerun `cargo run models fetch -- --force`",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn file_len(path: &Path) -> Result<u64> {
+    Ok(path.metadata()?.len())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut buffer = [0_u8; 128 * 1024];
+    let mut hasher = Sha256::new();
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn checksum_sidecar_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        "{}.sha256",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("model")
+    ))
+}
+
+fn write_checksum_sidecar(path: &Path, sha256: &str) -> Result<()> {
+    fs::write(checksum_sidecar_path(path), format!("{sha256}\n"))?;
+    Ok(())
+}
+
+fn read_checksum_sidecar(path: &Path) -> Result<Option<String>> {
+    let sidecar = checksum_sidecar_path(path);
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+    Ok(Some(fs::read_to_string(sidecar)?.trim().to_string()))
+}
+
+fn is_hex_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn face_model_paths() -> Result<FaceModelPaths> {
+    let home = resolve_mortar_home()?;
+    let detector = find_asset("face-scrfd-34g-gnkps").context("missing face detector asset")?;
+    let recognizer =
+        find_asset("face-buffalo-l-w600k-r50").context("missing face recognizer asset")?;
+    let attributes =
+        find_asset("face-buffalo-l-genderage").context("missing face attributes asset")?;
+
+    Ok(FaceModelPaths {
+        detector: asset_path(&home, detector),
+        recognizer: asset_path(&home, recognizer),
+        attributes: asset_path(&home, attributes),
+    })
 }
 
 fn print_progress(downloaded: u64, total: Option<u64>) {

@@ -48,6 +48,7 @@ pub(crate) fn accept_frame(
         provenance: Provenance::direct(),
         data_sha256: sha256_hex(frame.data.as_bytes()),
         data_bytes: frame.data.len(),
+        detail: serde_json::json!({}),
     };
 
     record_sensation(sensations, record.clone());
@@ -97,7 +98,10 @@ pub(crate) fn validate_frame(socket_faculty: &str, frame: &FrameMessage) -> Resu
     Ok(())
 }
 
-fn record_sensation(sensations: &RwLock<VecDeque<SensationRecord>>, record: SensationRecord) {
+pub(crate) fn record_sensation(
+    sensations: &RwLock<VecDeque<SensationRecord>>,
+    record: SensationRecord,
+) {
     let mut records = sensations.write().expect("sensation log lock");
     if records.len() == MAX_RECORDED_SENSATIONS {
         records.pop_front();
