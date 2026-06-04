@@ -373,7 +373,7 @@ fn within_generation_limit(generated_tokens: usize, max_tokens: Option<usize>) -
 
 fn commit_sampled_token(
     ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch<'_>,
+    batch: &mut LlamaBatch,
     token: llama_cpp_4::token::LlamaToken,
     n_cur: &mut i32,
 ) -> Result<()> {
@@ -390,7 +390,7 @@ fn commit_sampled_token(
 fn drain_generation_controls(
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch<'_>,
+    batch: &mut LlamaBatch,
     n_cur: &mut i32,
     n_ctx: usize,
     controls: &Receiver<GenerationControl>,
@@ -414,7 +414,7 @@ fn drain_generation_controls(
 fn wait_while_paused(
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch<'_>,
+    batch: &mut LlamaBatch,
     n_cur: &mut i32,
     n_ctx: usize,
     controls: &Receiver<GenerationControl>,
@@ -442,7 +442,7 @@ fn wait_while_paused(
 fn decode_appended_prompt(
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch<'_>,
+    batch: &mut LlamaBatch,
     n_cur: &mut i32,
     n_ctx: usize,
     text: &str,
@@ -470,7 +470,7 @@ fn decode_appended_prompt(
 
 fn decode_prompt_tokens(
     ctx: &mut LlamaContext<'_>,
-    batch: &mut LlamaBatch<'_>,
+    batch: &mut LlamaBatch,
     tokens: &[llama_cpp_4::token::LlamaToken],
     n_cur: &mut i32,
     n_ctx: usize,
