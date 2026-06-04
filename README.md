@@ -72,9 +72,10 @@ derived sensations, and memory recall without hiding those links in payloads.
   `occurred_at` = log timestamp; `observed_at` = ingestion time. The replayed
   events sort before current entries in the timeline.
 - **Memory recall** — an experience from the past re-enters the pipeline as a
-  `"memory.related_experience"` sensation. `occurred_at` is copied from the
-  original experience; `observed_at` is set to the recall time (now) by
-  `InMemory::experience_to_sensation`.
+  `"memory.related_experience"` sensation. `occurred_at` and `observed_at` are
+  both set to recall time (now). The payload carries
+  `original_experience_id`, `original_occurred_at`, and
+  `original_observed_at`.
 - **Derived sensations** — a faculty that detects faces in a camera frame emits
   a `"vision.face_crop"` sensation. The derived sensation inherits `occurred_at`
   from the parent frame so both sort together in the timeline.
@@ -88,10 +89,27 @@ derived sensations, and memory recall without hiding those links in payloads.
 - **Representation:** each recalled experience is reintroduced as one sensation with:
   - `kind = "memory.related_experience"`
   - `source = "memory"`
-  - JSON payload containing the serialized `Experience`
-  - `occurred_at` copied from the original experience
+  - `occurred_at = now`, `observed_at = now` (recollection is a present sensation)
+  - JSON payload containing serialized `Experience` fields plus:
+    - `original_experience_id`
+    - `original_occurred_at`
+    - `original_observed_at`
 - **Trigger mode for stored memory:** explicit pull via `recall_into_timeline`.
-- **Timeline ordering:** recalled sensations are inserted through normal `TimelineFrame` insertion and therefore ordered by `occurred_at` with all other entries.
+- **Timeline ordering:** recalled sensations are inserted through normal `TimelineFrame` insertion and therefore ordered by recollection time (`occurred_at = now`) with all other entries.
+
+### Timeline examples: perception vs recollection
+
+```text
+T+00.000  SENSATION vision.frame source=camera
+T+00.120  IMPRESSION "A person entered."
+T+00.180  EXPERIENCE "A visitor may have arrived."
+T+03.400  RECOLLECTION memory.related_experience
+          original_experience_id=...
+          original_occurred_at=T+00.180
+```
+
+The recollection is explicitly represented at **when it was remembered**, while
+still preserving metadata about **when it originally happened**.
 
 `observe` also performs bounded recursive cognition for newly generated
 experiences within the same call: each new experience is converted to a

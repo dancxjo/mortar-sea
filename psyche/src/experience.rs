@@ -20,9 +20,9 @@ use uuid::Uuid;
 ///   close to the time the wit ran, which may be after any deliberate delay.
 ///
 /// When an experience is recalled from memory and re-enters the pipeline as a
-/// `"memory.related_experience"` sensation, the sensation's `occurred_at` is
-/// copied from the experience so the memory sorts chronologically alongside
-/// the original events.
+/// `"memory.related_experience"` sensation, the recollection sensation occurs
+/// at recall time (now). The original experience timestamps remain available in
+/// payload metadata (`original_occurred_at`, `original_observed_at`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Experience {
     /// Unique identifier for this experience.
@@ -32,7 +32,7 @@ pub struct Experience {
     /// When this meaning was understood, inherited from the source impressions.
     ///
     /// Used as the sort key in [`TimelineFrame`](crate::timeline::TimelineFrame)
-    /// and preserved verbatim when the experience is recalled as a sensation.
+    /// and preserved verbatim in memory-recall payload metadata.
     pub occurred_at: DateTime<Utc>,
     /// When the wit produced this experience.
     ///
