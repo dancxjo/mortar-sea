@@ -156,10 +156,10 @@ fn build_prompt_from_records(
             ),
             occurred_at: record.occurred_at,
             observed_at: record.observed_at,
+            sequence: Some(record.sequence),
+            provenance: record.provenance.clone(),
             payload: json!({
-                "sequence": record.sequence,
                 "media": record.media,
-                "provenance": record.provenance,
                 "data_sha256": record.data_sha256,
                 "data_bytes": record.data_bytes
             }),

@@ -2,13 +2,14 @@ use std::collections::VecDeque;
 use std::sync::RwLock;
 
 use chrono::Utc;
+use psyche::Provenance;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::app::MAX_RECORDED_SENSATIONS;
 use crate::messages::{
-    FrameMessage, MediaRecord, ProvenanceRecord, RawVisionFrame, SensationRecord, SensationSource,
+    FrameMessage, MediaRecord, RawVisionFrame, SensationRecord, SensationSource,
 };
 
 pub(crate) fn accept_frame(
@@ -44,9 +45,7 @@ pub(crate) fn accept_frame(
             height: frame.height,
             encoding: "base64-data-url".to_string(),
         },
-        provenance: ProvenanceRecord {
-            r#type: "direct".to_string(),
-        },
+        provenance: Provenance::direct(),
         data_sha256: sha256_hex(frame.data.as_bytes()),
         data_bytes: frame.data.len(),
     };

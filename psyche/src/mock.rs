@@ -8,7 +8,7 @@ use crate::{
     impression::Impression,
     memory::{InMemory, Memory},
     pipeline::Pipeline,
-    sensation::Sensation,
+    sensation::{Provenance, Sensation},
     timeline::{TimelineEntry, TimelineFrame},
     wit::Wit,
 };
@@ -50,6 +50,8 @@ impl MockEmitter {
             source,
             occurred_at,
             observed_at: occurred_at,
+            sequence: None,
+            provenance: Provenance::direct(),
             payload: json!({ "text": text }),
         }])
     }
@@ -156,6 +158,9 @@ impl Faculty for MockFaculty {
                     source: self.name.clone(),
                     occurred_at: sensation.occurred_at,
                     observed_at,
+                    sequence: sensation.sequence,
+                    provenance: Provenance::derived_from_sensation(sensation.id)
+                        .with_faculty(&self.name),
                     payload: derived.payload.clone(),
                 });
             }
@@ -265,7 +270,9 @@ impl Memory for ScriptedMemory {
             kind: "memory.related_experience".to_owned(),
             source: "memory".to_owned(),
             occurred_at: experience.occurred_at,
-            observed_at: experience.observed_at,
+            observed_at: crate::time::now(),
+            sequence: None,
+            provenance: Provenance::memory_recall(experience.id),
             payload,
         }
     }

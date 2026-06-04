@@ -1,7 +1,12 @@
 use chrono::Duration;
 use uuid::Uuid;
 
-use crate::{episode::Episode, experience::Experience, link::ExperienceLink, sensation::Sensation};
+use crate::{
+    episode::Episode,
+    experience::Experience,
+    link::ExperienceLink,
+    sensation::{Provenance, Sensation},
+};
 
 /// Memory stores and retrieves [`Experience`]s.
 ///
@@ -62,6 +67,7 @@ impl Memory for InMemory {
             crate::time::now(),
             payload,
         )
+        .with_provenance(Provenance::memory_recall(experience.id))
     }
 }
 
@@ -193,6 +199,7 @@ impl Memory for InMemoryLinked {
             crate::time::now(),
             payload,
         )
+        .with_provenance(Provenance::memory_recall(experience.id))
     }
 }
 
@@ -275,6 +282,7 @@ mod tests {
             let s = InMemory::experience_to_sensation(&recalled);
             assert_eq!(s.kind, "memory.related_experience");
             assert_eq!(s.source, "memory");
+            assert_eq!(s.provenance, Provenance::memory_recall(recalled.id));
         }
     }
 

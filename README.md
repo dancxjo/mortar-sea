@@ -42,6 +42,10 @@ Every cognitive event carries two timestamps:
 **Ordering rule:** [`TimelineFrame`] always sorts by `occurred_at`. The system
 maintains causal history regardless of when data arrived.
 
+Every `Sensation` also carries optional `sequence` metadata plus explicit
+`provenance`, so canonical cognition can represent direct sensor origin,
+derived sensations, and memory recall without hiding those links in payloads.
+
 **When they differ:**
 
 - **Delayed observations** — a camera delivers a buffered frame 10 seconds late.
