@@ -30,6 +30,24 @@ A remembered thing re-enters cognition as something newly noticed.
 
 Memory is not a separate pathway.
 
+## Local Memory Services
+
+Mortar-Sea uses the same local persistence stack as Listenbury for memory
+backend development:
+
+- Qdrant for vector search on `127.0.0.1:6333`
+- Neo4j for graph persistence on `127.0.0.1:7687`
+
+Start the services with:
+
+```sh
+cp .env.example .env
+docker compose up -d
+```
+
+The backing stores live in `qdrant_data/` and `neo4j_data/`, which are ignored
+by git.
+
 ### `occurred_at` vs `observed_at`
 
 Every cognitive event carries two timestamps:
