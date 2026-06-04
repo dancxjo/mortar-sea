@@ -67,7 +67,9 @@ pub async fn run() -> anyhow::Result<()> {
     );
     let realtime_experience_events = broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0;
     let llm_scheduler = LlmScheduler::start(models.llm, realtime_experience_events.clone())?;
+    info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
+    info!("face analyzer ready");
 
     let state = AppState {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
@@ -101,8 +103,8 @@ pub async fn run() -> anyhow::Result<()> {
         .parse()
         .expect("FACE_ADDR must be a valid socket address");
 
-    info!("Face server listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("Face server listening on http://{addr}");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

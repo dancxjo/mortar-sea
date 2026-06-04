@@ -52,17 +52,12 @@ impl LlmScheduler {
         events: broadcast::Sender<RealTimeExperienceEvent>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
-        let (ready_sender, ready_receiver) = mpsc::channel();
         let scheduler_events = events.clone();
 
         thread::Builder::new()
             .name("face-llm-scheduler".to_string())
-            .spawn(move || run_scheduler(model_path, receiver, ready_sender, scheduler_events))
+            .spawn(move || run_scheduler(model_path, receiver, scheduler_events))
             .context("failed to spawn LLM scheduler thread")?;
-
-        ready_receiver
-            .recv()
-            .context("LLM scheduler stopped before reporting readiness")??;
 
         Ok(Self { sender, events })
     }
@@ -131,9 +126,9 @@ impl LlmScheduler {
 fn run_scheduler(
     model_path: PathBuf,
     receiver: mpsc::Receiver<SchedulerCommand>,
-    ready: mpsc::Sender<Result<()>>,
     events: broadcast::Sender<RealTimeExperienceEvent>,
 ) {
+    info!(model = %model_path.display(), "LLM scheduler loading model");
     let mut engine = match LlamaCppEngine::new(LlamaCppConfig {
         model_path,
         context_size: llm_context_size(),
@@ -142,13 +137,9 @@ fn run_scheduler(
         top_p: 0.9,
         ..LlamaCppConfig::default()
     }) {
-        Ok(engine) => {
-            let _ = ready.send(Ok(()));
-            engine
-        }
+        Ok(engine) => engine,
         Err(err) => {
             let message = err.to_string();
-            let _ = ready.send(Err(err));
             error!(error = %message, "LLM scheduler failed to load model");
             return;
         }

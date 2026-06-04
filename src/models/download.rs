@@ -116,16 +116,27 @@ fn ensure_bundle_available(bundle: &ModelBundle) -> Result<()> {
     }
 
     for asset in assets {
-        fetch_asset(asset, false)?;
+        ensure_asset_available(asset)?;
     }
     Ok(())
+}
+
+fn ensure_asset_available(asset: &ModelAsset) -> Result<()> {
+    let home = resolve_mortar_home()?;
+    let path = asset_path(&home, asset);
+    if is_non_empty_file(&path) {
+        println!("{} {}", "already present".green(), path.display());
+        return Ok(());
+    }
+
+    fetch_asset(asset, false)
 }
 
 fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
     let home = resolve_mortar_home()?;
     let path = asset_path(&home, asset);
     let metadata = remote_metadata(asset).unwrap_or_default();
-    let expected_sha256 = asset.sha256.map(str::to_string).or(metadata.etag_sha256);
+    let expected_sha256 = asset.sha256.map(str::to_string);
 
     if is_non_empty_file(&path) && !force {
         verify_existing_asset(&path, expected_sha256.as_deref())?;
@@ -217,7 +228,6 @@ fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
 #[derive(Default)]
 struct RemoteMetadata {
     content_length: Option<u64>,
-    etag_sha256: Option<String>,
 }
 
 fn remote_metadata(asset: &ModelAsset) -> Result<RemoteMetadata> {
@@ -229,17 +239,7 @@ fn remote_metadata(asset: &ModelAsset) -> Result<RemoteMetadata> {
         .get("content-length")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
-    let etag_sha256 = response
-        .headers()
-        .get("etag")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim_matches('"').to_string())
-        .filter(|value| is_hex_sha256(value));
-
-    Ok(RemoteMetadata {
-        content_length,
-        etag_sha256,
-    })
+    Ok(RemoteMetadata { content_length })
 }
 
 fn verify_existing_asset(path: &Path, expected_sha256: Option<&str>) -> Result<()> {
@@ -294,10 +294,6 @@ fn read_checksum_sidecar(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(fs::read_to_string(sidecar)?.trim().to_string()))
-}
-
-fn is_hex_sha256(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn face_model_paths() -> Result<FaceModelPaths> {
