@@ -217,13 +217,45 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
     let seconds = elapsed_ms as f64 / MILLIS_PER_SECOND;
 
     match entry {
-        TimelineEntry::Sensation(sensation) => format!(
-            "T+{seconds:06.3}\n  SENSATION {} id={} source={} observed_at={}\n",
-            sensation.kind,
-            sensation.id,
-            sensation.source,
-            sensation.observed_at.to_rfc3339()
-        ),
+        TimelineEntry::Sensation(sensation) => {
+            if sensation.kind == "memory.related_experience" {
+                let original_experience_id = sensation
+                    .payload
+                    .get("original_experience_id")
+                    .and_then(|value| value.as_str())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| match &sensation.provenance.kind {
+                        crate::sensation::ProvenanceKind::MemoryRecall { experience_id } => {
+                            Some(experience_id.to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let original_occurred_at = sensation
+                    .payload
+                    .get("original_occurred_at")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+
+                format!(
+                    "T+{seconds:06.3}\n  RECOLLECTION {} id={} source={} observed_at={} original_experience_id={} original_occurred_at={}\n",
+                    sensation.kind,
+                    sensation.id,
+                    sensation.source,
+                    sensation.observed_at.to_rfc3339(),
+                    original_experience_id,
+                    original_occurred_at
+                )
+            } else {
+                format!(
+                    "T+{seconds:06.3}\n  SENSATION {} id={} source={} observed_at={}\n",
+                    sensation.kind,
+                    sensation.id,
+                    sensation.source,
+                    sensation.observed_at.to_rfc3339()
+                )
+            }
+        }
         TimelineEntry::Impression(impression) => format!(
             "T+{seconds:06.3}\n  IMPRESSION id={} kind={} faculty=\"{}\" confidence={:.3} about=[{}] payload={} \"{}\"\n",
             impression.id,
@@ -468,7 +500,8 @@ mod tests {
         assert!(prompt[..first_cluster_end].contains("SENSATION vision.face_crop"));
         assert!(prompt[..first_cluster_end].contains("That face looks like Tim."));
         assert!(prompt[..first_cluster_end].contains("SENSATION audio.utterance"));
-        assert!(prompt[..first_cluster_end].contains("SENSATION memory.related_experience"));
+        assert!(prompt[..first_cluster_end].contains("RECOLLECTION memory.related_experience"));
+        assert!(prompt.contains("original_experience_id="));
     }
 
     #[test]

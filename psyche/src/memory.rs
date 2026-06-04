@@ -25,7 +25,8 @@ pub trait Memory {
     /// Convert a retrieved experience into a memory-derived sensation.
     ///
     /// The returned sensation will have `kind = "memory.related_experience"`
-    /// and carry the serialised experience as its JSON payload. It can be
+    /// and carry the serialised experience plus `original_*` metadata in its
+    /// JSON payload. It can be
     /// inserted into a [`TimelineFrame`](crate::timeline::TimelineFrame) like
     /// any other sensation.
     fn experience_to_sensation(experience: &Experience) -> Sensation
@@ -49,6 +50,27 @@ impl InMemory {
     }
 }
 
+fn recall_payload(experience: &Experience) -> serde_json::Value {
+    let mut payload = serde_json::to_value(experience).expect("Experience is always serializable");
+    let serde_json::Value::Object(map) = &mut payload else {
+        return payload;
+    };
+
+    map.insert(
+        "original_experience_id".to_owned(),
+        serde_json::json!(experience.id),
+    );
+    map.insert(
+        "original_occurred_at".to_owned(),
+        serde_json::json!(experience.occurred_at),
+    );
+    map.insert(
+        "original_observed_at".to_owned(),
+        serde_json::json!(experience.observed_at),
+    );
+    payload
+}
+
 impl Memory for InMemory {
     fn store(&mut self, experience: Experience) {
         self.store.push(experience);
@@ -59,13 +81,13 @@ impl Memory for InMemory {
     }
 
     fn experience_to_sensation(experience: &Experience) -> Sensation {
-        let payload = serde_json::to_value(experience).expect("Experience is always serializable");
+        let recall_time = crate::time::now();
         Sensation::new(
             "memory.related_experience",
             "memory",
-            experience.occurred_at,
-            crate::time::now(),
-            payload,
+            recall_time,
+            recall_time,
+            recall_payload(experience),
         )
         .with_provenance(Provenance::memory_recall(experience.id))
     }
@@ -191,13 +213,13 @@ impl Memory for InMemoryLinked {
     }
 
     fn experience_to_sensation(experience: &Experience) -> Sensation {
-        let payload = serde_json::to_value(experience).expect("Experience is always serializable");
+        let recall_time = crate::time::now();
         Sensation::new(
             "memory.related_experience",
             "memory",
-            experience.occurred_at,
-            crate::time::now(),
-            payload,
+            recall_time,
+            recall_time,
+            recall_payload(experience),
         )
         .with_provenance(Provenance::memory_recall(experience.id))
     }
@@ -312,12 +334,11 @@ mod tests {
         );
     }
 
-    /// When recalling an experience from memory the resulting sensation keeps
-    /// `occurred_at` from the original experience so it sorts correctly in
-    /// historical order.  `observed_at` is set to the time of recall (now),
-    /// reflecting when the system re-encountered the memory.
+    /// Recollection is modeled as a present sensation about a past event:
+    /// `occurred_at` and `observed_at` are set to recall-time "now", while
+    /// historical timestamps remain attached in payload metadata.
     #[test]
-    fn memory_recall_preserves_occurred_at_and_sets_observed_at_to_recall_time() {
+    fn memory_recall_occurs_now_and_preserves_original_timestamps_in_payload() {
         use chrono::Duration;
 
         let occurred = now();
@@ -334,16 +355,29 @@ mod tests {
         // which is at least as late as occurred_at.
         let s = InMemory::experience_to_sensation(&exp);
         assert_eq!(
-            s.occurred_at, occurred,
-            "recalled sensation must preserve the original experience's occurred_at"
+            s.occurred_at, s.observed_at,
+            "recalled sensation should be a present-time sensation"
         );
         assert!(
-            s.observed_at >= occurred,
-            "recalled sensation's observed_at must be at or after occurred_at"
+            s.occurred_at >= occurred,
+            "recalled sensation should occur at or after the original event"
         );
-        // observed_at should reflect the current moment (recall time), not the
-        // original observation time.
         let _ = recall_time; // documents intent; exact value depends on wall clock
+        assert_eq!(
+            s.payload["original_experience_id"],
+            serde_json::json!(exp.id),
+            "payload should reference the original experience id"
+        );
+        assert_eq!(
+            s.payload["original_occurred_at"],
+            serde_json::json!(exp.occurred_at),
+            "payload should preserve the original occurred_at"
+        );
+        assert_eq!(
+            s.payload["original_observed_at"],
+            serde_json::json!(exp.observed_at),
+            "payload should preserve the original observed_at"
+        );
         assert_eq!(s.kind, "memory.related_experience");
         assert_eq!(s.source, "memory");
     }

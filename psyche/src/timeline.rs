@@ -152,8 +152,9 @@ pub fn event_clusters(entries: &[TimelineEntry], max_gap: chrono::Duration) -> V
 /// - A delayed sensation whose `occurred_at` is in the past is inserted before
 ///   entries that were added to the timeline earlier but whose `occurred_at` is
 ///   more recent.
-/// - Replayed or recalled entries sort according to when their events originally
-///   happened, not when they re-entered the pipeline.
+/// - Replayed entries sort according to when their events originally happened.
+///   Memory recollection sensations sort at recollection time (now) while
+///   retaining original-event timestamps in payload metadata.
 /// - Two entries with identical `occurred_at` retain stable relative insertion
 ///   order (new entries are placed after existing ones with the same timestamp).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

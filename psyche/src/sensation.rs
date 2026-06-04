@@ -17,8 +17,8 @@ use uuid::Uuid;
 /// - **`occurred_at`**: when the underlying real-world event happened. This is
 ///   the canonical time used for timeline ordering. It may lie in the past
 ///   relative to processing time—for example, a camera frame timestamped at the
-///   moment of capture, a replayed sensor log, or a recalled memory whose
-///   original event occurred long ago.
+///   moment of capture or a replayed sensor log. Memory recollection sensations
+///   are considered present events and therefore occur at recall time.
 /// - **`observed_at`**: when the cognitive system first became aware of this
 ///   event. For real-time sensors this is typically very close to `occurred_at`.
 ///   For delayed delivery, batch replay, or memory recall it will be

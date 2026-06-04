@@ -118,6 +118,9 @@ impl<M: Memory> Pipeline<M> {
     /// - Selection is a full snapshot of `memory.recall()` at call time.
     /// - Each recalled experience becomes one sensation with
     ///   `kind = "memory.related_experience"` and `source = "memory"`.
+    /// - Recalled sensations represent the moment of recollection:
+    ///   `occurred_at = observed_at = now`.
+    /// - Payload retains historical event metadata (`original_*` fields).
     /// - Recalled sensations are inserted into the [`TimelineFrame`] using normal
     ///   timeline ordering by `occurred_at`.
     pub fn recall_into_timeline(&mut self) -> Vec<Sensation> {
@@ -225,7 +228,7 @@ mod tests {
 
     #[test]
     fn recall_selection_and_timeline_order_are_canonical() {
-        let t0 = now();
+        let t0 = now() - Duration::seconds(30);
         let t1 = t0 + Duration::seconds(1);
         let t2 = t0 + Duration::seconds(2);
 
@@ -242,6 +245,22 @@ mod tests {
             .collect();
         assert_eq!(recalled_experiences[0].what, late.what);
         assert_eq!(recalled_experiences[1].what, early.what);
+        assert_eq!(
+            recalled[0].payload["original_experience_id"],
+            json!(late.id)
+        );
+        assert_eq!(
+            recalled[0].payload["original_occurred_at"],
+            json!(late.occurred_at)
+        );
+        assert_eq!(
+            recalled[1].payload["original_experience_id"],
+            json!(early.id)
+        );
+        assert_eq!(
+            recalled[1].payload["original_occurred_at"],
+            json!(early.occurred_at)
+        );
 
         pipeline.observe(Sensation::new("vision.frame", "camera", t1, t1, json!({})));
 
@@ -256,7 +275,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(memory_sensation_times, vec![t0, t2]);
+        assert_eq!(memory_sensation_times.len(), 2);
+        assert!(memory_sensation_times.iter().all(|t| *t > t2));
     }
 
     #[test]

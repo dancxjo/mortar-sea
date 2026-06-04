@@ -266,15 +266,30 @@ impl Memory for ScriptedMemory {
     }
 
     fn experience_to_sensation(experience: &Experience) -> Sensation {
-        let payload = serde_json::to_value(experience).unwrap_or_else(|err| {
+        let mut payload = serde_json::to_value(experience).unwrap_or_else(|err| {
             panic!("failed to serialize Experience to JSON payload: {}", err)
         });
+        if let serde_json::Value::Object(map) = &mut payload {
+            map.insert(
+                "original_experience_id".to_owned(),
+                serde_json::json!(experience.id),
+            );
+            map.insert(
+                "original_occurred_at".to_owned(),
+                serde_json::json!(experience.occurred_at),
+            );
+            map.insert(
+                "original_observed_at".to_owned(),
+                serde_json::json!(experience.observed_at),
+            );
+        }
+        let recall_time = crate::time::now();
         Sensation {
             id: deterministic_uuid(format!("mock-memory:{}", experience.id)),
             kind: "memory.related_experience".to_owned(),
             source: "memory".to_owned(),
-            occurred_at: experience.occurred_at,
-            observed_at: crate::time::now(),
+            occurred_at: recall_time,
+            observed_at: recall_time,
             sequence: None,
             provenance: Provenance::memory_recall(experience.id),
             payload,
@@ -405,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn scripted_memory_recall_and_sensation_are_deterministic() {
+    fn scripted_memory_recall_keeps_deterministic_id_and_payload_metadata() {
         let occurred_at = now();
         let observed_at = occurred_at + Duration::seconds(1);
         let experience = Experience {
@@ -425,8 +440,17 @@ mod tests {
         let first = ScriptedMemory::experience_to_sensation(&experience);
         let second = ScriptedMemory::experience_to_sensation(&experience);
         assert_eq!(first.id, second.id);
-        assert_eq!(first.observed_at, second.observed_at);
+        assert_eq!(first.occurred_at, first.observed_at);
+        assert_eq!(second.occurred_at, second.observed_at);
         assert_eq!(first.payload, second.payload);
+        assert_eq!(
+            first.payload["original_experience_id"],
+            serde_json::json!(experience.id)
+        );
+        assert_eq!(
+            first.payload["original_occurred_at"],
+            serde_json::json!(experience.occurred_at)
+        );
     }
 
     #[test]
@@ -497,7 +521,7 @@ mod tests {
                 vec![MockWitRule::new("Heard utterance", "A person spoke.")],
             ));
 
-        let earlier_time = now();
+        let earlier_time = now() - Duration::seconds(TEST_TIME_DELTA_SECONDS * 2);
         let later_time = earlier_time + Duration::seconds(TEST_TIME_DELTA_SECONDS);
 
         cognition.observe(Sensation::new(
@@ -526,7 +550,8 @@ mod tests {
         assert_eq!(recalled.len(), 1);
         assert_eq!(recalled[0].kind, "memory.related_experience");
         assert_eq!(recalled[0].source, "memory");
-        assert_eq!(recalled[0].occurred_at, earlier_time);
+        assert_eq!(recalled[0].occurred_at, recalled[0].observed_at);
+        assert!(recalled[0].occurred_at >= later_time);
 
         let recovered: Experience =
             serde_json::from_value(recalled[0].payload.clone()).expect("experience payload");
@@ -558,8 +583,8 @@ mod tests {
             })
             .expect("external sensation should be present in timeline");
         assert!(
-            memory_sensation_index < external_sensation_index,
-            "memory sensation at index {} must appear before external sensation at index {} for chronological ordering",
+            memory_sensation_index > external_sensation_index,
+            "memory sensation at index {} must appear after external sensation at index {} when recall occurs now",
             memory_sensation_index,
             external_sensation_index
         );
