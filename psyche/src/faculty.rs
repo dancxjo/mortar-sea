@@ -100,6 +100,7 @@ impl FacultyRegistry {
 mod tests {
     use super::*;
     use crate::time::now;
+    use serde_json::Value;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -113,10 +114,14 @@ mod tests {
                 vec![],
                 vec![Impression {
                     id: Uuid::nil(),
-                    sensation_ids: vec![sensation.id],
+                    text: format!("{} noticed {}", self.name, sensation.kind),
+                    kind: format!("{}.notice", self.name),
                     occurred_at: sensation.occurred_at,
                     observed_at: sensation.observed_at,
-                    how: format!("{} noticed {}", self.name, sensation.kind),
+                    faculty: self.name.clone(),
+                    about: vec![sensation.id],
+                    confidence: 1.0,
+                    payload: Value::Null,
                 }],
             )
         }
@@ -214,7 +219,7 @@ mod tests {
             .iter_mut()
             .flat_map(|faculty| {
                 let (_, impressions) = faculty.process(&sensation);
-                impressions.into_iter().map(|impression| impression.how)
+                impressions.into_iter().map(|impression| impression.text)
             })
             .collect();
 

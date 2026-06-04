@@ -12,6 +12,8 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::messages::{RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord};
 
+const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
+
 pub(crate) fn spawn_trace(state: AppState) {
     if state
         .realtime_experience_active
@@ -171,18 +173,28 @@ fn build_prompt_from_records(
             .find(|impression| impression.sensation_id == sensation.id)
             .map(|impression| Impression {
                 id: impression.id,
-                sensation_ids: vec![sensation.id],
+                text: impression.text.clone(),
+                kind: impression.kind.clone(),
                 occurred_at: impression.occurred_at,
                 observed_at: impression.observed_at,
-                how: impression.how.clone(),
+                faculty: impression.faculty.clone(),
+                about: vec![sensation.id],
+                confidence: impression.confidence,
+                payload: impression.payload.clone(),
             })
             .unwrap_or_else(|| {
-                Impression::new(
+                let mut impression = Impression::new(
                     vec![sensation.id],
                     sensation.occurred_at,
                     sensation.observed_at,
                     format!("I see something with my eye ({}).", record.source.sensor_id),
-                )
+                );
+                impression.kind = "vision.field".to_string();
+                impression.faculty = "Field Vision Faculty".to_string();
+                // Fallback impressions are synthetic placeholders, so keep
+                // confidence below the normal field-vision baseline.
+                impression.confidence = FALLBACK_IMPRESSION_CONFIDENCE;
+                impression
             });
 
         frame.push(TimelineEntry::Sensation(sensation));

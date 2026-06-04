@@ -173,15 +173,19 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
             sensation.observed_at.to_rfc3339()
         ),
         TimelineEntry::Impression(impression) => format!(
-            "T+{seconds:06.3}\n  IMPRESSION id={} about=[{}] \"{}\"\n",
+            "T+{seconds:06.3}\n  IMPRESSION id={} kind={} faculty=\"{}\" confidence={:.3} about=[{}] payload={} \"{}\"\n",
             impression.id,
+            impression.kind,
+            escape_prompt_text(&impression.faculty),
+            impression.confidence,
             impression
-                .sensation_ids
+                .about
                 .iter()
                 .map(Uuid::to_string)
                 .collect::<Vec<_>>()
                 .join(","),
-            escape_prompt_text(&impression.how)
+            escape_prompt_text(&impression.payload.to_string()),
+            escape_prompt_text(&impression.text)
         ),
         TimelineEntry::Experience(experience) => format!(
             "T+{seconds:06.3}\n  EXPERIENCE id={} from=[{}] \"{}\"\n",

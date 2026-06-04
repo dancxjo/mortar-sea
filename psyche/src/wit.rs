@@ -58,9 +58,7 @@ impl WitFilter {
             Self::Any => true,
             Self::ImpressionType(expected_type) => {
                 frame.entries().iter().any(|entry| match entry {
-                    TimelineEntry::Impression(impression) => {
-                        parse_type_prefix(&impression.how) == expected_type
-                    }
+                    TimelineEntry::Impression(impression) => impression.kind == *expected_type,
                     _ => false,
                 })
             }
@@ -156,7 +154,7 @@ impl WitRegistry {
 /// Extract the type prefix from a colon-delimited timeline description.
 ///
 /// Examples:
-/// - `"social.intent: greeting"` -> `"social.intent"`
+/// - `"memory.recall: prior greeting"` -> `"memory.recall"`
 /// - `"memory.recall"` -> `"memory.recall"`
 fn parse_type_prefix(value: &str) -> &str {
     value
@@ -340,12 +338,9 @@ mod tests {
             t0,
             json!({ "text": "hello" }),
         )));
-        frame.push(TimelineEntry::Impression(Impression::new(
-            vec![],
-            t0,
-            t0,
-            "social.intent: greeting",
-        )));
+        let mut social = Impression::new(vec![], t0, t0, "greeting");
+        social.kind = "social.intent".to_owned();
+        frame.push(TimelineEntry::Impression(social));
         frame.push(TimelineEntry::Experience(Experience::new(
             vec![],
             t0,
@@ -424,5 +419,34 @@ mod tests {
                 .any(|output| output == "semantic: understood")
         );
         assert!(outputs.iter().any(|output| output == "social: understood"));
+    }
+
+    #[test]
+    fn impression_filter_uses_structured_kind_not_text_prefix() {
+        let mut registry = WitRegistry::new();
+        registry
+            .register(
+                "social",
+                10,
+                WitFilter::ImpressionType("social.intent".to_owned()),
+                WitCadence::EveryObserve,
+                || {
+                    Box::new(DeterministicWit {
+                        label: "social".to_owned(),
+                    })
+                },
+            )
+            .expect("register social");
+
+        let t0 = now();
+        let mut frame = TimelineFrame::new();
+        // Legacy text still carries a type-like prefix, but filtering should
+        // rely only on the structured `kind`.
+        let mut impression = Impression::new(vec![], t0, t0, "social.intent: greeting");
+        impression.kind = "vision.face".to_owned();
+        frame.push(TimelineEntry::Impression(impression));
+
+        let selected = registry.select_for_frame(&frame);
+        assert!(selected.is_empty());
     }
 }

@@ -8,6 +8,7 @@ use crate::app::AppState;
 use crate::messages::{RawVisionFrame, VisionFieldImpressionRecord};
 
 const MAX_FIELD_VISION_TOKENS: usize = 96;
+const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
 
 pub(crate) fn spawn_field_vision(state: AppState) {
     if state.field_vision_active.swap(true, Ordering::AcqRel) {
@@ -149,7 +150,11 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, how: String) {
         observed_at: chrono::Utc::now(),
         source: frame.sensation.source.clone(),
         sequence: frame.sensation.sequence,
-        how,
+        text: how,
+        kind: "vision.field".to_string(),
+        faculty: "Field Vision Faculty".to_string(),
+        confidence: FIELD_VISION_BASE_CONFIDENCE,
+        payload: serde_json::Value::Null,
     };
 
     debug!(
