@@ -5,6 +5,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
+    context_frame::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS},
     experience::Experience,
     llm::{GenerationRequest, LlmEngine, LlmEvent},
     timeline::{TimelineEntry, TimelineFrame},
@@ -80,7 +81,9 @@ impl<E: LlmEngine> Wit for RealTimeExperienceWit<E> {
             return Vec::new();
         }
 
-        let prompt = format_realtime_experience_prompt(&window);
+        let context_frame =
+            ContextFrame::from_timeline(frame, &window, DEFAULT_CONTEXT_FRAME_ITEMS);
+        let prompt = format_realtime_experience_prompt(&context_frame, &window);
         let request = GenerationRequest {
             prompt,
             max_tokens: Some(self.config.max_tokens),
@@ -135,7 +138,10 @@ fn recent_window(
     entries[offset..].to_vec()
 }
 
-pub fn format_realtime_experience_prompt(entries: &[TimelineEntry]) -> String {
+pub fn format_realtime_experience_prompt(
+    context_frame: &ContextFrame,
+    entries: &[TimelineEntry],
+) -> String {
     let Some(first) = entries.first() else {
         return String::new();
     };
@@ -147,8 +153,10 @@ pub fn format_realtime_experience_prompt(entries: &[TimelineEntry]) -> String {
          Treat impressions as evidence, not certainty.\n\
          Return only JSON: {\"experiences\":[{\"what\":\"...\",\"impression_ids\":[\"...\"]}]}.\n\
          Experiences should explain what appears to be happening right now, not summarize events.\n\n\
-         Timeline:\n",
+         ContextFrame:\n",
     );
+    prompt.push_str(&context_frame.render());
+    prompt.push_str("Timeline:\n");
 
     for entry in entries {
         prompt.push_str(&format_timeline_entry(entry, start));
@@ -316,14 +324,52 @@ mod tests {
         frame.push(TimelineEntry::Impression(imp));
         frame.push(TimelineEntry::Sensation(s0));
 
-        let prompt = format_realtime_experience_prompt(frame.entries());
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
         let vision_pos = prompt.find("SENSATION vision.frame").unwrap();
         let impression_pos = prompt.find("IMPRESSION").unwrap();
         let audio_pos = prompt.find("SENSATION audio.utterance").unwrap();
+        let context_pos = prompt.find("ContextFrame:").unwrap();
+        let timeline_pos = prompt.find("Timeline:").unwrap();
 
+        assert!(context_pos < timeline_pos);
         assert!(vision_pos < impression_pos);
         assert!(impression_pos < audio_pos);
         assert!(!prompt.contains("Face Faculty:"));
+    }
+
+    #[test]
+    fn prompt_includes_context_frame_sections() {
+        let t0 = Utc::now();
+        let room = Sensation::new("location.fix", "gps", t0, t0, json!({"room": "Workshop"}));
+        let speech = Sensation::new(
+            "audio.utterance",
+            "mic",
+            t0 + ChronoDuration::milliseconds(50),
+            t0 + ChronoDuration::milliseconds(50),
+            json!({"text": "Tim said hello."}),
+        );
+        let mut impression = Impression::new(
+            vec![speech.id],
+            speech.occurred_at,
+            speech.observed_at,
+            "Tim said hello.",
+        );
+        impression.faculty = "ASR Faculty".to_owned();
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(room));
+        frame.push(TimelineEntry::Sensation(speech));
+        frame.push(TimelineEntry::Impression(impression));
+
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
+
+        assert!(prompt.contains("ContextFrame:\nWHO\n"));
+        assert!(prompt.contains("WHERE\n- Workshop\n"));
+        assert!(prompt.contains("WHEN\n- "));
+        assert!(prompt.contains("HOW\n- ASR Faculty\n"));
+        assert!(prompt.contains("\nTimeline:\n"));
     }
 
     #[test]

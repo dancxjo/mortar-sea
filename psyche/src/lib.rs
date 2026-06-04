@@ -9,6 +9,7 @@
 //! A remembered thing re-enters cognition as a new sensation; there is no
 //! separate memory pathway.
 
+pub mod context_frame;
 pub mod episode;
 pub mod experience;
 pub mod faculty;
@@ -25,6 +26,7 @@ pub mod time;
 pub mod timeline;
 pub mod wit;
 
+pub use context_frame::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS};
 pub use episode::Episode;
 pub use experience::Experience;
 pub use faculty::{Faculty, FacultyRegistry, FacultyRegistryError, RegisteredFaculty};
