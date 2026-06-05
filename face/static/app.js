@@ -104,8 +104,12 @@ window.faceApp = function faceApp() {
           return;
         }
         if (message.type === 'voice_response_start') {
+          if (this.voiceResponse && this.activeVoiceGenerationId !== message.generation_id) {
+            this.voiceResponse += '\n';
+            this.scrollVoiceStream();
+          }
           this.activeVoiceGenerationId = message.generation_id;
-          this.voiceHasTokens = false;
+          this.voiceHasTokens = Boolean(this.voiceResponse);
           this.voiceStatus = 'thinking';
           return;
         }
@@ -116,6 +120,7 @@ window.faceApp = function faceApp() {
             this.voiceHasTokens = true;
           }
           this.voiceResponse += message.text;
+          this.scrollVoiceStream();
           return;
         }
         if (message.type === 'voice_response_done') {
@@ -125,12 +130,9 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_observation') {
           this.activeVoiceGenerationId = message.generation_id;
-          this.voiceResponse = message.observation?.text || this.voiceResponse;
           if (message.observation?.emoji) {
             this.faceEmoji = message.observation.emoji;
           }
-          this.voiceHasTokens = Boolean(this.voiceResponse);
-          this.voiceStatus = 'waiting';
           return;
         }
         if (message.type === 'prompt') {
@@ -161,6 +163,14 @@ window.faceApp = function faceApp() {
 
       socket.addEventListener('error', () => {
         this.experienceStatus = 'error';
+      });
+    },
+
+    scrollVoiceStream() {
+      this.$nextTick(() => {
+        const stream = this.$refs.voiceStream;
+        if (!stream) return;
+        stream.scrollTop = stream.scrollHeight;
       });
     },
 

@@ -415,7 +415,7 @@ fn voice_llm_cpu_only() -> bool {
     std::env::var("MORTAR_VOICE_LLAMA_CPU_ONLY")
         .ok()
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn run_generation(
@@ -469,6 +469,13 @@ fn run_generation(
             for append in appends {
                 if let Err(err) = engine.append_prompt(generation, append) {
                     warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
+                    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                        job_id: id,
+                        job_kind: kind.as_str().to_string(),
+                        observed_at: chrono::Utc::now(),
+                        error: err.to_string(),
+                    });
+                    return Err(err).context("failed to append live prompt input");
                 }
             }
         }

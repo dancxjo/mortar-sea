@@ -389,7 +389,9 @@ fn context_frame_system_prompt() -> &'static str {
     "You fill a compact ContextFrame for the real-time Experience generator. \
      Return only the requested JSON. Use evidence conservatively. \
      Merge repeated observations into non-redundant fields. \
-     Do not list pronouns, age phrases, camera names, or body parts as people or places."
+     Use real physical location facts for WHERE when evidence supports them, and do not invent \
+     unknown locations. Do not list pronouns, age phrases, camera names, or body parts as people \
+     or places."
 }
 
 fn format_context_frame_prompt(context_frame: &ContextFrame, entries: &[TimelineEntry]) -> String {
@@ -399,7 +401,9 @@ fn format_context_frame_prompt(context_frame: &ContextFrame, entries: &[Timeline
          {\"who\":[\"...\"],\"what\":[\"...\"],\"where\":[\"...\"],\"when\":\"...\",\"why\":[\"...\"],\"how\":[\"...\"]}.\n\
          Keep each list to at most two concise items; one item is better when the evidence is repetitive.\n\
          WHO is concrete people or participants only.\n\
-         WHERE is physical place or setting only; exclude age bands, cameras, eyes, and body parts.\n\
+         WHERE is physical place or setting only. Prefer real facts about where the system is physically located: indoors or outdoors, named room/building/place, town or region, hemisphere, or coordinates when those are supported by evidence.\n\
+         For WHERE, use the most specific known real location cue and say when it is only approximate; if the evidence does not establish town, hemisphere, indoor/outdoor status, or any physical place, omit that unknown rather than guessing.\n\
+         Exclude age bands, cameras, eyes, and body parts from WHERE.\n\
          WHAT should combine all repeated frame-level descriptions into one current situation, not repeated sensor status.\n\
          Do not list near-duplicates such as multiple versions of the same visible person; merge stable details.\n\
          WHEN should preserve the supplied time span unless the evidence gives a clearer phrase.\n\n\
@@ -1167,6 +1171,30 @@ mod tests {
         assert!(prompt.contains("I think it's a woman in her late 20s."));
         assert!(!prompt.contains("attribute model"));
         assert!(!prompt.contains("detection confidence"));
+    }
+
+    #[test]
+    fn context_frame_prompt_requests_real_physical_location_facts() {
+        let fallback = ContextFrame {
+            who: Vec::new(),
+            what: vec!["A current scene is visible.".to_owned()],
+            where_: Vec::new(),
+            when: "now".to_owned(),
+            why: Vec::new(),
+            how: vec!["Vision Faculty".to_owned()],
+        };
+
+        let system = context_frame_system_prompt();
+        let prompt = format_context_frame_prompt(&fallback, &[]);
+
+        assert!(system.contains("Use real physical location facts for WHERE"));
+        assert!(system.contains("do not invent"));
+        assert!(prompt.contains("where the system is physically located"));
+        assert!(prompt.contains("indoors or outdoors"));
+        assert!(prompt.contains("town or region"));
+        assert!(prompt.contains("hemisphere"));
+        assert!(prompt.contains("coordinates"));
+        assert!(prompt.contains("omit that unknown rather than guessing"));
     }
 
     #[test]

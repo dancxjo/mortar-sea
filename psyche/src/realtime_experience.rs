@@ -446,12 +446,8 @@ mod tests {
     fn prompt_instructs_first_person_lived_experience() {
         let t0 = Utc::now();
         let sensation = Sensation::new("vision.frame", "camera", t0, t0, json!({}));
-        let impression = Impression::new(
-            vec![sensation.id],
-            t0,
-            t0,
-            "I see a red mug on the desk.",
-        );
+        let impression =
+            Impression::new(vec![sensation.id], t0, t0, "I see a red mug on the desk.");
         let mut frame = TimelineFrame::new();
         frame.push(TimelineEntry::Sensation(sensation));
         frame.push(TimelineEntry::Impression(impression));
