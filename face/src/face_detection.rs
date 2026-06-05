@@ -33,6 +33,8 @@ struct DetectedFaceCrop {
     bbox: BBox,
     landmarks: Option<Vec<[f32; 2]>>,
     confidence: f32,
+    estimated_age_years: u8,
+    estimated_sex: String,
 }
 
 impl FaceDetector {
@@ -128,8 +130,20 @@ fn detect_faces_blocking(
 
     faces
         .into_iter()
-        .map(|face| crop_face(&img, &face.detection, face.embedding))
+        .map(|face| {
+            crop_face(
+                &img,
+                &face.detection,
+                face.embedding,
+                face.age,
+                estimated_sex_label(face.gender),
+            )
+        })
         .collect()
+}
+
+fn estimated_sex_label(gender: face_id::gender_age::Gender) -> String {
+    format!("{gender:?}").to_ascii_lowercase()
 }
 
 fn frame_data_base64(frame: &RawVisionFrame) -> Result<&str> {
@@ -144,6 +158,8 @@ fn crop_face(
     img: &image::DynamicImage,
     detection: &face_id::detector::DetectedFace,
     embedding: Vec<f32>,
+    estimated_age_years: u8,
+    estimated_sex: String,
 ) -> Result<DetectedFaceCrop> {
     let (width, height) = img.dimensions();
     let absolute_detection = detection.to_absolute(width, height);
@@ -185,6 +201,8 @@ fn crop_face(
                 .collect::<Vec<_>>()
         }),
         confidence: detection.score,
+        estimated_age_years,
+        estimated_sex,
     })
 }
 
@@ -297,7 +315,18 @@ fn face_crop_sensation(
         detail: serde_json::json!({
             "source_frame_id": frame.sensation.id,
             "face_index": face_index,
+            "bbox": {
+                "x1": crop.bbox.x1,
+                "y1": crop.bbox.y1,
+                "x2": crop.bbox.x2,
+                "y2": crop.bbox.y2,
+            },
+            "landmarks": crop.landmarks.clone(),
+            "detection_confidence": crop.confidence,
             "embedding_dimensions": crop.embedding.len(),
+            "estimated_age_years": crop.estimated_age_years,
+            "estimated_sex": crop.estimated_sex.clone(),
+            "attribute_model": "buffalo_l/genderage",
         }),
     }
 }
@@ -384,6 +413,8 @@ mod tests {
             },
             landmarks: None,
             confidence: 0.9,
+            estimated_age_years: 34,
+            estimated_sex: "male".to_string(),
         };
 
         let record = face_crop_sensation(&frame, &crop, 2);
@@ -395,6 +426,13 @@ mod tests {
         assert!(record.provenance.references_sensation(frame.sensation.id));
         assert_eq!(record.detail["face_index"], 2);
         assert_eq!(record.detail["embedding_dimensions"], 2);
+        assert_eq!(record.detail["estimated_age_years"], 34);
+        assert_eq!(record.detail["estimated_sex"], "male");
+        let confidence = record.detail["detection_confidence"]
+            .as_f64()
+            .expect("detection confidence");
+        assert!((confidence - 0.9).abs() < 0.0001);
+        assert_eq!(record.detail["bbox"]["x1"], 1.0);
     }
 
     #[test]

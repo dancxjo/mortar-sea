@@ -114,7 +114,7 @@ async fn stream_generation(
     generation_id: Uuid,
     prompt: String,
     events: broadcast::Sender<RealTimeExperienceEvent>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     state
         .llm_scheduler
         .stream(
@@ -386,9 +386,115 @@ fn select_records_for_experience_prompt<'a>(
 
 fn fallback_impression_for_record(record: &SensationRecord) -> String {
     match record.kind.as_str() {
-        "vision.face_crop" => format!("I see a face (in my eye \"{}\").", record.source.sensor_id),
+        "vision.face_crop" => fallback_face_impression_for_record(record),
         "vision.frame" => format!("I'm looking with my eye ({}).", record.source.sensor_id),
         _ => format!("I sense {} from {}.", record.kind, record.source.sensor_id),
+    }
+}
+
+fn fallback_face_impression_for_record(record: &SensationRecord) -> String {
+    let mut text = format!("I see a face (in my eye \"{}\").", record.source.sensor_id);
+
+    if let Some(attributes) = embodied_face_attributes_text(&record.detail) {
+        text.push(' ');
+        text.push_str(&attributes);
+    }
+
+    text
+}
+
+fn embodied_face_attributes_text(detail: &serde_json::Value) -> Option<String> {
+    let person = detail
+        .get("estimated_sex")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .and_then(person_label);
+
+    let age = detail
+        .get("estimated_age_years")
+        .and_then(serde_json::Value::as_u64);
+
+    match (person, age) {
+        (Some(person), Some(age)) => Some(format!(
+            "{} it's {} {}.",
+            perception_prefix(detail),
+            person.article_noun(),
+            age_phrase(age, person.possessive())
+        )),
+        (Some(person), None) => Some(format!(
+            "{} it's {}.",
+            perception_prefix(detail),
+            person.article_noun()
+        )),
+        (None, Some(age)) => Some(format!(
+            "{} it's someone {}.",
+            perception_prefix(detail),
+            age_phrase(age, "their")
+        )),
+        (None, None) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PerceivedPerson {
+    Woman,
+    Man,
+}
+
+impl PerceivedPerson {
+    fn article_noun(self) -> &'static str {
+        match self {
+            Self::Woman => "a woman",
+            Self::Man => "a man",
+        }
+    }
+
+    fn possessive(self) -> &'static str {
+        match self {
+            Self::Woman => "her",
+            Self::Man => "his",
+        }
+    }
+}
+
+fn person_label(estimated_sex: &str) -> Option<PerceivedPerson> {
+    match estimated_sex.to_ascii_lowercase().as_str() {
+        "female" | "woman" => Some(PerceivedPerson::Woman),
+        "male" | "man" => Some(PerceivedPerson::Man),
+        _ => None,
+    }
+}
+
+fn perception_prefix(detail: &serde_json::Value) -> &'static str {
+    let confidence = detail
+        .get("detection_confidence")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.8);
+
+    if confidence >= 0.9 {
+        "I'm pretty sure"
+    } else if confidence >= 0.72 {
+        "I think"
+    } else {
+        "I'm not sure, but I think"
+    }
+}
+
+fn age_phrase(age: u64, possessive: &str) -> String {
+    match age {
+        0..=2 => "as a baby".to_string(),
+        3..=12 => "as a child".to_string(),
+        13..=19 => "as a teenager".to_string(),
+        20..=99 => {
+            let decade = (age / 10) * 10;
+            let band = match age % 10 {
+                0..=3 => "early",
+                4..=6 => "mid",
+                _ => "late",
+            };
+            format!("in {possessive} {band} {decade}s")
+        }
+        _ => "as an older adult".to_string(),
     }
 }
 
@@ -468,6 +574,35 @@ mod tests {
         }
     }
 
+    fn face_record(id: Uuid, occurred_at: chrono::DateTime<chrono::Utc>) -> SensationRecord {
+        SensationRecord {
+            id,
+            kind: "vision.face_crop".to_string(),
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "face-browser".to_string(),
+                sensor_id: "camera.default".to_string(),
+                faculty: "face".to_string(),
+            },
+            sequence: 2,
+            media: crate::messages::MediaRecord {
+                mime: "image/jpeg".to_string(),
+                width: 96,
+                height: 96,
+                encoding: "base64-data-url".to_string(),
+            },
+            provenance: psyche::Provenance::direct(),
+            data_sha256: "face-sha".to_string(),
+            data_bytes: 256,
+            detail: json!({
+                "estimated_sex": "female",
+                "estimated_age_years": 28,
+                "detection_confidence": 0.876,
+            }),
+        }
+    }
+
     #[test]
     fn prompt_includes_field_vision_impression_for_original_sensation_outside_recent_window() {
         let t0 = chrono::Utc::now();
@@ -492,5 +627,31 @@ mod tests {
         assert!(prompt.contains(&format!("SENSATION vision.frame id={original_id}")));
         assert!(prompt.contains(impression_text));
         assert!(prompt.contains(&format!("about=[{original_id}]")));
+    }
+
+    #[test]
+    fn fallback_face_impression_includes_estimated_attributes() {
+        let record = face_record(Uuid::new_v4(), chrono::Utc::now());
+
+        let impression = fallback_impression_for_record(&record);
+
+        assert!(impression.contains("I see a face"));
+        assert!(impression.contains("I think it's a woman in her late 20s."));
+        assert!(!impression.contains("attribute model"));
+        assert!(!impression.contains("detection confidence"));
+    }
+
+    #[test]
+    fn prompt_includes_face_attribute_fallback_impression() {
+        let t0 = chrono::Utc::now();
+        let face_id = Uuid::new_v4();
+        let records = vec![face_record(face_id, t0)];
+
+        let prompt = build_prompt_from_records(&records, &[]);
+
+        assert!(prompt.contains(&format!("SENSATION vision.face_crop id={face_id}")));
+        assert!(prompt.contains("I think it's a woman in her late 20s."));
+        assert!(!prompt.contains("attribute model"));
+        assert!(!prompt.contains("detection confidence"));
     }
 }
