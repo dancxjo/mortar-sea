@@ -142,6 +142,16 @@ pub(crate) enum RealTimeExperienceEvent {
         generation_id: Uuid,
         observation: VoiceObservation,
     },
+    VoiceResponseStart {
+        generation_id: Uuid,
+    },
+    VoiceResponseToken {
+        generation_id: Uuid,
+        text: String,
+    },
+    VoiceResponseDone {
+        generation_id: Uuid,
+    },
     LlmJobQueued {
         job_id: Uuid,
         job_kind: String,

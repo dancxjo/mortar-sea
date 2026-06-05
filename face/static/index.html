@@ -31,11 +31,16 @@
 
           <div class="thinking-face" aria-live="polite">
             <div class="thought-bubble">
-              <details open>
+              <div class="voice-stream-header">
+                <span>Silent voice</span>
+                <span class="status" x-bind:data-status="voiceStatus" x-text="voiceStatus"></span>
+              </div>
+              <pre class="voice-stream" x-text="voiceResponse || 'Waiting for voice tokens…'"></pre>
+              <details>
                 <summary>What's happening here?</summary>
                 <pre x-text="experiencePrompt || 'Waiting for the first real-time Experience prompt…'"></pre>
+                <pre class="response-stream" x-text="experienceResponse || 'Waiting for streamed response…'"></pre>
               </details>
-              <pre class="response-stream" x-text="experienceResponse || 'Waiting for streamed response…'"></pre>
             </div>
             <div class="emoji-face" aria-label="thinking face">🤔</div>
           </div>

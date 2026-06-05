@@ -10,6 +10,9 @@ window.faceApp = function faceApp() {
     experienceSocket: null,
     experienceStatus: 'disconnected',
     activeExperienceGenerationId: null,
+    activeVoiceGenerationId: null,
+    voiceResponse: '',
+    voiceStatus: 'waiting',
     llmJobs: [],
     mime: 'image/jpeg',
     quality: 0.45,
@@ -84,6 +87,22 @@ window.faceApp = function faceApp() {
         const message = JSON.parse(event.data);
         if (this.isLlmJobEvent(message.type)) {
           this.upsertLlmJob(message);
+          return;
+        }
+        if (message.type === 'voice_response_start') {
+          this.activeVoiceGenerationId = message.generation_id;
+          this.voiceResponse = '';
+          this.voiceStatus = 'thinking';
+          return;
+        }
+        if (message.type === 'voice_response_token') {
+          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceResponse += message.text;
+          return;
+        }
+        if (message.type === 'voice_response_done') {
+          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceStatus = 'waiting';
           return;
         }
         if (message.type === 'prompt') {

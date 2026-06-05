@@ -85,6 +85,11 @@ async fn run_voice(state: AppState) {
                 if let Some(mut current) = active.take() {
                     current.control.append_prompt(format_live_experience_append(&experience));
                     current.control.cancel();
+                    let _ = state
+                        .realtime_experience_events
+                        .send(RealTimeExperienceEvent::VoiceResponseDone {
+                            generation_id: current.generation_id,
+                        });
                     for sentence in current.segmenter.drain_committed() {
                         emit_voice_sentence(
                             &state,
@@ -126,6 +131,12 @@ async fn run_voice(state: AppState) {
                             continue;
                         }
 
+                        let _ = state.realtime_experience_events.send(
+                            RealTimeExperienceEvent::VoiceResponseToken {
+                                generation_id,
+                                text: text.clone(),
+                            },
+                        );
                         for sentence in current.segmenter.push_str(&text) {
                             emit_voice_sentence(
                                 &state,
@@ -162,6 +173,11 @@ async fn run_voice(state: AppState) {
                             Err(err) if err.to_string().contains("cancelled") => {}
                             Err(err) => warn!(%err, "Voice generation failed"),
                         }
+                        let _ = state
+                            .realtime_experience_events
+                            .send(RealTimeExperienceEvent::VoiceResponseDone {
+                                generation_id,
+                            });
                     }
                 }
             }
@@ -198,8 +214,10 @@ fn start_voice_generation(
     };
 
     let scheduler = state.llm_scheduler.clone();
+    let events = state.realtime_experience_events.clone();
     let control_for_task = control.clone();
     let tx = generation_tx.clone();
+    let _ = events.send(RealTimeExperienceEvent::VoiceResponseStart { generation_id });
     tokio::spawn(async move {
         let token_tx = tx.clone();
         let result = scheduler
