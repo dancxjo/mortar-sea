@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{collections::HashSet, sync::atomic::Ordering};
 
 use psyche::{
     ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest, Impression,
@@ -15,6 +15,8 @@ use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord};
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
+const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
+const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 12;
 
 pub(crate) fn spawn_trace(state: AppState) {
     if state
@@ -142,7 +144,9 @@ fn build_prompt_from_records(
 ) -> String {
     let mut frame = TimelineFrame::new();
 
-    for record in records.iter().rev().take(12).rev() {
+    let selected_records = select_records_for_experience_prompt(records, impressions);
+
+    for record in selected_records {
         let sensation = Sensation {
             id: record.id,
             kind: record.kind.clone(),
@@ -201,6 +205,47 @@ fn build_prompt_from_records(
     format_realtime_experience_prompt(&context_frame, frame.entries())
 }
 
+fn select_records_for_experience_prompt<'a>(
+    records: &'a [SensationRecord],
+    impressions: &[VisionFieldImpressionRecord],
+) -> Vec<&'a SensationRecord> {
+    let mut selected_ids = HashSet::new();
+    let mut selected = Vec::new();
+
+    for record in records
+        .iter()
+        .rev()
+        .take(RECENT_SENSATION_PROMPT_LIMIT)
+        .rev()
+    {
+        selected_ids.insert(record.id);
+        selected.push(record);
+    }
+
+    let referenced_impression_ids = impressions
+        .iter()
+        .rev()
+        .take(RECENT_VISION_IMPRESSION_PROMPT_LIMIT)
+        .map(|impression| impression.sensation_id)
+        .collect::<HashSet<_>>();
+
+    let mut referenced_records = records
+        .iter()
+        .filter(|record| {
+            referenced_impression_ids.contains(&record.id) && !selected_ids.contains(&record.id)
+        })
+        .collect::<Vec<_>>();
+    referenced_records.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
+
+    for record in referenced_records {
+        selected_ids.insert(record.id);
+        selected.push(record);
+    }
+
+    selected.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
+    selected
+}
+
 fn fallback_impression_for_record(record: &SensationRecord) -> String {
     match record.kind.as_str() {
         "vision.face_crop" => format!("I see a face (in my eye \"{}\").", record.source.sensor_id),
@@ -225,4 +270,89 @@ fn streamable_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn sensation_record(
+        id: Uuid,
+        sequence: u64,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+    ) -> SensationRecord {
+        SensationRecord {
+            id,
+            kind: "vision.frame".to_string(),
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "face-browser".to_string(),
+                sensor_id: "camera.default".to_string(),
+                faculty: "vision-frame".to_string(),
+            },
+            sequence,
+            media: crate::messages::MediaRecord {
+                mime: "image/jpeg".to_string(),
+                width: 320,
+                height: 240,
+                encoding: "base64-data-url".to_string(),
+            },
+            provenance: psyche::Provenance::direct(),
+            data_sha256: format!("sha-{sequence}"),
+            data_bytes: 128,
+            detail: json!({}),
+        }
+    }
+
+    fn field_impression(
+        sensation_id: Uuid,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+        text: &str,
+    ) -> VisionFieldImpressionRecord {
+        VisionFieldImpressionRecord {
+            id: Uuid::new_v4(),
+            sensation_id,
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "face-browser".to_string(),
+                sensor_id: "camera.default".to_string(),
+                faculty: "vision-frame".to_string(),
+            },
+            sequence: 0,
+            text: text.to_string(),
+            kind: "vision.field".to_string(),
+            faculty: "Field Vision Faculty".to_string(),
+            confidence: 0.65,
+            payload: json!({"source": "test"}),
+        }
+    }
+
+    #[test]
+    fn prompt_includes_field_vision_impression_for_original_sensation_outside_recent_window() {
+        let t0 = chrono::Utc::now();
+        let original_id = Uuid::new_v4();
+        let original = sensation_record(original_id, 0, t0);
+        let mut records = vec![original.clone()];
+        for sequence in 1..=RECENT_SENSATION_PROMPT_LIMIT as u64 + 1 {
+            records.push(sensation_record(
+                Uuid::new_v4(),
+                sequence,
+                t0 + ChronoDuration::milliseconds(sequence as i64),
+            ));
+        }
+
+        let impression_text = "I see a red mug on the desk.";
+        let impressions = vec![field_impression(original_id, t0, impression_text)];
+
+        let selected = select_records_for_experience_prompt(&records, &impressions);
+        assert!(selected.iter().any(|record| record.id == original_id));
+
+        let prompt = build_prompt_from_records(&records, &impressions);
+        assert!(prompt.contains(&format!("SENSATION vision.frame id={original_id}")));
+        assert!(prompt.contains(impression_text));
+        assert!(prompt.contains(&format!("about=[{original_id}]")));
+    }
 }

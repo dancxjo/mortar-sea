@@ -594,7 +594,7 @@ fn prompt_with_media_markers(prompt: &str, image_count: usize) -> String {
     if prompt.trim().is_empty() {
         markers
     } else {
-        format!("{markers}\n{prompt}")
+        format!("{prompt}\n{markers}")
     }
 }
 
@@ -1098,12 +1098,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_with_media_markers_places_images_before_text() {
+    fn prompt_with_media_markers_places_images_after_text() {
         let marker = MtmdContext::default_marker();
 
         assert_eq!(
             prompt_with_media_markers("Describe this.", 2),
-            format!("{marker} {marker}\nDescribe this.")
+            format!("Describe this.\n{marker} {marker}")
         );
     }
 
@@ -1122,6 +1122,6 @@ mod tests {
         assert_eq!(messages[0].content, "system");
         assert_eq!(messages[1].content, "first");
         assert_eq!(messages[2].content, "ok");
-        assert_eq!(messages[3].content, format!("{marker}\nsecond"));
+        assert_eq!(messages[3].content, format!("second\n{marker}"));
     }
 }
