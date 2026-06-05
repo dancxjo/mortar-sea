@@ -19,6 +19,8 @@ enum Command {
     },
     #[command(about = "Open a direct terminal chat with the selected local LLM")]
     LlmTest(mortar_sea::llm_test::LlmTestCommand),
+    #[command(about = "Smoke-test the StyleTTS2 speech seam with the mock backend")]
+    Speak(mortar_sea::speak::SpeakCommand),
 }
 
 fn main() -> Result<()> {
@@ -27,6 +29,7 @@ fn main() -> Result<()> {
         Some(Command::Face) => run_face(),
         Some(Command::Models { command }) => mortar_sea::models::run(command),
         Some(Command::LlmTest(command)) => mortar_sea::llm_test::run(command),
+        Some(Command::Speak(command)) => mortar_sea::speak::run(command),
         None => mortar_sea::models::run(Some(mortar_sea::models::ModelsCommand::Status)),
     }
 }

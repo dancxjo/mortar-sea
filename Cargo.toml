@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "mortar-sea"
 
 [workspace]
-members = [".", "psyche", "speech", "face", "ear"]
+members = [".", "psyche", "speech", "styletts2", "face", "ear"]
 resolver = "2"
 
 [patch.crates-io]
@@ -25,4 +25,6 @@ psyche = { path = "psyche", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+speech = { path = "speech" }
+styletts2 = { path = "styletts2" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
