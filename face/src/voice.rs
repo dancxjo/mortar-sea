@@ -372,13 +372,6 @@ async fn run_voice(state: AppState) {
                                         draft_next_voice_speech(&state, &mut current)
                                     {
                                         pending_speech = Some(draft);
-                                    } else if let Some(draft) = draft_plain_voice_speech(
-                                        &state,
-                                        generation_id,
-                                        &generated,
-                                        &current.experience_ids,
-                                    ) {
-                                        pending_speech = Some(draft);
                                     }
                                 }
                             }
@@ -936,53 +929,6 @@ fn draft_voice_speech(
     })
 }
 
-fn draft_plain_voice_speech(
-    state: &AppState,
-    generation_id: Uuid,
-    generated: &str,
-    experience_ids: &[Uuid],
-) -> Option<PendingVoiceSpeech> {
-    let thought = fallback_voice_thought_from_generated(generated)?;
-    let observed_at = chrono::Utc::now();
-    let observation = VoiceObservation {
-        id: Uuid::new_v4(),
-        observed_at,
-        text: thought.text.clone(),
-        emoji: thought.emoji.clone(),
-        experience_ids: experience_ids.to_vec(),
-        interrupted_generation_id: None,
-        confidence: VOICE_OBSERVATION_CONFIDENCE,
-    };
-
-    let (boundary, tone, pace) = speech_hints_for_text(&thought.text);
-    info!(
-        utterance_id = %observation.id,
-        %generation_id,
-        text = %thought.text,
-        "Mouth accepted plain Voice sentence fallback"
-    );
-    let _ = state
-        .realtime_experience_events
-        .send(RealTimeExperienceEvent::VoiceSpeechDraft {
-            utterance_id: observation.id,
-            generation_id,
-            observed_at,
-            text: thought.text.clone(),
-            emoji: thought.emoji.clone(),
-            boundary,
-            tone,
-            pace,
-        });
-    synthesize_voice_speech_audio(state, generation_id, observation.id, thought.text.clone());
-
-    Some(PendingVoiceSpeech {
-        observation,
-        generation_id,
-        drafted_at: Instant::now(),
-        feedback_timeout_reported: false,
-    })
-}
-
 fn synthesize_voice_speech_audio(
     state: &AppState,
     generation_id: Uuid,
@@ -1073,7 +1019,9 @@ fn synthesize_voice_speech_audio(
                         generation_id,
                         observed_at: chrono::Utc::now(),
                         text,
-                        reason: format!("Mouth Piper synthesis thread result channel closed: {error}"),
+                        reason: format!(
+                            "Mouth Piper synthesis thread result channel closed: {error}"
+                        ),
                     },
                 );
             }
@@ -1861,18 +1809,6 @@ fn parse_voice_thought(sentence: &str) -> Option<VoiceThought> {
     Some(VoiceThought { text, emoji })
 }
 
-fn fallback_voice_thought_from_generated(generated: &str) -> Option<VoiceThought> {
-    let internal_text = parse_voice_stream(generated)
-        .into_iter()
-        .filter_map(|event| match event {
-            VoiceStreamEvent::InternalText(text) => Some(text.text),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    parse_voice_thought(&internal_text)
-}
-
 #[cfg(test)]
 fn clean_voice_sentence(sentence: &str) -> String {
     parse_voice_thought(sentence)
@@ -2597,6 +2533,18 @@ mod tests {
     }
 
     #[test]
+    fn voice_stream_collector_does_not_queue_internal_text_for_mouth() {
+        let generation_id = Uuid::new_v4();
+        let events = parse_voice_stream("This stays internal. <say>This is spoken.</say>");
+        let mut pending_breath_groups = VecDeque::new();
+
+        collect_voice_stream_events(generation_id, events, &mut pending_breath_groups);
+
+        assert_eq!(pending_breath_groups.len(), 1);
+        assert_eq!(pending_breath_groups[0].text, "This is spoken.");
+    }
+
+    #[test]
     fn sentence_segmenter_keeps_final_emoji_with_last_sentence() {
         let mut segmenter = VoiceSentenceSegmenter::new();
         assert!(segmenter.push_str("I am watching the room. ").is_empty());
@@ -2616,16 +2564,5 @@ mod tests {
             vec!["I am watching the room. 🤔".to_string()]
         );
         assert_eq!(segmenter.finish(), vec!["I feel awake.".to_string()]);
-    }
-
-    #[test]
-    fn fallback_voice_thought_uses_internal_text_when_no_say_tags() {
-        assert_eq!(
-            fallback_voice_thought_from_generated("I feel a slow thrumming. 😌"),
-            Some(VoiceThought {
-                text: "I feel a slow thrumming.".to_string(),
-                emoji: Some("😌".to_string()),
-            })
-        );
     }
 }

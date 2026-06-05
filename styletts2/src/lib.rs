@@ -41,4 +41,4 @@ pub use symbols::{
 pub mod onnx;
 
 #[cfg(feature = "styletts2-onnx")]
-pub use onnx::{StyleTts2OnnxBackend, StyleTts2OnnxPaths};
+pub use onnx::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend, StyleTts2OnnxPaths};

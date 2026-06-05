@@ -177,7 +177,7 @@ fn dedicated_voice_llm_enabled() -> bool {
     std::env::var("MORTAR_VOICE_LLM_DEDICATED")
         .ok()
         .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
-    .unwrap_or(false)
+        .unwrap_or(false)
 }
 
 fn spawn_face_analyzer_initialization(

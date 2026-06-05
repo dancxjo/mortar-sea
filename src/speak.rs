@@ -15,7 +15,7 @@ use styletts2::{
 };
 
 #[cfg(feature = "styletts2-onnx")]
-use styletts2::StyleTts2OnnxBackend;
+use styletts2::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend};
 
 use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
 use crate::piper::{
@@ -34,6 +34,20 @@ pub struct SpeakCommand {
     pub output: PathBuf,
     #[arg(long, default_value_t = 24_000)]
     pub sample_rate_hz: u32,
+    #[arg(long)]
+    pub voice_wav: Option<PathBuf>,
+    #[arg(long)]
+    pub style_wav: Option<PathBuf>,
+    #[arg(long, default_value_t = 5)]
+    pub diffusion_steps: usize,
+    #[arg(long, default_value_t = 0.3)]
+    pub style_alpha: f32,
+    #[arg(long, default_value_t = 0.7)]
+    pub style_beta: f32,
+    #[arg(long, default_value_t = 1.0)]
+    pub embedding_scale: f64,
+    #[arg(long, default_value_t = 0)]
+    pub style_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -63,8 +77,8 @@ impl SpeechSynthesisArtifact {
 pub fn run(command: SpeakCommand) -> Result<()> {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
-            text: command.text,
-            variant: VariantId(command.variant),
+            text: command.text.clone(),
+            variant: VariantId(command.variant.clone()),
             style: None,
         })
         .context("failed to phonemicize text into a speech plan")?;
@@ -91,7 +105,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         }
         SpeakBackend::Styletts2 => {
             let primary_model = ensure_styletts2_model_available()?;
-            synthesize_plan_with_styletts2_to_wav(plan, &primary_model, &command.output)?
+            synthesize_plan_with_styletts2_to_wav(plan, &primary_model, &command.output, &command)?
         }
         SpeakBackend::Piper => {
             let voice_model = ensure_piper_voice_model_available()?;
@@ -204,6 +218,7 @@ fn synthesize_plan_with_styletts2_to_wav(
     plan: UtterancePlan,
     primary_model_path: &Path,
     output_path: &Path,
+    command: &SpeakCommand,
 ) -> Result<SpeechSynthesisArtifact> {
     styletts2_en_us_symbol_set()
         .lower(&plan)
@@ -213,8 +228,25 @@ fn synthesize_plan_with_styletts2_to_wav(
         .parent()
         .context("StyleTTS2 primary model path has no parent directory")?;
     let mut backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
-        .context("failed to load native StyleTTS2 ONNX backend")?;
-    let request = StyleTts2SynthesisRequest::from_plan(plan);
+        .context("failed to load native StyleTTS2 ONNX backend")?
+        .with_diffusion_options(StyleTts2DiffusionOptions {
+            diffusion_steps: command.diffusion_steps,
+            alpha: command.style_alpha,
+            beta: command.style_beta,
+            embedding_scale: command.embedding_scale,
+            seed: command.style_seed,
+        })
+        .context("invalid StyleTTS2 diffusion options")?;
+    let mut request = StyleTts2SynthesisRequest::from_plan(plan);
+    if let Some(path) = &command.voice_wav {
+        request = request.with_speaker_reference_audio_uri(path.display().to_string());
+        if command.style_wav.is_none() {
+            request = request.with_style_reference_audio_uri(path.display().to_string());
+        }
+    }
+    if let Some(path) = &command.style_wav {
+        request = request.with_style_reference_audio_uri(path.display().to_string());
+    }
     let output = backend
         .synthesize(&request)
         .context("native StyleTTS2 synthesis failed")?;
@@ -234,6 +266,7 @@ fn synthesize_plan_with_styletts2_to_wav(
     _plan: UtterancePlan,
     _primary_model_path: &Path,
     _output_path: &Path,
+    _command: &SpeakCommand,
 ) -> Result<SpeechSynthesisArtifact> {
     anyhow::bail!(
         "native StyleTTS2 inference requires building mortar-sea with the `styletts2-onnx` feature"
