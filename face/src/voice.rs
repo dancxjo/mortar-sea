@@ -1,5 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
@@ -30,6 +32,12 @@ const VOICE_GENERATED_TAIL_MAX_CHARS: usize = 2_000;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
 const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 const VOICE_REALITY_REVIEW_INTERVAL: Duration = Duration::from_secs(15);
+const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(20);
+const VOICE_SAY_NUDGE_MIN_CHARS: usize = 140;
+const VOICE_SAY_NUDGE_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
+static PIPER_SYNTHESIS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub(crate) fn spawn_voice(state: AppState) {
     tokio::spawn(async move {
@@ -88,6 +96,8 @@ struct ActiveVoiceGeneration {
     voice_stream: VoiceStreamParser,
     pending_breath_groups: VecDeque<BreathGroup>,
     experience_ids: Vec<Uuid>,
+    chars_since_last_say: usize,
+    last_say_nudge_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +126,8 @@ enum VoiceGenerationEvent {
 struct PendingVoiceSpeech {
     observation: VoiceObservation,
     generation_id: Uuid,
+    drafted_at: Instant,
+    feedback_timeout_reported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,13 +168,44 @@ async fn run_voice(state: AppState) {
         &generated_tail,
     ));
     let mut reality_review = interval(VOICE_REALITY_REVIEW_INTERVAL);
+    let mut mouth_feedback_watchdog = interval(VOICE_MOUTH_FEEDBACK_POLL_INTERVAL);
     reality_review.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reality_review.tick().await;
+    mouth_feedback_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    mouth_feedback_watchdog.tick().await;
 
     info!("inner monologue Voice observer started");
 
     loop {
         tokio::select! {
+            _ = mouth_feedback_watchdog.tick() => {
+                if let Some(pending) = pending_speech.as_mut() {
+                    if !pending.feedback_timeout_reported
+                        && pending.drafted_at.elapsed() >= VOICE_MOUTH_FEEDBACK_TIMEOUT
+                    {
+                        pending.feedback_timeout_reported = true;
+                        warn!(
+                            utterance_id = %pending.observation.id,
+                            generation_id = %pending.generation_id,
+                            timeout_ms = VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis(),
+                            "Mouth feedback timeout; interrupting stale pending speech"
+                        );
+                        accept_mouth_event(
+                            &state,
+                            VoiceMouthEvent::VoiceSpeechInterrupted {
+                                utterance_id: pending.observation.id,
+                                generation_id: pending.generation_id,
+                                observed_at: chrono::Utc::now(),
+                                text: pending.observation.text.clone(),
+                                reason: format!(
+                                    "Mouth feedback timeout after {} ms",
+                                    VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis()
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
             _ = reality_review.tick() => {
                 if let Some(current) = active.as_mut() {
                     current.control.append_prompt(format!(
@@ -285,6 +328,9 @@ async fn run_voice(state: AppState) {
                                 text: text.clone(),
                             },
                         );
+                        current.chars_since_last_say = current
+                            .chars_since_last_say
+                            .saturating_add(text.chars().count());
                         remember_generated_tail(&mut generated_tail, &text);
                         collect_voice_stream_events(
                             current.generation_id,
@@ -294,7 +340,11 @@ async fn run_voice(state: AppState) {
                         if pending_speech.is_none() {
                             if let Some(draft) = draft_next_voice_speech(&state, current) {
                                 current.control.pause();
+                                current.chars_since_last_say = 0;
+                                current.last_say_nudge_at = None;
                                 pending_speech = Some(draft);
+                            } else {
+                                maybe_nudge_voice_to_emit_say(current);
                             }
                         }
                     }
@@ -321,6 +371,13 @@ async fn run_voice(state: AppState) {
                                     if let Some(draft) =
                                         draft_next_voice_speech(&state, &mut current)
                                     {
+                                        pending_speech = Some(draft);
+                                    } else if let Some(draft) = draft_plain_voice_speech(
+                                        &state,
+                                        generation_id,
+                                        &generated,
+                                        &current.experience_ids,
+                                    ) {
                                         pending_speech = Some(draft);
                                     }
                                 }
@@ -812,6 +869,23 @@ fn draft_next_voice_speech(
     None
 }
 
+fn maybe_nudge_voice_to_emit_say(current: &mut ActiveVoiceGeneration) {
+    if current.chars_since_last_say < VOICE_SAY_NUDGE_MIN_CHARS {
+        return;
+    }
+
+    if let Some(last_nudge_at) = current.last_say_nudge_at {
+        if last_nudge_at.elapsed() < VOICE_SAY_NUDGE_MIN_INTERVAL {
+            return;
+        }
+    }
+
+    current.control.append_prompt(
+        "Mouth is waiting at the speech gate. Emit one short spoken sentence now as <say>...</say>.",
+    );
+    current.last_say_nudge_at = Some(Instant::now());
+}
+
 fn draft_voice_speech(
     state: &AppState,
     generation_id: Uuid,
@@ -857,6 +931,55 @@ fn draft_voice_speech(
     Some(PendingVoiceSpeech {
         observation,
         generation_id,
+        drafted_at: Instant::now(),
+        feedback_timeout_reported: false,
+    })
+}
+
+fn draft_plain_voice_speech(
+    state: &AppState,
+    generation_id: Uuid,
+    generated: &str,
+    experience_ids: &[Uuid],
+) -> Option<PendingVoiceSpeech> {
+    let thought = fallback_voice_thought_from_generated(generated)?;
+    let observed_at = chrono::Utc::now();
+    let observation = VoiceObservation {
+        id: Uuid::new_v4(),
+        observed_at,
+        text: thought.text.clone(),
+        emoji: thought.emoji.clone(),
+        experience_ids: experience_ids.to_vec(),
+        interrupted_generation_id: None,
+        confidence: VOICE_OBSERVATION_CONFIDENCE,
+    };
+
+    let (boundary, tone, pace) = speech_hints_for_text(&thought.text);
+    info!(
+        utterance_id = %observation.id,
+        %generation_id,
+        text = %thought.text,
+        "Mouth accepted plain Voice sentence fallback"
+    );
+    let _ = state
+        .realtime_experience_events
+        .send(RealTimeExperienceEvent::VoiceSpeechDraft {
+            utterance_id: observation.id,
+            generation_id,
+            observed_at,
+            text: thought.text.clone(),
+            emoji: thought.emoji.clone(),
+            boundary,
+            tone,
+            pace,
+        });
+    synthesize_voice_speech_audio(state, generation_id, observation.id, thought.text.clone());
+
+    Some(PendingVoiceSpeech {
+        observation,
+        generation_id,
+        drafted_at: Instant::now(),
+        feedback_timeout_reported: false,
     })
 }
 
@@ -882,18 +1005,27 @@ fn synthesize_voice_speech_audio(
             text: text.clone(),
         });
         let text_for_task = text.clone();
-        let wav = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let output_path =
-                PathBuf::from("target/face-mouth").join(format!("voice-{utterance_id}.wav"));
-            let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
-                text_for_task,
-                "en-US",
-                &output_path,
-            )?;
-            let bytes = std::fs::read(&artifact.path)?;
-            Ok((bytes, artifact))
-        })
-        .await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<_> {
+                // Piper/ONNX voice loading can deadlock under concurrent inits; serialize synthesis.
+                let _synthesis_guard = PIPER_SYNTHESIS_LOCK
+                    .lock()
+                    .expect("piper synthesis lock poisoned");
+                let output_path =
+                    PathBuf::from("target/face-mouth").join(format!("voice-{utterance_id}.wav"));
+                let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
+                    text_for_task,
+                    "en-US",
+                    &output_path,
+                )?;
+                let bytes = std::fs::read(&artifact.path)?;
+                Ok((bytes, artifact))
+            })();
+            let _ = tx.send(result);
+        });
+
+        let wav = rx.await;
 
         match wav {
             Ok(Ok((bytes, artifact))) => {
@@ -933,7 +1065,7 @@ fn synthesize_voice_speech_audio(
                 );
             }
             Err(error) => {
-                warn!(%utterance_id, %generation_id, %error, "Mouth Piper synthesis task failed");
+                warn!(%utterance_id, %generation_id, %error, "Mouth Piper synthesis thread result channel closed");
                 accept_mouth_event(
                     &state,
                     VoiceMouthEvent::VoiceSpeechInterrupted {
@@ -941,7 +1073,7 @@ fn synthesize_voice_speech_audio(
                         generation_id,
                         observed_at: chrono::Utc::now(),
                         text,
-                        reason: format!("Mouth Piper synthesis task failed: {error}"),
+                        reason: format!("Mouth Piper synthesis thread result channel closed: {error}"),
                     },
                 );
             }
@@ -1105,6 +1237,8 @@ fn start_voice_generation(
         voice_stream: VoiceStreamParser::default(),
         pending_breath_groups: VecDeque::new(),
         experience_ids,
+        chars_since_last_say: 0,
+        last_say_nudge_at: None,
     }
 }
 
@@ -1129,8 +1263,9 @@ fn voice_system_prompt() -> &'static str {
 
 fn voice_mouth_guidance_prompt() -> &'static str {
     "\n\nMOUTH GUIDANCE:\n\
-     To speak aloud through Mouth, you can and should wrap one short speakable sentence in <say>...</say>. \
+    To speak aloud through Mouth, you must wrap one short speakable sentence in <say>...</say>. \
      Text outside <say> stays internal and will not be spoken aloud. \
+    Emit a <say> sentence quickly; do not wait many internal sentences before the next <say>. \
      To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
      If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
      The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and then report that Mouth feedback back here before the Voice continues. \
@@ -1718,7 +1853,24 @@ fn parse_voice_thought(sentence: &str) -> Option<VoiceThought> {
         return None;
     }
 
+    // Avoid sending punctuation-only noise (".", ">", "...") into Mouth/TTS.
+    if !text.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+
     Some(VoiceThought { text, emoji })
+}
+
+fn fallback_voice_thought_from_generated(generated: &str) -> Option<VoiceThought> {
+    let internal_text = parse_voice_stream(generated)
+        .into_iter()
+        .filter_map(|event| match event {
+            VoiceStreamEvent::InternalText(text) => Some(text.text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    parse_voice_thought(&internal_text)
 }
 
 #[cfg(test)]
@@ -2288,11 +2440,12 @@ mod tests {
             "",
         );
 
-        assert!(prompt.contains("you can and should wrap"));
+        assert!(prompt.contains("you must wrap"));
         assert!(prompt.contains("<say>...</say>"));
         assert!(prompt.contains("Text outside <say> stays internal"));
+        assert!(prompt.contains("Emit a <say> sentence quickly"));
         assert!(prompt.contains("put the emoji inside <say> just before </say>"));
-        assert!(prompt.contains("use <say> only for the exact words to be spoken aloud"));
+        assert!(prompt.contains("Use <say> only for the exact words to be spoken aloud"));
     }
 
     #[test]
@@ -2463,5 +2616,16 @@ mod tests {
             vec!["I am watching the room. 🤔".to_string()]
         );
         assert_eq!(segmenter.finish(), vec!["I feel awake.".to_string()]);
+    }
+
+    #[test]
+    fn fallback_voice_thought_uses_internal_text_when_no_say_tags() {
+        assert_eq!(
+            fallback_voice_thought_from_generated("I feel a slow thrumming. 😌"),
+            Some(VoiceThought {
+                text: "I feel a slow thrumming.".to_string(),
+                emoji: Some("😌".to_string()),
+            })
+        );
     }
 }

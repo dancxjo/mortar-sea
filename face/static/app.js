@@ -66,6 +66,8 @@ window.faceApp = function faceApp() {
     voiceCurrentDraft: null,
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
+    voiceAwaitingServerAudioTimer: null,
+    voiceActiveSpeechUtterance: null,
     llmJobs: [],
     selectedLlmJobId: null,
     mime: 'image/jpeg',
@@ -134,6 +136,8 @@ window.faceApp = function faceApp() {
     },
 
     stopVoiceMouth(reason) {
+      this.clearVoiceAudioFallbackTimer();
+      this.cancelBrowserSpeechFallback();
       const interruptedDraft = this.voiceCurrentDraft;
       this.voiceCurrentDraft = null;
       this.voiceUtteranceStartedAt = null;
@@ -255,11 +259,16 @@ window.faceApp = function faceApp() {
           this.activeVoiceGenerationId = message.generation_id;
           this.voicePlaybackEvents.tts += 1;
           this.voicePlaybackDetail = `Server TTS started for "${message.text || ''}"`;
+          if (this.voiceCurrentDraft && this.voiceDraftMatches(this.voiceCurrentDraft, message)) {
+            this.armBrowserSpeechFallback(this.voiceCurrentDraft);
+          }
           return;
         }
         if (message.type === 'voice_speech_audio') {
           this.activeVoiceGenerationId = message.generation_id;
           this.voicePlaybackEvents.audio += 1;
+          this.clearVoiceAudioFallbackTimer();
+          this.cancelBrowserSpeechFallback();
           this.playVoiceSpeechAudio(message);
           return;
         }
@@ -351,11 +360,68 @@ window.faceApp = function faceApp() {
       this.voiceMouthOpen = false;
     },
 
+    clearVoiceAudioFallbackTimer() {
+      if (this.voiceAwaitingServerAudioTimer) {
+        window.clearTimeout(this.voiceAwaitingServerAudioTimer);
+        this.voiceAwaitingServerAudioTimer = null;
+      }
+    },
+
+    cancelBrowserSpeechFallback() {
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+      this.voiceActiveSpeechUtterance = null;
+    },
+
+    armBrowserSpeechFallback(draft) {
+      this.clearVoiceAudioFallbackTimer();
+      if (!draft?.text || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance !== 'function') {
+        return;
+      }
+      this.voiceAwaitingServerAudioTimer = window.setTimeout(() => {
+        if (!this.voiceCurrentDraft || !this.voiceDraftMatches(this.voiceCurrentDraft, draft)) return;
+        if (this.voiceAudioSource) return;
+
+        const utterance = new window.SpeechSynthesisUtterance(draft.text);
+        this.voiceActiveSpeechUtterance = utterance;
+        this.voicePlaybackDetail = `Server audio timeout; browser fallback speaking "${draft.text}"`;
+
+        utterance.onstart = () => {
+          this.voiceStatus = 'speaking';
+          this.voiceUtteranceStartedAt = performance.now();
+          this.voiceMouthOpen = true;
+          this.sendVoiceMouthEvent('voice_speech_started', draft);
+        };
+        utterance.onend = () => {
+          const playbackDurationMs = this.voiceUtteranceStartedAt
+            ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
+            : null;
+          this.voiceMouthOpen = false;
+          this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: playbackDurationMs });
+          this.voiceActiveSpeechUtterance = null;
+          this.clearFinishedVoiceDraft(draft);
+        };
+        utterance.onerror = (event) => {
+          this.voiceMouthOpen = false;
+          this.voiceActiveSpeechUtterance = null;
+          const reason = event?.error
+            ? `Browser speech fallback failed: ${event.error}`
+            : 'Browser speech fallback failed';
+          this.voiceLastError = reason;
+          this.voicePlaybackDetail = reason;
+          this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
+          this.clearFinishedVoiceDraft(draft);
+        };
+        window.speechSynthesis.speak(utterance);
+      }, 2400);
+    },
+
     async playVoiceSpeechAudio(audioMessage) {
-      const draft = this.voiceCurrentDraft && this.voiceDraftMatches(this.voiceCurrentDraft, audioMessage)
-        ? this.voiceCurrentDraft
-        : audioMessage;
-      this.voiceCurrentDraft = draft;
+      const draft = this.voiceCurrentDraft;
+      if (!draft || !this.voiceDraftMatches(draft, audioMessage)) {
+        return;
+      }
 
       await this.unlockVoicePlayback();
       if (!this.voiceAudioContext || this.voiceAudioContext.state !== 'running') {
@@ -461,6 +527,8 @@ window.faceApp = function faceApp() {
 
     clearFinishedVoiceDraft(draft) {
       if (this.voiceCurrentDraft !== draft) return;
+      this.clearVoiceAudioFallbackTimer();
+      this.voiceActiveSpeechUtterance = null;
       if (this.voiceAudio) {
         this.voiceAudio.pause();
         this.voiceAudio.src = '';
