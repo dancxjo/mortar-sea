@@ -384,20 +384,96 @@ fn word_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut start = None;
     for (byte_index, character) in text.char_indices() {
-        if character.is_alphabetic() || character == '\'' || character == '-' {
+        if is_word_chunk_character(character) {
             start.get_or_insert(byte_index);
             continue;
         }
 
         if let Some(start_byte) = start.take() {
-            spans.push((start_byte, byte_index));
+            push_word_chunk_spans(text, start_byte, byte_index, &mut spans);
         }
     }
 
     if let Some(start_byte) = start {
-        spans.push((start_byte, text.len()));
+        push_word_chunk_spans(text, start_byte, text.len(), &mut spans);
     }
     spans
+}
+
+fn is_word_chunk_character(character: char) -> bool {
+    character.is_alphabetic() || is_apostrophe(character) || character == '-'
+}
+
+fn is_apostrophe(character: char) -> bool {
+    matches!(character, '\'' | '’' | '‘' | 'ʼ')
+}
+
+fn push_word_chunk_spans(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    let mut part_start = None;
+    for (offset, character) in text[start_byte..end_byte].char_indices() {
+        let byte_index = start_byte + offset;
+        if character == '-' {
+            if let Some(part_start_byte) = part_start.take() {
+                push_camelcase_word_spans(text, part_start_byte, byte_index, spans);
+            }
+            continue;
+        }
+
+        part_start.get_or_insert(byte_index);
+    }
+
+    if let Some(part_start_byte) = part_start {
+        push_camelcase_word_spans(text, part_start_byte, end_byte, spans);
+    }
+}
+
+fn push_camelcase_word_spans(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    let mut part_start = start_byte;
+    let mut previous = None;
+    let mut iterator = text[start_byte..end_byte].char_indices().peekable();
+    while let Some((offset, character)) = iterator.next() {
+        let byte_index = start_byte + offset;
+        if let Some(previous_character) = previous
+            && should_split_camelcase_part(previous_character, character, iterator.peek())
+        {
+            push_word_span(text, part_start, byte_index, spans);
+            part_start = byte_index;
+        }
+        previous = Some(character);
+    }
+
+    push_word_span(text, part_start, end_byte, spans);
+}
+
+fn should_split_camelcase_part(
+    previous: char,
+    current: char,
+    next: Option<&(usize, char)>,
+) -> bool {
+    previous.is_lowercase()
+        && current.is_uppercase()
+        && next.is_some_and(|(_, next)| next.is_uppercase())
+}
+
+fn push_word_span(text: &str, start_byte: usize, end_byte: usize, spans: &mut Vec<(usize, usize)>) {
+    let surface = &text[start_byte..end_byte];
+    if surface
+        .trim_matches(|character: char| !character.is_alphabetic())
+        .is_empty()
+    {
+        return;
+    }
+    spans.push((start_byte, end_byte));
 }
 
 fn final_punctuation_symbol(text: &str) -> Option<&'static str> {

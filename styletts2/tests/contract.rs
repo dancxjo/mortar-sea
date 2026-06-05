@@ -126,6 +126,43 @@ fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
 }
 
 #[test]
+fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
+    let symbol_set =
+        SymbolSet::new(["alpha", "|", ",", "."])
+            .with_alias("variant.phone.a", "alpha")
+            .with_alias("boundary.word", "|");
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![
+            phone_token("variant.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variant.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variant.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variant.phone.a"),
+        ],
+        Some("a-b c, d.".into()),
+    );
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        symbols,
+        ["alpha", "|", "alpha", "|", "alpha", ",", "alpha", "."]
+    );
+}
+
+#[test]
 fn lower_plan_tokens_defaults_unpunctuated_text_to_final_period() {
     let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variant.phone.a", "alpha");
     let plan = plan(
