@@ -40,17 +40,17 @@ use anyhow::Context;
 
 #[derive(Clone)]
 pub(crate) struct AsrBackend {
-    worker: Arc<Mutex<AsrWorker>>,
+    ear: Arc<Mutex<Ear>>,
     latest_submitted_sequence: Arc<AtomicU64>,
     latest_final_sequence: Arc<AtomicU64>,
 }
 
 pub(crate) fn initialize_backend() -> anyhow::Result<Option<AsrBackend>> {
     let model_path = mortar_sea::models::ensure_asr_whisper_model_available()?;
-    let worker = AsrWorker::spawn(&model_path)?;
-    info!(model = %model_path.display(), "ASR worker ready");
+    let ear = Ear::spawn(&model_path)?;
+    info!(model = %model_path.display(), "ear ready");
     Ok(Some(AsrBackend {
-        worker: Arc::new(Mutex::new(worker)),
+        ear: Arc::new(Mutex::new(ear)),
         latest_submitted_sequence: Arc::new(AtomicU64::new(0)),
         latest_final_sequence: Arc::new(AtomicU64::new(0)),
     }))
@@ -131,7 +131,7 @@ async fn send_json<T: serde::Serialize>(
     sender.send(Message::Text(text)).await
 }
 
-struct AsrWorker {
+struct Ear {
     _child: Child,
     stdin: ChildStdin,
     stdout: BufReader<std::process::ChildStdout>,
@@ -139,14 +139,14 @@ struct AsrWorker {
 }
 
 #[derive(Debug, Serialize)]
-struct WorkerRequest {
+struct EarRequest {
     id: u64,
     samples: Vec<f32>,
     duration_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkerResponse {
+struct EarResponse {
     id: u64,
     #[serde(default)]
     sentences: Vec<SentenceTranscript>,
@@ -154,16 +154,18 @@ struct WorkerResponse {
     error: Option<String>,
 }
 
-impl AsrWorker {
+impl Ear {
     fn spawn(model_path: &std::path::Path) -> anyhow::Result<Self> {
-        let mut command = if let Some(worker) = std::env::var_os("MORTAR_ASR_WORKER") {
+        let worker = std::env::var_os("MORTAR_EAR")
+            .or_else(|| std::env::var_os("MORTAR_ASR_WORKER"));
+        let mut command = if let Some(worker) = worker {
             let mut command = Command::new(worker);
             command.arg(model_path);
             command
         } else {
             let mut command =
                 Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()));
-            command.args(["run", "-q", "-p", "asr-worker", "--"]);
+            command.args(["run", "-q", "-p", "ear", "--"]);
             command.arg(model_path);
             command
         };
@@ -172,12 +174,9 @@ impl AsrWorker {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .context("failed to spawn ASR worker")?;
-        let stdin = child.stdin.take().context("ASR worker stdin unavailable")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("ASR worker stdout unavailable")?;
+            .context("failed to spawn ear")?;
+        let stdin = child.stdin.take().context("ear stdin unavailable")?;
+        let stdout = child.stdout.take().context("ear stdout unavailable")?;
         Ok(Self {
             _child: child,
             stdin,
@@ -194,9 +193,9 @@ impl AsrWorker {
         self.next_id = self
             .next_id
             .checked_add(1)
-            .context("ASR worker id overflow")?;
+            .context("ear id overflow")?;
         let id = self.next_id;
-        let request = WorkerRequest {
+        let request = EarRequest {
             id,
             samples,
             duration_ms,
@@ -209,13 +208,13 @@ impl AsrWorker {
         loop {
             line.clear();
             let read = self.stdout.read_line(&mut line)?;
-            anyhow::ensure!(read > 0, "ASR worker exited before response");
-            let response = serde_json::from_str::<WorkerResponse>(&line)?;
+            anyhow::ensure!(read > 0, "ear exited before response");
+            let response = serde_json::from_str::<EarResponse>(&line)?;
             if response.id != id {
                 continue;
             }
             if let Some(error) = response.error {
-                anyhow::bail!("ASR worker failed: {error}");
+                anyhow::bail!("ear failed: {error}");
             }
             return Ok(response.sentences);
         }
@@ -534,7 +533,7 @@ async fn transcribe_group(
 
         let original_samples = group.samples.clone();
         let sentences = {
-            let mut worker = backend.worker.lock().expect("ASR worker lock");
+            let mut ear = backend.ear.lock().expect("ear lock");
             if should_skip_speculative_group(
                 &group,
                 backend.latest_submitted_sequence.load(Ordering::Acquire),
@@ -542,7 +541,7 @@ async fn transcribe_group(
             ) {
                 return Ok(None);
             }
-            worker.transcribe(original_samples.clone(), group.duration_ms)?
+            ear.transcribe(original_samples.clone(), group.duration_ms)?
         };
         if sentences.is_empty() {
             return Ok(None);

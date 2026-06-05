@@ -1,8 +1,8 @@
 [package]
-name = "asr-worker"
+name = "ear"
 version = "0.1.0"
 edition = "2024"
-description = "Whisper ASR worker process for mortar-sea"
+description = "Whisper ear process for mortar-sea"
 
 [dependencies]
 anyhow = "1"

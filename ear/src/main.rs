@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
     let model_path = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
-        .context("usage: asr-worker <whisper-model-path>")?;
+        .context("usage: ear <whisper-model-path>")?;
     let ctx = WhisperContext::new(&model_path)
         .with_context(|| format!("failed to load Whisper model at {}", model_path.display()))?;
 
