@@ -5,6 +5,7 @@ use psyche::{
     Sensation, TimelineEntry, TimelineFrame,
     realtime_experience::format_realtime_experience_prompt,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
@@ -12,7 +13,9 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::llm_scheduler::LlmJobKind;
-use crate::messages::{RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord};
+use crate::messages::{
+    ExperienceRecord, RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord,
+};
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
 const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
@@ -74,24 +77,29 @@ pub(crate) fn spawn_trace(state: AppState) {
         });
         let _ = events.send(RealTimeExperienceEvent::ResponseStart { generation_id });
 
-        if let Err(err) =
-            stream_generation(&state, generation_id, prompt.clone(), events.clone()).await
-        {
-            let fallback = json!({
-                "experiences": [{
-                    "what": format!("Gemma 4 Experience generation failed: {err}"),
-                    "impression_ids": []
-                }]
-            })
-            .to_string();
-            for token in streamable_chunks(&fallback, 18) {
-                let _ = events.send(RealTimeExperienceEvent::ResponseToken {
-                    generation_id,
-                    text: token,
-                });
-                sleep(Duration::from_millis(26)).await;
-            }
-        }
+        let generated =
+            match stream_generation(&state, generation_id, prompt.clone(), events.clone()).await {
+                Ok(generated) => generated,
+                Err(err) => {
+                    let fallback = json!({
+                        "experiences": [{
+                            "what": format!("Gemma 4 Experience generation failed: {err}"),
+                            "impression_ids": []
+                        }]
+                    })
+                    .to_string();
+                    for token in streamable_chunks(&fallback, 18) {
+                        let _ = events.send(RealTimeExperienceEvent::ResponseToken {
+                            generation_id,
+                            text: token,
+                        });
+                        sleep(Duration::from_millis(26)).await;
+                    }
+                    fallback
+                }
+            };
+
+        record_generated_experiences(&state, generation_id, &generated, &events);
 
         let _ = events.send(RealTimeExperienceEvent::ResponseDone { generation_id });
         active.store(false, Ordering::Release);
@@ -132,6 +140,136 @@ async fn stream_generation(
             },
         )
         .await
+}
+
+#[derive(Debug, Deserialize)]
+struct ExperienceResponse {
+    experiences: Vec<ExperienceDraft>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExperienceDraft {
+    what: String,
+    #[serde(default)]
+    impression_ids: Vec<Uuid>,
+    #[serde(default)]
+    confidence: Option<f32>,
+}
+
+fn record_generated_experiences(
+    state: &AppState,
+    generation_id: Uuid,
+    generated: &str,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+) {
+    let impressions = state
+        .vision_field_impressions
+        .read()
+        .expect("field vision impression log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let records = parse_experience_records(generated, &impressions);
+    if records.is_empty() {
+        return;
+    }
+
+    {
+        let mut stored = state.experiences.write().expect("experience log lock");
+        for record in records.iter().cloned() {
+            if stored.len() == crate::app::MAX_RECORDED_EXPERIENCES {
+                stored.pop_front();
+            }
+            stored.push_back(record);
+        }
+    }
+
+    for experience in records {
+        let _ = events.send(RealTimeExperienceEvent::Experience {
+            generation_id,
+            experience,
+        });
+    }
+}
+
+fn parse_experience_records(
+    generated: &str,
+    impressions: &[VisionFieldImpressionRecord],
+) -> Vec<ExperienceRecord> {
+    let Some(json) = extract_json(generated) else {
+        return Vec::new();
+    };
+    let drafts = serde_json::from_str::<ExperienceResponse>(json)
+        .map(|response| response.experiences)
+        .or_else(|_| serde_json::from_str::<Vec<ExperienceDraft>>(json));
+    let Ok(drafts) = drafts else {
+        return Vec::new();
+    };
+
+    let fallback_impression_ids = impressions
+        .iter()
+        .rev()
+        .take(RECENT_VISION_IMPRESSION_PROMPT_LIMIT)
+        .map(|impression| impression.id)
+        .collect::<Vec<_>>();
+    let observed_at = chrono::Utc::now();
+
+    drafts
+        .into_iter()
+        .filter_map(|draft| {
+            let what = draft.what.trim();
+            if what.is_empty() {
+                return None;
+            }
+            let impression_ids = if draft.impression_ids.is_empty() {
+                fallback_impression_ids.clone()
+            } else {
+                draft.impression_ids
+            };
+            let occurred_at = impression_ids
+                .iter()
+                .filter_map(|id| {
+                    impressions
+                        .iter()
+                        .find(|impression| impression.id == *id)
+                        .map(|impression| impression.occurred_at)
+                })
+                .max()
+                .or_else(|| impressions.last().map(|impression| impression.occurred_at))
+                .unwrap_or(observed_at);
+
+            Some(ExperienceRecord {
+                id: Uuid::new_v4(),
+                observed_at,
+                occurred_at,
+                what: what.to_owned(),
+                impression_ids,
+                confidence: draft.confidence.unwrap_or(0.55).clamp(0.0, 1.0),
+            })
+        })
+        .collect()
+}
+
+fn extract_json(generated: &str) -> Option<&str> {
+    let trimmed = generated.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return Some(trimmed);
+    }
+
+    let object_start = trimmed.find('{');
+    let array_start = trimmed.find('[');
+    match (object_start, array_start) {
+        (Some(object), Some(array)) if object < array => trimmed[object..]
+            .rfind('}')
+            .map(|end| &trimmed[object..=object + end]),
+        (Some(object), None) => trimmed[object..]
+            .rfind('}')
+            .map(|end| &trimmed[object..=object + end]),
+        (_, Some(array)) => trimmed[array..]
+            .rfind(']')
+            .map(|end| &trimmed[array..=array + end]),
+        _ => None,
+    }
 }
 
 fn llm_stop_markers() -> Vec<String> {

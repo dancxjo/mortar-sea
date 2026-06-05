@@ -1,5 +1,7 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +23,7 @@ pub(crate) struct LlmScheduler {
 pub(crate) enum LlmJobKind {
     FieldVision,
     RealtimeExperience,
+    Voice,
 }
 
 impl LlmJobKind {
@@ -28,6 +31,7 @@ impl LlmJobKind {
         match self {
             Self::FieldVision => "vision",
             Self::RealtimeExperience => "realtime_experience",
+            Self::Voice => "voice",
         }
     }
 }
@@ -35,12 +39,43 @@ impl LlmJobKind {
 type TokenSink = Box<dyn FnMut(String) + Send + 'static>;
 const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
 
+#[derive(Debug, Clone)]
+pub(crate) struct LlmStreamControl {
+    cancel: Arc<AtomicBool>,
+    appends: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl LlmStreamControl {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            appends: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn append_prompt(&self, text: impl Into<String>) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+        self.appends
+            .lock()
+            .expect("LLM stream append queue lock")
+            .push_back(text);
+    }
+}
+
 enum SchedulerCommand {
     Generate {
         id: Uuid,
         kind: LlmJobKind,
         queued_at: Instant,
         request: GenerationRequest,
+        control: Option<LlmStreamControl>,
         token_sink: Option<TokenSink>,
         response: oneshot::Sender<Result<String>>,
     },
@@ -68,7 +103,7 @@ impl LlmScheduler {
         kind: LlmJobKind,
         request: GenerationRequest,
     ) -> Result<String> {
-        self.submit(kind, request, None).await
+        self.submit(kind, request, None, None).await
     }
 
     pub(crate) async fn stream<F>(
@@ -76,19 +111,33 @@ impl LlmScheduler {
         kind: LlmJobKind,
         request: GenerationRequest,
         token_sink: F,
-    ) -> Result<()>
+    ) -> Result<String>
     where
         F: FnMut(String) + Send + 'static,
     {
-        self.submit(kind, request, Some(Box::new(token_sink)))
+        self.submit(kind, request, None, Some(Box::new(token_sink)))
             .await
-            .map(|_| ())
+    }
+
+    pub(crate) async fn stream_controlled<F>(
+        &self,
+        kind: LlmJobKind,
+        request: GenerationRequest,
+        control: LlmStreamControl,
+        token_sink: F,
+    ) -> Result<String>
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        self.submit(kind, request, Some(control), Some(Box::new(token_sink)))
+            .await
     }
 
     async fn submit(
         &self,
         kind: LlmJobKind,
         request: GenerationRequest,
+        control: Option<LlmStreamControl>,
         token_sink: Option<TokenSink>,
     ) -> Result<String> {
         let id = Uuid::new_v4();
@@ -117,6 +166,7 @@ impl LlmScheduler {
                 kind,
                 queued_at,
                 request,
+                control,
                 token_sink,
                 response,
             })
@@ -175,6 +225,7 @@ fn run_scheduler(
                 kind,
                 queued_at,
                 request,
+                control,
                 token_sink,
                 response,
             } => {
@@ -184,6 +235,7 @@ fn run_scheduler(
                     kind,
                     queued_at,
                     request,
+                    control,
                     token_sink,
                     &events,
                 );
@@ -218,6 +270,7 @@ fn run_generation(
     kind: LlmJobKind,
     queued_at: Instant,
     request: GenerationRequest,
+    control: Option<LlmStreamControl>,
     mut token_sink: Option<TokenSink>,
     events: &broadcast::Sender<RealTimeExperienceEvent>,
 ) -> Result<String> {
@@ -251,6 +304,24 @@ fn run_generation(
     let mut token_events = 0usize;
 
     loop {
+        if let Some(control) = &control {
+            if control.cancel.load(Ordering::Acquire) {
+                let _ = engine.cancel(generation);
+            }
+            let appends = {
+                let mut queued = control
+                    .appends
+                    .lock()
+                    .expect("LLM stream append queue lock");
+                queued.drain(..).collect::<Vec<_>>()
+            };
+            for append in appends {
+                if let Err(err) = engine.append_prompt(generation, append) {
+                    warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
+                }
+            }
+        }
+
         let llm_events = match engine.poll(generation) {
             Ok(events) => events,
             Err(err) => {

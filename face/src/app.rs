@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, RwLock, atomic::AtomicBool},
@@ -28,16 +28,19 @@ use crate::ingestion::{accept_frame, sequence_from_raw_json};
 use crate::llm_scheduler::LlmScheduler;
 use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
-    AckMessage, ErrorMessage, RawFaceCrop, RawVisionFrame, RealTimeExperienceEvent,
-    SensationRecord, VisionFieldImpressionRecord,
+    AckMessage, ErrorMessage, ExperienceRecord, RawFaceCrop, RawVisionFrame,
+    RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord, VoiceObservation,
 };
 use crate::realtime_experience;
+use crate::voice;
 
 pub(crate) const FACULTIES: &[&str] = &["vision-frame", "face", "motion", "scene"];
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
 pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
 pub(crate) const MAX_RECORDED_FACE_CROPS: usize = 24;
 pub(crate) const MAX_RECORDED_VISION_FIELD_IMPRESSIONS: usize = 80;
+pub(crate) const MAX_RECORDED_EXPERIENCES: usize = 80;
+pub(crate) const MAX_RECORDED_VOICE_OBSERVATIONS: usize = 80;
 const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 256;
 
 #[derive(Clone)]
@@ -46,6 +49,9 @@ pub(crate) struct AppState {
     pub(crate) raw_vision_frames: Arc<RwLock<VecDeque<RawVisionFrame>>>,
     pub(crate) raw_face_crops: Arc<RwLock<VecDeque<RawFaceCrop>>>,
     pub(crate) vision_field_impressions: Arc<RwLock<VecDeque<VisionFieldImpressionRecord>>>,
+    pub(crate) experiences: Arc<RwLock<VecDeque<ExperienceRecord>>>,
+    pub(crate) voice_observations: Arc<RwLock<VecDeque<VoiceObservation>>>,
+    pub(crate) voice_impression_ids: Arc<RwLock<HashSet<Uuid>>>,
     pub(crate) llm_scheduler: LlmScheduler,
     pub(crate) face_detector: Arc<FaceDetector>,
     pub(crate) face_detection_active: Arc<AtomicBool>,
@@ -98,6 +104,9 @@ pub async fn run() -> anyhow::Result<()> {
         raw_vision_frames: Arc::new(RwLock::new(VecDeque::new())),
         raw_face_crops: Arc::new(RwLock::new(VecDeque::new())),
         vision_field_impressions: Arc::new(RwLock::new(VecDeque::new())),
+        experiences: Arc::new(RwLock::new(VecDeque::new())),
+        voice_observations: Arc::new(RwLock::new(VecDeque::new())),
+        voice_impression_ids: Arc::new(RwLock::new(HashSet::new())),
         llm_scheduler,
         face_detector,
         face_detection_active: Arc::new(AtomicBool::new(false)),
@@ -110,6 +119,7 @@ pub async fn run() -> anyhow::Result<()> {
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
         realtime_experience_pending: Arc::new(AtomicBool::new(false)),
     };
+    voice::spawn_voice(state.clone());
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let app = Router::new()

@@ -66,6 +66,26 @@ pub(crate) struct VisionFieldImpressionRecord {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub(crate) struct ExperienceRecord {
+    pub(crate) id: Uuid,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) what: String,
+    pub(crate) impression_ids: Vec<Uuid>,
+    pub(crate) confidence: f32,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct VoiceObservation {
+    pub(crate) id: Uuid,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) text: String,
+    pub(crate) experience_ids: Vec<Uuid>,
+    pub(crate) interrupted_generation_id: Option<Uuid>,
+    pub(crate) confidence: f32,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct SensationSource {
     pub(crate) client_id: String,
     pub(crate) sensor_id: String,
@@ -113,6 +133,14 @@ pub(crate) enum RealTimeExperienceEvent {
     },
     ResponseDone {
         generation_id: Uuid,
+    },
+    Experience {
+        generation_id: Uuid,
+        experience: ExperienceRecord,
+    },
+    VoiceObservation {
+        generation_id: Uuid,
+        observation: VoiceObservation,
     },
     LlmJobQueued {
         job_id: Uuid,

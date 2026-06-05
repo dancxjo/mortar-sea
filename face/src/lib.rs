@@ -6,5 +6,6 @@ mod llm_scheduler;
 mod memory;
 mod messages;
 mod realtime_experience;
+mod voice;
 
 pub use app::run;
