@@ -4,6 +4,7 @@ pub enum ModelKind {
     Face,
     Asr,
     StyleTts2,
+    PiperVoice,
     Lexicon,
     Phonemicizer,
 }
@@ -35,6 +36,7 @@ pub const DEFAULT_LLM_MODEL_ID: &str = "gemma-4-e4b-it-q4-k-m";
 pub const DEFAULT_FACE_MODEL_ID: &str = "face-insightface-buffalo-l";
 pub const DEFAULT_ASR_MODEL_ID: &str = "whisper-base-en";
 pub const DEFAULT_STYLETTS2_MODEL_ID: &str = "styletts2-en-us";
+pub const DEFAULT_PIPER_VOICE_MODEL_ID: &str = "piper-ryan-medium";
 
 pub const MODEL_ASSETS: &[ModelAsset] = &[
     ModelAsset {
@@ -184,6 +186,72 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         source: Some("https://huggingface.co/hexgrad/styletts2"),
         notes: Some("Public ONNX conversion of StyleTTS2-LibriTTS waveform decoder."),
     },
+    ModelAsset {
+        id: "piper-ryan-medium-onnx",
+        filename: "en_US-ryan-medium.onnx",
+        relative_path: "models/piper/en_US-ryan-medium.onnx",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC-BY-4.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice ONNX model; Mortar runs it directly without the Piper binary."),
+    },
+    ModelAsset {
+        id: "piper-ryan-medium-config",
+        filename: "en_US-ryan-medium.onnx.json",
+        relative_path: "models/piper/en_US-ryan-medium.onnx.json",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/medium/en_US-ryan-medium.onnx.json",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC-BY-4.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice phoneme map and inference defaults."),
+    },
+    ModelAsset {
+        id: "piper-amy-medium-onnx",
+        filename: "en_US-amy-medium.onnx",
+        relative_path: "models/piper/en_US-amy-medium.onnx",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC-BY-4.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice ONNX model; Mortar runs it directly without the Piper binary."),
+    },
+    ModelAsset {
+        id: "piper-amy-medium-config",
+        filename: "en_US-amy-medium.onnx.json",
+        relative_path: "models/piper/en_US-amy-medium.onnx.json",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC-BY-4.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice phoneme map and inference defaults."),
+    },
+    ModelAsset {
+        id: "piper-ljspeech-high-onnx",
+        filename: "en_US-ljspeech-high.onnx",
+        relative_path: "models/piper/en_US-ljspeech-high.onnx",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC0-1.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice ONNX model; Mortar runs it directly without the Piper binary."),
+    },
+    ModelAsset {
+        id: "piper-ljspeech-high-config",
+        filename: "en_US-ljspeech-high.onnx.json",
+        relative_path: "models/piper/en_US-ljspeech-high.onnx.json",
+        url: "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json",
+        sha256: None,
+        size_bytes: None,
+        license: Some("CC0-1.0"),
+        source: Some("https://huggingface.co/rhasspy/piper-voices"),
+        notes: Some("Piper voice phoneme map and inference defaults."),
+    },
 ];
 
 pub const MODEL_BUNDLES: &[ModelBundle] = &[
@@ -253,6 +321,30 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
             "styletts2-en-us-onnx-99e40b",
         ],
         aliases: &["styletts2", "styletts2-en", "tts", "speech"],
+    },
+    ModelBundle {
+        id: DEFAULT_PIPER_VOICE_MODEL_ID,
+        display_name: "Piper Ryan Medium",
+        kind: ModelKind::PiperVoice,
+        primary_asset_id: "piper-ryan-medium-onnx",
+        required_asset_ids: &["piper-ryan-medium-onnx", "piper-ryan-medium-config"],
+        aliases: &["ryan", "piper", "piper-ryan", "voice"],
+    },
+    ModelBundle {
+        id: "piper-amy-medium",
+        display_name: "Piper Amy Medium",
+        kind: ModelKind::PiperVoice,
+        primary_asset_id: "piper-amy-medium-onnx",
+        required_asset_ids: &["piper-amy-medium-onnx", "piper-amy-medium-config"],
+        aliases: &["amy", "piper-amy"],
+    },
+    ModelBundle {
+        id: "piper-ljspeech-high",
+        display_name: "Piper LJSpeech High",
+        kind: ModelKind::PiperVoice,
+        primary_asset_id: "piper-ljspeech-high-onnx",
+        required_asset_ids: &["piper-ljspeech-high-onnx", "piper-ljspeech-high-config"],
+        aliases: &["ljspeech", "lj", "piper-ljspeech"],
     },
 ];
 
@@ -345,6 +437,7 @@ mod tests {
             find_bundle("styletts2-en-us").unwrap().kind,
             ModelKind::StyleTts2
         );
+        assert_eq!(find_bundle("piper").unwrap().kind, ModelKind::PiperVoice);
         assert_eq!(
             find_bundle("phonemicizer-en-us").unwrap().kind,
             ModelKind::Phonemicizer

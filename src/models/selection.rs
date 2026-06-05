@@ -5,13 +5,14 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::models::manifest::{
-    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_multimodal_projector_asset,
-    bundle_primary_asset, bundle_required_assets, find_bundle,
+    DEFAULT_LLM_MODEL_ID, DEFAULT_PIPER_VOICE_MODEL_ID, ModelAsset, ModelBundle, ModelKind,
+    bundle_multimodal_projector_asset, bundle_primary_asset, bundle_required_assets, find_bundle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct ModelSelection {
     llm: Option<String>,
+    piper_voice: Option<String>,
 }
 
 pub fn selected_llm_model_path() -> Result<PathBuf> {
@@ -43,30 +44,58 @@ pub fn selected_llm_model_label() -> Result<&'static str> {
 }
 
 pub fn selected_bundle() -> Result<&'static ModelBundle> {
+    selected_bundle_for_kind(ModelKind::Llm)
+}
+
+pub fn selected_piper_voice_bundle() -> Result<&'static ModelBundle> {
+    selected_bundle_for_kind(ModelKind::PiperVoice)
+}
+
+pub fn selected_bundle_for_kind(kind: ModelKind) -> Result<&'static ModelBundle> {
     let selection = read_selection()?;
-    let selected = selection.llm.as_deref().unwrap_or(DEFAULT_LLM_MODEL_ID);
+    let selected = match kind {
+        ModelKind::Llm => selection.llm.as_deref().unwrap_or(DEFAULT_LLM_MODEL_ID),
+        ModelKind::PiperVoice => selection
+            .piper_voice
+            .as_deref()
+            .unwrap_or(DEFAULT_PIPER_VOICE_MODEL_ID),
+        _ => default_bundle_id_for_kind(kind)?,
+    };
     let bundle = find_bundle(selected)
         .with_context(|| format!("selected model `{selected}` is not registered"))?;
-    if bundle.kind != ModelKind::Llm {
-        bail!("selected model `{selected}` is not an LLM bundle");
+    if bundle.kind != kind {
+        bail!(
+            "selected model `{selected}` is not a {} bundle",
+            model_kind_name(kind)
+        );
     }
     Ok(bundle)
 }
 
 pub fn write_selected_model(model_id: &str) -> Result<()> {
+    write_selected_model_for_kind(ModelKind::Llm, model_id)
+}
+
+pub fn write_selected_model_for_kind(kind: ModelKind, model_id: &str) -> Result<()> {
     let bundle = find_bundle(model_id)
         .with_context(|| format!("selected model `{model_id}` is not registered"))?;
-    if bundle.kind != ModelKind::Llm {
-        bail!("selected model `{model_id}` is not an LLM bundle");
+    if bundle.kind != kind {
+        bail!(
+            "selected model `{model_id}` is not a {} bundle",
+            model_kind_name(kind)
+        );
     }
 
     let path = model_selection_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let selection = ModelSelection {
-        llm: Some(model_id.to_string()),
-    };
+    let mut selection = read_selection()?;
+    match kind {
+        ModelKind::Llm => selection.llm = Some(model_id.to_string()),
+        ModelKind::PiperVoice => selection.piper_voice = Some(model_id.to_string()),
+        _ => bail!("{} selections are not stored yet", model_kind_name(kind)),
+    }
     fs::write(&path, serde_json::to_vec_pretty(&selection)?)?;
     Ok(())
 }
@@ -102,6 +131,30 @@ pub fn bundle_present(bundle: &ModelBundle) -> Result<bool> {
 pub fn is_non_empty_file(path: &Path) -> bool {
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+fn default_bundle_id_for_kind(kind: ModelKind) -> Result<&'static str> {
+    match kind {
+        ModelKind::Llm => Ok(DEFAULT_LLM_MODEL_ID),
+        ModelKind::PiperVoice => Ok(DEFAULT_PIPER_VOICE_MODEL_ID),
+        _ => missing_default_for_kind(kind),
+    }
+}
+
+fn missing_default_for_kind(kind: ModelKind) -> Result<&'static str> {
+    bail!("{} selections are not stored yet", model_kind_name(kind))
+}
+
+fn model_kind_name(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::Llm => "LLM",
+        ModelKind::Face => "face",
+        ModelKind::Asr => "ASR",
+        ModelKind::StyleTts2 => "StyleTTS2",
+        ModelKind::PiperVoice => "Piper voice",
+        ModelKind::Lexicon => "lexicon",
+        ModelKind::Phonemicizer => "phonemicizer",
+    }
 }
 
 fn read_selection() -> Result<ModelSelection> {

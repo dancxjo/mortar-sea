@@ -9,12 +9,13 @@ use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
 use crate::models::manifest::{
-    DEFAULT_ASR_MODEL_ID, DEFAULT_FACE_MODEL_ID, DEFAULT_STYLETTS2_MODEL_ID, ModelAsset,
-    ModelBundle, ModelKind, bundle_primary_asset, bundle_required_assets, find_asset, find_bundle,
+    DEFAULT_ASR_MODEL_ID, DEFAULT_FACE_MODEL_ID, DEFAULT_PIPER_VOICE_MODEL_ID,
+    DEFAULT_STYLETTS2_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_primary_asset,
+    bundle_required_assets, find_asset, find_bundle,
 };
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
-    selected_llm_projector_path, write_selected_model,
+    selected_llm_projector_path, selected_piper_voice_bundle, write_selected_model,
 };
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,13 @@ pub fn ensure_styletts2_model_available() -> Result<PathBuf> {
     ensure_model_available(DEFAULT_STYLETTS2_MODEL_ID)
 }
 
+pub fn ensure_piper_voice_model_available() -> Result<PathBuf> {
+    let bundle = selected_piper_voice_bundle()?;
+    ensure_bundle_available(bundle)?;
+    let primary = bundle_primary_asset(bundle)?;
+    Ok(asset_path(&resolve_mortar_home()?, primary))
+}
+
 pub fn ensure_model_available(model: &str) -> Result<PathBuf> {
     let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
     ensure_bundle_available(bundle)?;
@@ -156,6 +164,8 @@ fn default_runtime_bundles() -> Result<Vec<&'static ModelBundle>> {
         find_bundle(DEFAULT_ASR_MODEL_ID).context("default ASR model bundle is not registered")?,
         find_bundle(DEFAULT_STYLETTS2_MODEL_ID)
             .context("default StyleTTS2 model bundle is not registered")?,
+        find_bundle(DEFAULT_PIPER_VOICE_MODEL_ID)
+            .context("default Piper voice model bundle is not registered")?,
     ])
 }
 
@@ -428,5 +438,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(ids.contains(&DEFAULT_STYLETTS2_MODEL_ID));
+        assert!(ids.contains(&DEFAULT_PIPER_VOICE_MODEL_ID));
     }
 }

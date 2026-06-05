@@ -12,10 +12,11 @@ resolver = "2"
 llama-cpp-sys-4 = { path = "target/patched-crates/llama-cpp-sys-4" }
 
 [features]
-default = ["llm-test", "llama-cuda", "styletts2-onnx"]
+default = ["llm-test", "llama-cuda", "styletts2-onnx", "piper-onnx"]
 llm-test = ["dep:psyche"]
 llama-cuda = ["llm-test", "psyche/llama-cuda"]
 styletts2-onnx = ["styletts2/styletts2-onnx"]
+piper-onnx = ["dep:ort"]
 
 [dependencies]
 anyhow = "1"
@@ -30,3 +31,9 @@ sha2 = "0.10"
 speech = { path = "speech" }
 styletts2 = { path = "styletts2" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dependencies.ort]
+version = "=2.0.0-rc.12"
+optional = true
+default-features = false
+features = ["load-dynamic", "api-23"]

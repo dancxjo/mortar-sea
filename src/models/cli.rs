@@ -9,7 +9,8 @@ use crate::models::manifest::{
 };
 use crate::models::selection::{
     asset_path, bundle_present, is_non_empty_file, model_selection_path, resolve_mortar_home,
-    selected_bundle, selected_llm_model_path, write_selected_model,
+    selected_bundle, selected_bundle_for_kind, selected_llm_model_path, write_selected_model,
+    write_selected_model_for_kind,
 };
 
 #[derive(Debug, Subcommand)]
@@ -61,10 +62,19 @@ pub fn run(command: Option<ModelsCommand>) -> Result<()> {
 }
 
 fn model_menu() -> Result<()> {
-    let selected = selected_bundle()?;
+    let category = Select::new(
+        "Model category",
+        vec![
+            CategoryChoice::new(ModelKind::Llm)?,
+            CategoryChoice::new(ModelKind::PiperVoice)?,
+        ],
+    )
+    .prompt()
+    .context("model menu was cancelled")?;
+    let selected = selected_bundle_for_kind(category.kind)?;
     let choices = MODEL_BUNDLES
         .iter()
-        .filter(|bundle| bundle.kind == ModelKind::Llm)
+        .filter(|bundle| bundle.kind == category.kind)
         .map(|bundle| {
             let state = if bundle_present(bundle)? {
                 "present".green().to_string()
@@ -87,18 +97,51 @@ fn model_menu() -> Result<()> {
         .iter()
         .position(|choice| choice.bundle.id == selected.id)
         .unwrap_or(0);
-    let choice = Select::new("LLM model", choices)
+    let choice = Select::new(&format!("{} model", category.name), choices)
         .with_starting_cursor(cursor)
         .prompt()
         .context("model menu was cancelled")?;
 
-    write_selected_model(choice.bundle.id)?;
+    write_selected_model_for_kind(category.kind, choice.bundle.id)?;
     println!(
-        "{} LLM {}",
+        "{} {} {}",
         "selected".green(),
+        model_kind_label(category.kind),
         choice.bundle.display_name.bold()
     );
     Ok(())
+}
+
+#[derive(Clone)]
+struct CategoryChoice {
+    kind: ModelKind,
+    name: &'static str,
+    label: String,
+}
+
+impl CategoryChoice {
+    fn new(kind: ModelKind) -> Result<Self> {
+        let name = match kind {
+            ModelKind::Llm => "LLM",
+            ModelKind::PiperVoice => "Piper voice",
+            _ => model_kind_label(kind),
+        };
+        let selected = selected_bundle_for_kind(kind)?;
+        Ok(Self {
+            kind,
+            name,
+            label: format!(
+                "{name:<12} {}",
+                format!("current: {}", selected.display_name).dimmed()
+            ),
+        })
+    }
+}
+
+impl std::fmt::Display for CategoryChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.label)
+    }
 }
 
 #[derive(Clone)]
@@ -115,9 +158,12 @@ impl std::fmt::Display for ModelChoice {
 
 fn list_models() -> Result<()> {
     let selected = selected_bundle()?;
+    let selected_piper = selected_bundle_for_kind(ModelKind::PiperVoice)?;
     println!("{}", "Models".bold());
     for bundle in MODEL_BUNDLES {
-        let marker = if bundle.kind == ModelKind::Llm && bundle.id == selected.id {
+        let marker = if (bundle.kind == ModelKind::Llm && bundle.id == selected.id)
+            || (bundle.kind == ModelKind::PiperVoice && bundle.id == selected_piper.id)
+        {
             "*"
         } else {
             " "
@@ -231,16 +277,27 @@ fn print_status() -> Result<()> {
     for bundle in MODEL_BUNDLES.iter().filter(|bundle| {
         matches!(
             bundle.kind,
-            ModelKind::StyleTts2 | ModelKind::Lexicon | ModelKind::Phonemicizer
+            ModelKind::StyleTts2
+                | ModelKind::PiperVoice
+                | ModelKind::Lexicon
+                | ModelKind::Phonemicizer
         )
     }) {
+        let selected_marker = if bundle.kind == ModelKind::PiperVoice
+            && bundle.id == selected_bundle_for_kind(ModelKind::PiperVoice)?.id
+        {
+            "* "
+        } else {
+            "  "
+        };
         let state = if bundle_present(bundle)? {
             "present".green().to_string()
         } else {
             "missing".red().to_string()
         };
         println!(
-            "{} {:<12} {} ({})",
+            "{}{} {:<12} {} ({})",
+            selected_marker,
             state,
             model_kind_label(bundle.kind),
             bundle.display_name.bold(),
@@ -259,11 +316,26 @@ fn print_status() -> Result<()> {
 
 fn select_model(model: &str) -> Result<()> {
     let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
-    if bundle.kind != ModelKind::Llm {
-        anyhow::bail!("`{model}` is not an LLM model; use `cargo run models fetch`");
+    match bundle.kind {
+        ModelKind::Llm => {
+            write_selected_model(bundle.id)?;
+            println!("{} LLM {}", "selected".green(), bundle.display_name.bold());
+        }
+        ModelKind::PiperVoice => {
+            write_selected_model_for_kind(ModelKind::PiperVoice, bundle.id)?;
+            println!(
+                "{} piper-voice {}",
+                "selected".green(),
+                bundle.display_name.bold()
+            );
+        }
+        _ => {
+            anyhow::bail!(
+                "`{model}` is not a selectable model; use `cargo run models fetch {}`",
+                bundle.id
+            );
+        }
     }
-    write_selected_model(bundle.id)?;
-    println!("{} LLM {}", "selected".green(), bundle.display_name.bold());
     Ok(())
 }
 
@@ -273,6 +345,7 @@ fn model_kind_label(kind: ModelKind) -> &'static str {
         ModelKind::Face => "face",
         ModelKind::Asr => "asr",
         ModelKind::StyleTts2 => "styletts2",
+        ModelKind::PiperVoice => "piper-voice",
         ModelKind::Lexicon => "lexicon",
         ModelKind::Phonemicizer => "phonemicizer",
     }

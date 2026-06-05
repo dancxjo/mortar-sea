@@ -17,7 +17,10 @@ use styletts2::{
 #[cfg(feature = "styletts2-onnx")]
 use styletts2::StyleTts2OnnxBackend;
 
-use crate::models::ensure_styletts2_model_available;
+use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
+use crate::piper::{
+    PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
+};
 
 #[derive(Debug, Args)]
 pub struct SpeakCommand {
@@ -37,6 +40,7 @@ pub struct SpeakCommand {
 pub enum SpeakBackend {
     Mock,
     Styletts2,
+    Piper,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +69,21 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         })
         .context("failed to phonemicize text into a speech plan")?;
     let plan = utterance_plan_from_phonemicized(&phonemicized);
-    let symbol_sequence = styletts2_en_us_symbol_set()
-        .lower(&plan)
-        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
 
     let backend_label = match command.backend {
         SpeakBackend::Mock => "mock",
         SpeakBackend::Styletts2 => "styletts2",
+        SpeakBackend::Piper => "piper",
+    };
+    let backend_symbols = match command.backend {
+        SpeakBackend::Mock | SpeakBackend::Styletts2 => styletts2_en_us_symbol_set()
+            .lower(&plan)
+            .context("failed to lower speech spine tokens into StyleTTS2 symbols")?
+            .tokens
+            .iter()
+            .map(|token| token.symbol.clone())
+            .collect::<Vec<_>>(),
+        SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols,
     };
     let artifact = match command.backend {
         SpeakBackend::Mock => {
@@ -81,6 +93,10 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             let primary_model = ensure_styletts2_model_available()?;
             synthesize_plan_with_styletts2_to_wav(plan, &primary_model, &command.output)?
         }
+        SpeakBackend::Piper => {
+            let voice_model = ensure_piper_voice_model_available()?;
+            synthesize_plan_with_piper_to_wav(plan, &voice_model, &command.output)?
+        }
     };
 
     println!("Mortar speech synthesis plan");
@@ -89,20 +105,35 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     println!("text: {}", phonemicized.text);
     println!("phonemes: {}", format_phonemes(&phonemicized));
     println!("phones: {}", format_phones(&phonemicized));
-    println!(
-        "backend_symbols: {}",
-        symbol_sequence
-            .tokens
-            .iter()
-            .map(|token| token.symbol.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    println!("backend_symbols: {}", backend_symbols.join(" "));
     println!("sample_rate_hz: {}", artifact.sample_rate_hz);
     println!("samples: {}", artifact.samples);
     println!("wav: {}", artifact.path.display());
 
     Ok(())
+}
+
+fn synthesize_plan_with_piper_to_wav(
+    plan: UtterancePlan,
+    voice_model_path: &Path,
+    output_path: &Path,
+) -> Result<SpeechSynthesisArtifact> {
+    let config_path = piper_voice_config_path(voice_model_path);
+    let config = PiperVoiceConfig::from_json_file(&config_path)?;
+    let mut backend = PiperOnnxBackend::load(voice_model_path, config)
+        .context("failed to load native Piper ONNX voice backend")?;
+    let output = backend
+        .synthesize_plan(&plan)
+        .context("native Piper ONNX synthesis failed")?;
+
+    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+        .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
+
+    Ok(SpeechSynthesisArtifact {
+        path: output_path.to_path_buf(),
+        sample_rate_hz: output.sample_rate_hz,
+        samples: output.pcm_mono_f32.len(),
+    })
 }
 
 pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
