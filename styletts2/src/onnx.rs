@@ -257,10 +257,7 @@ impl StyleTts2OnnxBackend {
         Ok(samples)
     }
 
-    fn preflight_request(
-        &self,
-        request: &StyleTts2SynthesisRequest,
-    ) -> Result<(), StyleTts2Error> {
+    fn preflight_request(&self, request: &StyleTts2SynthesisRequest) -> Result<(), StyleTts2Error> {
         validate_styletts2_plan(&request.backend_plan)?;
         validate_diffusion_options(&self.diffusion_options)?;
 

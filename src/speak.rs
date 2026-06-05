@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use speech::{
     EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
-    Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec,
-    UtteranceId, UtterancePlan, VariantId, phone_display_symbol, phoneme_display_symbol,
+    Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec, UtteranceId,
+    UtterancePlan, VariantId, phone_display_symbol, phoneme_display_symbol,
 };
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
@@ -18,11 +18,9 @@ use styletts2::{
 #[cfg(feature = "styletts2-onnx")]
 use styletts2::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend};
 
-use crate::models::{
-    ensure_piper_voice_model_available, ensure_styletts2_model_available,
-};
 #[cfg(feature = "styletts2-onnx")]
 use crate::models::ensure_styletts2_default_reference_audio_available;
+use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
 use crate::piper::{
     PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
 };
@@ -118,8 +116,12 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     };
     let styletts2_plan = match command.backend {
         SpeakBackend::Mock | SpeakBackend::Styletts2 => Some(
-            prepare_styletts2_plan(&plan, &styletts2_en_us_symbol_set(), styletts2_options(&command))
-                .context("failed to prepare StyleTTS2 synthesis plan")?,
+            prepare_styletts2_plan(
+                &plan,
+                &styletts2_en_us_symbol_set(),
+                styletts2_options(&command),
+            )
+            .context("failed to prepare StyleTTS2 synthesis plan")?,
         ),
         SpeakBackend::Piper => None,
     };
@@ -135,15 +137,13 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols,
     };
     let artifact = match command.backend {
-        SpeakBackend::Mock => {
-            synthesize_backend_plan_with_mock_to_wav(
-                styletts2_plan
-                    .clone()
-                    .expect("StyleTTS2 plan should be prepared"),
-                &command.output,
-                command.sample_rate_hz,
-            )?
-        }
+        SpeakBackend::Mock => synthesize_backend_plan_with_mock_to_wav(
+            styletts2_plan
+                .clone()
+                .expect("StyleTTS2 plan should be prepared"),
+            &command.output,
+            command.sample_rate_hz,
+        )?,
         SpeakBackend::Styletts2 => {
             let primary_model = ensure_styletts2_model_available()?;
             synthesize_backend_plan_with_styletts2_to_wav(
@@ -309,8 +309,12 @@ fn synthesize_backend_plan_with_mock_to_wav(
     sample_rate_hz: u32,
 ) -> Result<SpeechSynthesisArtifact> {
     validate_styletts2_plan(&backend_plan).context("invalid StyleTTS2 synthesis plan")?;
-    let request =
-        StyleTts2SynthesisRequest::from_backend_plan(backend_plan, None, None, ProsodyTrack::default());
+    let request = StyleTts2SynthesisRequest::from_backend_plan(
+        backend_plan,
+        None,
+        None,
+        ProsodyTrack::default(),
+    );
     let mut backend = MockStyleTts2Backend::new(sample_rate_hz);
     let output = backend
         .synthesize(&request)

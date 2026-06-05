@@ -6,7 +6,7 @@ use speech::{
 use styletts2::{
     BackendSynthesisPlan, MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config,
     StyleTts2PlanOptions, StyleTts2SymbolSource, StyleTts2SymbolToken, StyleTts2SynthesisRequest,
-    SynthesisChunk, SymbolLoweringError, SymbolSet, prepare_styletts2_plan,
+    SymbolLoweringError, SymbolSet, SynthesisChunk, prepare_styletts2_plan,
     styletts2_en_us_symbol_set, validate_styletts2_plan,
 };
 
@@ -227,7 +227,10 @@ fn keeps_speaker_identity_separate_from_style_reference() {
 
     assert_eq!(request.speaker, Some(speaker));
     assert_eq!(request.style, Some(style));
-    assert_eq!(request.backend_plan.utterance_id, UtteranceId("utt.test".into()));
+    assert_eq!(
+        request.backend_plan.utterance_id,
+        UtteranceId("utt.test".into())
+    );
 }
 
 #[test]
@@ -261,8 +264,14 @@ fn mock_backend_returns_deterministic_finite_pcm() {
 
 #[test]
 fn empty_utterance_produces_empty_mock_waveform() {
-    let request =
-        StyleTts2SynthesisRequest::from_plan(plan(None, None, Vec::new(), Vec::new(), Vec::new(), None));
+    let request = StyleTts2SynthesisRequest::from_plan(plan(
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+    ));
     let mut backend = MockStyleTts2Backend::default();
 
     let output = backend
@@ -362,10 +371,12 @@ fn prepared_plan_chunks_long_input_on_word_boundaries() {
     .expect("prepare plan");
 
     assert!(backend_plan.chunks.len() > 1);
-    assert!(backend_plan
-        .chunks
-        .iter()
-        .all(|chunk| chunk.symbols.len() <= 3));
+    assert!(
+        backend_plan
+            .chunks
+            .iter()
+            .all(|chunk| chunk.symbols.len() <= 3)
+    );
 }
 
 #[test]
