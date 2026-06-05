@@ -1,71 +1,408 @@
 use std::collections::BTreeMap;
 
+use serde_json::{Map, Value};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceStreamEvent {
-    InternalText { text: String },
+    InternalText(InternalText),
+    SayStart(SayAttributes),
+    SayText(SayText),
+    SayEnd,
     BreathGroup(BreathGroup),
+    ParseWarning(VoiceParseWarning),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalText {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SayText {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SayAttributes {
+    pub boundary: SpeechBoundary,
+    pub tone: Option<String>,
+    pub pace: Option<String>,
+    pub act: Option<String>,
+    pub extra: Value,
+}
+
+impl SayAttributes {
+    fn from_raw(raw: BTreeMap<String, String>) -> Self {
+        let boundary = SpeechBoundary::from_attr(raw.get("boundary").map(String::as_str));
+        let tone = raw.get("tone").cloned();
+        let pace = raw.get("pace").cloned();
+        let act = raw.get("act").cloned();
+
+        let mut extra = Map::new();
+        for (key, value) in &raw {
+            if !matches!(key.as_str(), "boundary" | "tone" | "pace" | "act") {
+                extra.insert(key.clone(), Value::String(value.clone()));
+            }
+        }
+
+        Self {
+            boundary,
+            tone,
+            pace,
+            act,
+            extra: Value::Object(extra),
+        }
+    }
+
+    pub fn raw_attributes(&self) -> Value {
+        let mut raw = Map::new();
+
+        raw.insert(
+            "boundary".into(),
+            Value::String(self.boundary.as_attr_value().to_string()),
+        );
+
+        if let Some(tone) = &self.tone {
+            raw.insert("tone".into(), Value::String(tone.clone()));
+        }
+
+        if let Some(pace) = &self.pace {
+            raw.insert("pace".into(), Value::String(pace.clone()));
+        }
+
+        if let Some(act) = &self.act {
+            raw.insert("act".into(), Value::String(act.clone()));
+        }
+
+        if let Some(extra) = self.extra.as_object() {
+            for (key, value) in extra {
+                raw.insert(key.clone(), value.clone());
+            }
+        }
+
+        Value::Object(raw)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceParseWarning {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpeechBoundary {
+    Continuing,
+    Final,
+    Interrupted,
+    Unknown(String),
+}
+
+impl SpeechBoundary {
+    pub fn from_attr(boundary: Option<&str>) -> Self {
+        match boundary
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "continuing" => Self::Continuing,
+            "final" => Self::Final,
+            "interrupted" => Self::Interrupted,
+            "" => Self::Unknown("".into()),
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub fn as_attr_value(&self) -> &str {
+        match self {
+            Self::Continuing => "continuing",
+            Self::Final => "final",
+            Self::Interrupted => "interrupted",
+            Self::Unknown(value) => value,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BreathGroup {
     pub text: String,
-    pub boundary: Option<String>,
+    pub boundary: SpeechBoundary,
     pub tone: Option<String>,
     pub pace: Option<String>,
     pub act: Option<String>,
-    pub raw_attributes: BTreeMap<String, String>,
+    pub raw_attributes: Value,
 }
 
 impl BreathGroup {
-    fn from_say(text: String, attributes: BTreeMap<String, String>) -> Self {
+    fn from_say(
+        text: String,
+        attributes: SayAttributes,
+        override_boundary: Option<SpeechBoundary>,
+    ) -> Self {
+        let raw_attributes = attributes.raw_attributes();
+        let boundary = override_boundary.unwrap_or(attributes.boundary);
+
         Self {
             text,
-            boundary: attributes.get("boundary").cloned(),
-            tone: attributes.get("tone").cloned(),
-            pace: attributes.get("pace").cloned(),
-            act: attributes.get("act").cloned(),
-            raw_attributes: attributes,
+            boundary,
+            tone: attributes.tone,
+            pace: attributes.pace,
+            act: attributes.act,
+            raw_attributes,
         }
     }
 }
 
-pub fn parse_voice_stream(input: &str) -> Vec<VoiceStreamEvent> {
-    let mut events = Vec::new();
-    let mut cursor = 0;
+#[derive(Debug, Clone)]
+struct OpenSay {
+    attributes: SayAttributes,
+    text: String,
+}
 
-    while cursor < input.len() {
-        let Some(relative_tag_start) = input[cursor..].find("<say") else {
-            push_internal(&input[cursor..], &mut events);
-            break;
-        };
+#[derive(Debug, Default)]
+pub struct VoiceStreamParser {
+    buffer: String,
+    open_say: Option<OpenSay>,
+}
 
-        let tag_start = cursor + relative_tag_start;
-        push_internal(&input[cursor..tag_start], &mut events);
-
-        let Some(relative_tag_end) = input[tag_start..].find('>') else {
-            push_internal(&input[tag_start..], &mut events);
-            break;
-        };
-
-        let tag_end = tag_start + relative_tag_end;
-        let tag = &input[tag_start + "<say".len()..tag_end];
-        let attributes = parse_attributes(tag);
-        let content_start = tag_end + 1;
-
-        let Some(relative_close) = input[content_start..].find("</say>") else {
-            push_internal(&input[tag_start..], &mut events);
-            break;
-        };
-
-        let close_start = content_start + relative_close;
-        let text = input[content_start..close_start].trim().to_string();
-        events.push(VoiceStreamEvent::BreathGroup(BreathGroup::from_say(
-            text, attributes,
-        )));
-        cursor = close_start + "</say>".len();
+impl VoiceStreamParser {
+    pub fn push_chunk(&mut self, chunk: &str) -> Vec<VoiceStreamEvent> {
+        self.buffer.push_str(chunk);
+        self.parse(false)
     }
 
+    pub fn finish(&mut self) -> Vec<VoiceStreamEvent> {
+        let mut events = self.parse(true);
+
+        if let Some(mut open_say) = self.open_say.take() {
+            if !self.buffer.is_empty() {
+                open_say.text.push_str(&self.buffer);
+                self.buffer.clear();
+            }
+
+            events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+                message: "unclosed <say> at stream end".into(),
+            }));
+
+            emit_breath_group(
+                OpenSay {
+                    text: open_say.text,
+                    attributes: open_say.attributes,
+                },
+                Some(SpeechBoundary::Interrupted),
+                &mut events,
+            );
+        }
+
+        if !self.buffer.is_empty() {
+            push_internal(&self.buffer, &mut events);
+            self.buffer.clear();
+        }
+
+        events
+    }
+
+    fn parse(&mut self, stream_end: bool) -> Vec<VoiceStreamEvent> {
+        let mut events = Vec::new();
+
+        loop {
+            if self.buffer.is_empty() {
+                break;
+            }
+
+            if self.open_say.is_some() {
+                if !self.parse_inside_say(stream_end, &mut events) {
+                    break;
+                }
+            } else if !self.parse_outside_say(stream_end, &mut events) {
+                break;
+            }
+        }
+
+        events
+    }
+
+    fn parse_outside_say(&mut self, stream_end: bool, events: &mut Vec<VoiceStreamEvent>) -> bool {
+        let Some(tag_start) = self.buffer.find('<') else {
+            let text = std::mem::take(&mut self.buffer);
+            push_internal(&text, events);
+            return false;
+        };
+
+        if tag_start > 0 {
+            let internal = self.take_prefix(tag_start);
+            push_internal(&internal, events);
+        }
+
+        if self.buffer.starts_with("<say") {
+            let Some(tag_end) = self.buffer.find('>') else {
+                if stream_end {
+                    events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+                        message: "malformed <say> tag".into(),
+                    }));
+                    let remaining = std::mem::take(&mut self.buffer);
+                    push_internal(&remaining, events);
+                    return false;
+                }
+                return false;
+            };
+
+            let tag = self.buffer["<say".len()..tag_end].to_string();
+            self.take_prefix(tag_end + 1);
+
+            let attributes = SayAttributes::from_raw(parse_attributes(&tag));
+            events.push(VoiceStreamEvent::SayStart(attributes.clone()));
+            self.open_say = Some(OpenSay {
+                attributes,
+                text: String::new(),
+            });
+            return true;
+        }
+
+        if self.buffer.starts_with("</say>") {
+            events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+                message: "unexpected </say> while outside <say>".into(),
+            }));
+            self.take_prefix("</say>".len());
+            return true;
+        }
+
+        self.consume_malformed_tag(stream_end, false, events)
+    }
+
+    fn parse_inside_say(&mut self, stream_end: bool, events: &mut Vec<VoiceStreamEvent>) -> bool {
+        let Some(tag_start) = self.buffer.find('<') else {
+            if let Some(open_say) = &mut self.open_say {
+                open_say.text.push_str(&self.buffer);
+            }
+            self.buffer.clear();
+            return false;
+        };
+
+        if tag_start > 0 {
+            let text = self.take_prefix(tag_start);
+            if let Some(open_say) = &mut self.open_say {
+                open_say.text.push_str(&text);
+            }
+        }
+
+        if self.buffer.starts_with("</say>") {
+            self.take_prefix("</say>".len());
+            if let Some(open_say) = self.open_say.take() {
+                emit_breath_group(open_say, None, events);
+            }
+            return true;
+        }
+
+        if self.buffer.starts_with("<say") {
+            let Some(tag_end) = self.buffer.find('>') else {
+                if stream_end {
+                    if let Some(open_say) = &mut self.open_say {
+                        open_say.text.push_str(&self.buffer);
+                    }
+                    self.buffer.clear();
+                }
+                return false;
+            };
+
+            let tag = self.buffer["<say".len()..tag_end].to_string();
+            self.take_prefix(tag_end + 1);
+
+            events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+                message: "nested <say> encountered; recovering by closing current breath group"
+                    .into(),
+            }));
+
+            if let Some(open_say) = self.open_say.take() {
+                emit_breath_group(open_say, Some(SpeechBoundary::Interrupted), events);
+            }
+
+            let attributes = SayAttributes::from_raw(parse_attributes(&tag));
+            events.push(VoiceStreamEvent::SayStart(attributes.clone()));
+            self.open_say = Some(OpenSay {
+                attributes,
+                text: String::new(),
+            });
+            return true;
+        }
+
+        self.consume_malformed_tag(stream_end, true, events)
+    }
+
+    fn consume_malformed_tag(
+        &mut self,
+        stream_end: bool,
+        in_say: bool,
+        events: &mut Vec<VoiceStreamEvent>,
+    ) -> bool {
+        let Some(tag_end) = self.buffer.find('>') else {
+            if stream_end {
+                events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+                    message: "malformed tag".into(),
+                }));
+                let malformed = std::mem::take(&mut self.buffer);
+                if in_say {
+                    if let Some(open_say) = &mut self.open_say {
+                        open_say.text.push_str(&malformed);
+                    }
+                } else {
+                    push_internal(&malformed, events);
+                }
+                return false;
+            }
+            return false;
+        };
+
+        let malformed = self.take_prefix(tag_end + 1);
+        events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
+            message: format!("malformed tag recovered: {malformed}"),
+        }));
+
+        if in_say {
+            if let Some(open_say) = &mut self.open_say {
+                open_say.text.push_str(&malformed);
+            }
+        } else {
+            push_internal(&malformed, events);
+        }
+
+        true
+    }
+
+    fn take_prefix(&mut self, bytes: usize) -> String {
+        let prefix = self.buffer[..bytes].to_string();
+        self.buffer.drain(..bytes);
+        prefix
+    }
+}
+
+pub fn parse_voice_stream(input: &str) -> Vec<VoiceStreamEvent> {
+    let mut parser = VoiceStreamParser::default();
+    let mut events = parser.push_chunk(input);
+    events.extend(parser.finish());
     events
+}
+
+fn emit_breath_group(
+    open_say: OpenSay,
+    override_boundary: Option<SpeechBoundary>,
+    events: &mut Vec<VoiceStreamEvent>,
+) {
+    let text = open_say.text.trim().to_string();
+
+    if !text.is_empty() {
+        events.push(VoiceStreamEvent::SayText(SayText { text: text.clone() }));
+    }
+
+    events.push(VoiceStreamEvent::SayEnd);
+
+    if !text.is_empty() {
+        events.push(VoiceStreamEvent::BreathGroup(BreathGroup::from_say(
+            text,
+            open_say.attributes,
+            override_boundary,
+        )));
+    }
 }
 
 fn push_internal(text: &str, events: &mut Vec<VoiceStreamEvent>) {
@@ -74,9 +411,9 @@ fn push_internal(text: &str, events: &mut Vec<VoiceStreamEvent>) {
         return;
     }
 
-    events.push(VoiceStreamEvent::InternalText {
+    events.push(VoiceStreamEvent::InternalText(InternalText {
         text: trimmed.to_string(),
-    });
+    }));
 }
 
 fn parse_attributes(input: &str) -> BTreeMap<String, String> {
@@ -177,68 +514,157 @@ fn parse_attributes(input: &str) -> BTreeMap<String, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_internal_and_say_regions_in_order() {
-        let events = parse_voice_stream(
-            r#"I should answer carefully.
-<say boundary="continuing" tone="thoughtful" pace="medium">hello,</say>
-but not this.
-<say boundary="final" tone="settled">world.</say>"#,
-        );
+    fn breath_groups(events: &[VoiceStreamEvent]) -> Vec<BreathGroup> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                VoiceStreamEvent::BreathGroup(group) => Some(group.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 
-        assert_eq!(events.len(), 4);
-        assert!(matches!(
-            &events[0],
-            VoiceStreamEvent::InternalText { text } if text == "I should answer carefully."
-        ));
-        assert!(matches!(
-            &events[1],
-            VoiceStreamEvent::BreathGroup(group)
-                if group.text == "hello,"
-                    && group.boundary.as_deref() == Some("continuing")
-                    && group.tone.as_deref() == Some("thoughtful")
-                    && group.pace.as_deref() == Some("medium")
-        ));
-        assert!(matches!(
-            &events[2],
-            VoiceStreamEvent::InternalText { text } if text == "but not this."
-        ));
-        assert!(matches!(
-            &events[3],
-            VoiceStreamEvent::BreathGroup(group)
-                if group.text == "world." && group.boundary.as_deref() == Some("final")
-        ));
+    fn internal_texts(events: &[VoiceStreamEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                VoiceStreamEvent::InternalText(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn preserves_act_and_unknown_say_attributes() {
+    fn plain_internal_text_only() {
+        let events = parse_voice_stream("I should keep this internal.");
+        assert_eq!(internal_texts(&events), ["I should keep this internal."]);
+    }
+
+    #[test]
+    fn one_complete_say_group() {
+        let events = parse_voice_stream(r#"<say boundary="final" tone="warm">hello world</say>"#);
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].text, "hello world");
+        assert_eq!(groups[0].boundary, SpeechBoundary::Final);
+    }
+
+    #[test]
+    fn several_say_groups_separated_by_internal_text() {
         let events = parse_voice_stream(
-            r#"<say boundary="final" tone="warm" pace="slow" act="answer" x-model="seed">hello</say>"#,
+            r#"before <say boundary="continuing">hello</say> middle <say boundary="final">world</say> after"#,
         );
 
-        let VoiceStreamEvent::BreathGroup(group) = &events[0] else {
-            panic!("expected breath group");
-        };
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].text, "hello");
+        assert_eq!(groups[1].text, "world");
+        assert_eq!(internal_texts(&events), ["before", "middle", "after"]);
+    }
 
+    #[test]
+    fn attributes_boundary_tone_pace_act() {
+        let events = parse_voice_stream(
+            r#"<say boundary="continuing" tone="thoughtful" pace="medium" act="answer">hello</say>"#,
+        );
+
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        assert_eq!(group.boundary, SpeechBoundary::Continuing);
+        assert_eq!(group.tone.as_deref(), Some("thoughtful"));
+        assert_eq!(group.pace.as_deref(), Some("medium"));
         assert_eq!(group.act.as_deref(), Some("answer"));
+    }
+
+    #[test]
+    fn unknown_attributes_are_preserved() {
+        let events = parse_voice_stream(r#"<say boundary="final" x-model="seed">hello</say>"#);
+
+        let groups = breath_groups(&events);
         assert_eq!(
-            group.raw_attributes.get("x-model").map(String::as_str),
+            groups[0]
+                .raw_attributes
+                .as_object()
+                .and_then(|attrs| attrs.get("x-model"))
+                .and_then(Value::as_str),
             Some("seed")
         );
     }
 
     #[test]
-    fn malformed_unclosed_say_is_internal_text() {
-        let events = parse_voice_stream(r#"before <say boundary="final">hello"#);
+    fn chunk_boundary_splits_tag_name() {
+        let mut parser = VoiceStreamParser::default();
+        let mut events = parser.push_chunk("before <sa");
+        events.extend(parser.push_chunk("y boundary=\"final\">hello</say> after"));
+        events.extend(parser.finish());
 
-        assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[0],
-            VoiceStreamEvent::InternalText { text } if text == "before"
-        ));
-        assert!(matches!(
-            &events[1],
-            VoiceStreamEvent::InternalText { text } if text == r#"<say boundary="final">hello"#
-        ));
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].text, "hello");
+        assert_eq!(internal_texts(&events), ["before", "after"]);
+    }
+
+    #[test]
+    fn chunk_boundary_splits_closing_tag() {
+        let mut parser = VoiceStreamParser::default();
+        let mut events = parser.push_chunk("<say boundary=\"final\">hello</s");
+        events.extend(parser.push_chunk("ay>"));
+        events.extend(parser.finish());
+
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].text, "hello");
+    }
+
+    #[test]
+    fn unclosed_say_at_stream_end_warns_and_recovers_partial_group() {
+        let mut parser = VoiceStreamParser::default();
+        let mut events = parser.push_chunk("before <say boundary=\"final\">hello");
+        events.extend(parser.finish());
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            VoiceStreamEvent::ParseWarning(VoiceParseWarning { message })
+                if message.contains("unclosed <say>")
+        )));
+
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].text, "hello");
+        assert_eq!(groups[0].boundary, SpeechBoundary::Interrupted);
+    }
+
+    #[test]
+    fn nested_say_recovery() {
+        let events = parse_voice_stream(
+            r#"<say boundary="continuing">first <say boundary="final">second</say></say>"#,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            VoiceStreamEvent::ParseWarning(VoiceParseWarning { message })
+                if message.contains("nested <say>")
+        )));
+
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].text, "first");
+        assert_eq!(groups[0].boundary, SpeechBoundary::Interrupted);
+        assert_eq!(groups[1].text, "second");
+    }
+
+    #[test]
+    fn malformed_tag_recovery() {
+        let events = parse_voice_stream("hi <bogus>there</bogus> now");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            VoiceStreamEvent::ParseWarning(VoiceParseWarning { message })
+                if message.contains("malformed tag")
+        )));
+        assert_eq!(
+            internal_texts(&events),
+            ["hi", "<bogus>", "there", "</bogus>", "now"]
+        );
     }
 }
