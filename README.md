@@ -147,6 +147,7 @@ cargo run models path styletts2-en-us
 cargo run models fetch
 cargo run speak --backend mock "hello world"
 cargo run speak --backend styletts2 "hello world"
+cargo run speak --backend styletts2 --voice-wav samples/voice.wav --style-wav samples/style.wav "hello world"
 ```
 
 `styletts2-en-us` registers public StyleTTS2 ONNX assets plus Mortar-Sea's
@@ -154,6 +155,15 @@ built-in en-US phonemicizer and seed lexicon markers. `--backend styletts2`
 loads the native ONNX token encoder and decoder through the backend adapter;
 missing assets are ensured through the same model fetch path as the rest of the
 runtime.
+
+The StyleTTS2 path also fetches a small LibriTTS-derived reference-audio archive
+from the upstream StyleTTS2 LibriTTS demo. If no `--voice-wav` or `--style-wav`
+is passed, Mortar-Sea uses a neutral default voice reference and a warm default
+intonation reference from that archive. Passing only `--voice-wav` uses the same
+clip for both speaker and style; passing both separates who is speaking from how
+they are speaking. The reference clips are registered as CC-BY-4.0 assets; the
+StyleTTS2 pretrained-model restrictions still apply, including disclosure of
+synthetic speech and consent for voice cloning.
 
 ## Voice To Mouth
 

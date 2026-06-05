@@ -5,9 +5,10 @@ mod selection;
 
 pub use cli::{ModelsCommand, run};
 pub use download::{
-    FaceModelPaths, RuntimeModelPaths, ensure_asr_whisper_model_available,
-    ensure_face_models_available, ensure_model_available, ensure_piper_voice_model_available,
-    ensure_runtime_models_available, ensure_selected_llm_available,
+    FaceModelPaths, RuntimeModelPaths, StyleTts2ReferenceAudioPaths,
+    ensure_asr_whisper_model_available, ensure_face_models_available, ensure_model_available,
+    ensure_piper_voice_model_available, ensure_runtime_models_available,
+    ensure_selected_llm_available, ensure_styletts2_default_reference_audio_available,
     ensure_styletts2_model_available, missing_model_asset_paths,
 };
 pub use manifest::{

@@ -29,6 +29,7 @@ pub struct StyleTts2SymbolToken {
 pub enum StyleTts2SymbolSource {
     Phoneme,
     Phone,
+    TextPunctuation,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -48,7 +49,7 @@ pub trait StyleTts2SymbolMapper {
 
 impl StyleTts2SymbolMapper for SymbolSet {
     fn lower(&self, plan: &UtterancePlan) -> Result<StyleTts2SymbolSequence, StyleTts2Error> {
-        Ok(self.lower_request_tokens(&plan.intended_phonemes, &plan.target_phones)?)
+        Ok(self.lower_plan_tokens(plan)?)
     }
 }
 
@@ -125,6 +126,20 @@ impl SymbolSet {
         self.lower_phoneme_tokens(phoneme_tokens)
     }
 
+    pub fn lower_plan_tokens(
+        &self,
+        plan: &UtterancePlan,
+    ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        if !plan.target_phones.is_empty() {
+            return self
+                .lower_phone_tokens_with_text(&plan.target_phones, plan.intended_text.as_deref());
+        }
+
+        let mut sequence = self.lower_phoneme_tokens(&plan.intended_phonemes)?;
+        self.append_final_punctuation(&mut sequence, plan.intended_text.as_deref());
+        Ok(sequence)
+    }
+
     pub fn lower_phoneme_tokens(
         &self,
         tokens: &[PhonemeToken],
@@ -157,6 +172,103 @@ impl SymbolSet {
         Ok(StyleTts2SymbolSequence { tokens: lowered })
     }
 
+    fn lower_phone_tokens_with_text(
+        &self,
+        tokens: &[PhoneToken],
+        intended_text: Option<&str>,
+    ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        let punctuation_after_words = intended_text
+            .map(punctuation_after_words)
+            .unwrap_or_default();
+        let mut lowered = Vec::new();
+        let mut word_index = 0;
+        let mut in_word = false;
+
+        for token in tokens {
+            let Some(token_id) = spec_token_id(&token.phone) else {
+                continue;
+            };
+            if token_id == "boundary.word" {
+                if in_word {
+                    if !self.push_punctuation_after_word(
+                        &mut lowered,
+                        &punctuation_after_words,
+                        word_index,
+                    ) {
+                        lowered.push(StyleTts2SymbolToken {
+                            symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
+                            source: StyleTts2SymbolSource::Phone,
+                        });
+                    }
+                    word_index += 1;
+                    in_word = false;
+                }
+                continue;
+            }
+
+            lowered.push(StyleTts2SymbolToken {
+                symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
+                source: StyleTts2SymbolSource::Phone,
+            });
+            in_word = true;
+        }
+
+        if in_word {
+            self.push_punctuation_after_word(&mut lowered, &punctuation_after_words, word_index);
+            self.append_final_punctuation_if_missing(&mut lowered);
+        }
+
+        Ok(StyleTts2SymbolSequence { tokens: lowered })
+    }
+
+    fn push_punctuation_after_word(
+        &self,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        punctuation_after_words: &[Option<&'static str>],
+        word_index: usize,
+    ) -> bool {
+        let Some(Some(symbol)) = punctuation_after_words.get(word_index) else {
+            return false;
+        };
+        self.push_text_punctuation(lowered, symbol)
+    }
+
+    fn append_final_punctuation(
+        &self,
+        sequence: &mut StyleTts2SymbolSequence,
+        intended_text: Option<&str>,
+    ) {
+        if let Some(symbol) = intended_text.and_then(final_punctuation_symbol) {
+            self.push_text_punctuation(&mut sequence.tokens, symbol);
+        }
+        self.append_final_punctuation_if_missing(&mut sequence.tokens);
+    }
+
+    fn append_final_punctuation_if_missing(&self, lowered: &mut Vec<StyleTts2SymbolToken>) {
+        if lowered
+            .last()
+            .is_some_and(|token| is_terminal_punctuation(&token.symbol))
+        {
+            return;
+        }
+        self.push_text_punctuation(lowered, ".");
+    }
+
+    fn push_text_punctuation(
+        &self,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        symbol: &'static str,
+    ) -> bool {
+        if !self.symbols.contains(symbol) {
+            return false;
+        }
+        lowered.push(StyleTts2SymbolToken {
+            symbol: symbol.to_string(),
+            source: StyleTts2SymbolSource::TextPunctuation,
+        });
+        true
+    }
+
     fn resolve_symbol(
         &self,
         token_id: &str,
@@ -184,14 +296,19 @@ impl SymbolSet {
 }
 
 pub fn styletts2_en_us_symbol_set() -> SymbolSet {
-    let symbols = [
+    let arpabet_symbols = [
         "AA", "AE", "AH", "AO", "AW", "AY", "B", "CH", "D", "DH", "EH", "ER", "EY", "F", "G", "HH",
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
-    let mut set = SymbolSet::new(symbols);
+    let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
+    let mut set = SymbolSet::new(
+        arpabet_symbols
+            .into_iter()
+            .chain(punctuation_symbols.into_iter()),
+    );
 
-    for symbol in symbols {
+    for symbol in arpabet_symbols {
         set = set
             .with_alias(format!("en-US.arpabet.{symbol}"), symbol)
             .with_alias(format!("en-US.arpabet-phone.{symbol}"), symbol);
@@ -246,6 +363,61 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     }
 
     set.with_alias("boundary.word", "|")
+}
+
+fn punctuation_after_words(text: &str) -> Vec<Option<&'static str>> {
+    let word_spans = word_spans(text);
+    word_spans
+        .iter()
+        .enumerate()
+        .map(|(index, (_, end))| {
+            let next_start = word_spans
+                .get(index + 1)
+                .map(|(start, _)| *start)
+                .unwrap_or(text.len());
+            punctuation_symbol(&text[*end..next_start])
+        })
+        .collect()
+}
+
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (byte_index, character) in text.char_indices() {
+        if character.is_alphabetic() || character == '\'' || character == '-' {
+            start.get_or_insert(byte_index);
+            continue;
+        }
+
+        if let Some(start_byte) = start.take() {
+            spans.push((start_byte, byte_index));
+        }
+    }
+
+    if let Some(start_byte) = start {
+        spans.push((start_byte, text.len()));
+    }
+    spans
+}
+
+fn final_punctuation_symbol(text: &str) -> Option<&'static str> {
+    punctuation_symbol(text)
+}
+
+fn punctuation_symbol(text: &str) -> Option<&'static str> {
+    text.chars().rev().find_map(|character| match character {
+        '.' | '…' => Some("."),
+        '!' => Some("!"),
+        '?' => Some("?"),
+        ',' => Some(","),
+        ';' => Some(";"),
+        ':' => Some(":"),
+        _ => None,
+    })
+}
+
+fn is_terminal_punctuation(symbol: &str) -> bool {
+    matches!(symbol, "." | "!" | "?")
 }
 
 fn parse_symbol_array(values: &[Value]) -> Result<SymbolSet, String> {

@@ -17,7 +17,10 @@ use styletts2::{
 #[cfg(feature = "styletts2-onnx")]
 use styletts2::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend};
 
-use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
+use crate::models::{
+    ensure_piper_voice_model_available, ensure_styletts2_default_reference_audio_available,
+    ensure_styletts2_model_available,
+};
 use crate::piper::{
     PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
 };
@@ -238,15 +241,20 @@ fn synthesize_plan_with_styletts2_to_wav(
         })
         .context("invalid StyleTTS2 diffusion options")?;
     let mut request = StyleTts2SynthesisRequest::from_plan(plan);
-    if let Some(path) = &command.voice_wav {
-        request = request.with_speaker_reference_audio_uri(path.display().to_string());
-        if command.style_wav.is_none() {
-            request = request.with_style_reference_audio_uri(path.display().to_string());
-        }
-    }
-    if let Some(path) = &command.style_wav {
-        request = request.with_style_reference_audio_uri(path.display().to_string());
-    }
+    let default_references = ensure_styletts2_default_reference_audio_available()
+        .context("failed to prepare default StyleTTS2 reference audio")?;
+    let voice_reference = command
+        .voice_wav
+        .as_ref()
+        .unwrap_or(&default_references.voice);
+    let style_reference = command.style_wav.as_ref().unwrap_or_else(|| {
+        command
+            .voice_wav
+            .as_ref()
+            .unwrap_or(&default_references.style)
+    });
+    request = request.with_speaker_reference_audio_uri(voice_reference.display().to_string());
+    request = request.with_style_reference_audio_uri(style_reference.display().to_string());
     let output = backend
         .synthesize(&request)
         .context("native StyleTTS2 synthesis failed")?;
@@ -361,7 +369,40 @@ mod tests {
             .map(|token| token.symbol.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(symbols, ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D"]);
+        assert_eq!(
+            symbols,
+            ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D", "."]
+        );
         assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
+    }
+
+    #[test]
+    fn speak_plan_preserves_sentence_terminators_for_styletts2() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "Hello my baby. Hello my darlin. Hello my ragtime gal.".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = utterance_plan_from_phonemicized(&phonemicized);
+        let lowered = styletts2_en_us_symbol_set()
+            .lower(&plan)
+            .expect("lower symbols");
+        let symbols = lowered
+            .tokens
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            symbols,
+            [
+                "HH", "AH", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "AH",
+                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "AH",
+                "L", "OW", "|", "M", "AY", "|", "R", "AE", "G", "T", "AY", "M", "|", "G", "AE",
+                "L", "."
+            ]
+        );
     }
 }

@@ -33,6 +33,15 @@ pub struct RuntimeModelPaths {
     pub piper_voice: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct StyleTts2ReferenceAudioPaths {
+    pub voice: PathBuf,
+    pub style: PathBuf,
+}
+
+const DEFAULT_STYLETTS2_VOICE_REFERENCE: &str = "reference_audio/1221-135767-0014.wav";
+const DEFAULT_STYLETTS2_STYLE_REFERENCE: &str = "reference_audio/amused.wav";
+
 pub fn ensure_selected_llm_available() -> Result<PathBuf> {
     let path = selected_llm_model_path()?;
     if std::env::var_os("MORTAR_LLM_MODEL").is_some() {
@@ -95,7 +104,29 @@ pub fn ensure_asr_whisper_model_available() -> Result<PathBuf> {
 }
 
 pub fn ensure_styletts2_model_available() -> Result<PathBuf> {
-    ensure_model_available(DEFAULT_STYLETTS2_MODEL_ID)
+    let path = ensure_model_available(DEFAULT_STYLETTS2_MODEL_ID)?;
+    ensure_styletts2_reference_audio_extracted()?;
+    Ok(path)
+}
+
+pub fn ensure_styletts2_default_reference_audio_available() -> Result<StyleTts2ReferenceAudioPaths>
+{
+    ensure_styletts2_reference_audio_extracted()?;
+    styletts2_default_reference_audio_paths()
+}
+
+pub fn styletts2_default_reference_audio_paths() -> Result<StyleTts2ReferenceAudioPaths> {
+    let home = resolve_mortar_home()?;
+    let archive = find_asset("styletts2-libritts-reference-audio")
+        .context("StyleTTS2 reference audio asset is not registered")?;
+    let reference_dir = asset_path(&home, archive)
+        .parent()
+        .context("StyleTTS2 reference audio archive path has no parent")?
+        .to_path_buf();
+    Ok(StyleTts2ReferenceAudioPaths {
+        voice: reference_dir.join(DEFAULT_STYLETTS2_VOICE_REFERENCE),
+        style: reference_dir.join(DEFAULT_STYLETTS2_STYLE_REFERENCE),
+    })
 }
 
 pub fn ensure_piper_voice_model_available() -> Result<PathBuf> {
@@ -138,6 +169,9 @@ pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
             write_selected_model(bundle.id)?;
         }
         fetch_bundle(bundle, force)?;
+        if bundle.kind == ModelKind::StyleTts2 {
+            ensure_styletts2_reference_audio_extracted()?;
+        }
         if bundle.kind == ModelKind::Llm {
             println!("{} {}", "selected".green(), bundle.display_name.bold());
             return selected_llm_model_path();
@@ -154,6 +188,9 @@ pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
 fn fetch_all_runtime_bundles(force: bool) -> Result<()> {
     for bundle in default_runtime_bundles()? {
         fetch_bundle(bundle, force)?;
+        if bundle.kind == ModelKind::StyleTts2 {
+            ensure_styletts2_reference_audio_extracted()?;
+        }
     }
     Ok(())
 }
@@ -210,6 +247,58 @@ fn ensure_asset_available(asset: &ModelAsset) -> Result<()> {
     }
 
     fetch_asset(asset, false)
+}
+
+fn ensure_styletts2_reference_audio_extracted() -> Result<()> {
+    let paths = styletts2_default_reference_audio_paths()?;
+    if is_non_empty_file(&paths.voice) && is_non_empty_file(&paths.style) {
+        return Ok(());
+    }
+
+    let home = resolve_mortar_home()?;
+    let archive = find_asset("styletts2-libritts-reference-audio")
+        .context("StyleTTS2 reference audio asset is not registered")?;
+    let archive_path = asset_path(&home, archive);
+    if !is_non_empty_file(&archive_path) {
+        fetch_asset(archive, false)?;
+    }
+    extract_zip_asset(&archive_path)?;
+
+    anyhow::ensure!(
+        is_non_empty_file(&paths.voice) && is_non_empty_file(&paths.style),
+        "StyleTTS2 reference audio archive did not contain default references"
+    );
+    Ok(())
+}
+
+fn extract_zip_asset(path: &Path) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("failed to read ZIP archive {}", path.display()))?;
+    let target_dir = path
+        .parent()
+        .context("ZIP archive path has no parent directory")?;
+
+    for index in 0..archive.len() {
+        let mut member = archive
+            .by_index(index)
+            .with_context(|| format!("failed to read ZIP member {index} in {}", path.display()))?;
+        if member.is_dir() {
+            continue;
+        }
+        let Some(enclosed_name) = member.enclosed_name() else {
+            continue;
+        };
+        let output_path = target_dir.join(enclosed_name);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut output = File::create(&output_path)
+            .with_context(|| format!("failed to create {}", output_path.display()))?;
+        std::io::copy(&mut member, &mut output)
+            .with_context(|| format!("failed to extract {}", output_path.display()))?;
+    }
+    Ok(())
 }
 
 fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {

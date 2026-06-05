@@ -187,6 +187,19 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         notes: Some("Public ONNX conversion of StyleTTS2-LibriTTS waveform decoder."),
     },
     ModelAsset {
+        id: "styletts2-libritts-reference-audio",
+        filename: "reference_audio.zip",
+        relative_path: "models/styletts2/en-us/reference_audio.zip",
+        url: "https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/reference_audio.zip",
+        sha256: Some("d25b4950ec39cec5a00f5061491ad0b3606edc6618a54adc59663bfd6e6ab55e"),
+        size_bytes: Some(2_918_087),
+        license: Some("CC-BY-4.0"),
+        source: Some("https://huggingface.co/yl4579/StyleTTS2-LibriTTS"),
+        notes: Some(
+            "Short LibriTTS-derived StyleTTS2 reference WAVs used for default voice and intonation references.",
+        ),
+    },
+    ModelAsset {
         id: "piper-ryan-medium-onnx",
         filename: "en_US-ryan-medium.onnx",
         relative_path: "models/piper/en_US-ryan-medium.onnx",
@@ -319,6 +332,7 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
             "styletts2-en-us-onnx-4612a9",
             "styletts2-en-us-onnx-91473d",
             "styletts2-en-us-onnx-99e40b",
+            "styletts2-libritts-reference-audio",
         ],
         aliases: &["styletts2", "styletts2-en", "tts", "speech"],
     },

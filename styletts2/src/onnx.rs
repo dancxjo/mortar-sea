@@ -470,7 +470,7 @@ fn styletts2_token_ids(sequence: &StyleTts2SymbolSequence) -> Result<Vec<i64>, S
         return Ok(Vec::new());
     }
 
-    let mut ids = Vec::with_capacity(ipa.chars().count() + 1);
+    let mut ids = Vec::with_capacity(ipa.chars().count() + 2);
     ids.push(0);
     for character in ipa.chars() {
         let id = styletts2_character_id(character).ok_or_else(|| {
@@ -480,6 +480,7 @@ fn styletts2_token_ids(sequence: &StyleTts2SymbolSequence) -> Result<Vec<i64>, S
         })?;
         ids.push(id);
     }
+    ids.push(0);
     Ok(ids)
 }
 
@@ -496,7 +497,7 @@ fn arpabet_to_styletts2_text(symbol: &str) -> Result<&'static str, StyleTts2Erro
         "D" => "d",
         "DH" => "ð",
         "EH" => "ɛ",
-        "ER" => "ɝ",
+        "ER" => "ɜːɹ",
         "EY" => "eɪ",
         "F" => "f",
         "G" => "ɡ",
@@ -525,6 +526,12 @@ fn arpabet_to_styletts2_text(symbol: &str) -> Result<&'static str, StyleTts2Erro
         "Z" => "z",
         "ZH" => "ʒ",
         "|" => " ",
+        "." => ". ",
+        "!" => "! ",
+        "?" => "? ",
+        "," => ", ",
+        ";" => "; ",
+        ":" => ": ",
         _ => {
             return Err(invalid_output(format!(
                 "cannot map lowered ARPAbet symbol `{symbol}` to StyleTTS2 text-cleaner input"
@@ -1008,8 +1015,23 @@ mod tests {
         .expect("token ids");
 
         assert_eq!(ids[0], 0);
+        assert_eq!(ids.last(), Some(&0));
         assert!(ids.iter().all(|id| (0..178).contains(id)));
         assert!(ids.len() > 9);
+        assert!(ids.contains(&styletts2_character_id('ɜ').expect("rhotic vowel id")));
+        assert!(ids.contains(&styletts2_character_id('ɹ').expect("codaic r id")));
+    }
+
+    #[test]
+    fn punctuation_symbols_map_to_styletts2_token_ids() {
+        let ids = styletts2_token_ids(&StyleTts2SymbolSequence {
+            tokens: vec![token("HH"), token("AY"), token("!")],
+        })
+        .expect("token ids");
+
+        assert_eq!(ids[0], 0);
+        assert_eq!(ids.last(), Some(&0));
+        assert!(ids.contains(&styletts2_character_id('!').expect("punctuation id")));
     }
 
     fn token(symbol: &str) -> StyleTts2SymbolToken {

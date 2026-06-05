@@ -84,6 +84,71 @@ fn lowers_phoneme_and_phone_tokens_without_language_hardcoding() {
 }
 
 #[test]
+fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
+    let symbol_set =
+        SymbolSet::new(["alpha", "|", ".", "!"]).with_alias("variant.phone.a", "alpha");
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![
+            phone_token("variant.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variant.phone.a"),
+        ],
+        Some("a! a".into()),
+    );
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+    let sources = lowered
+        .tokens
+        .iter()
+        .map(|token| token.source)
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["alpha", "!", "alpha", "."]);
+    assert_eq!(
+        sources,
+        [
+            StyleTts2SymbolSource::Phone,
+            StyleTts2SymbolSource::TextPunctuation,
+            StyleTts2SymbolSource::Phone,
+            StyleTts2SymbolSource::TextPunctuation
+        ]
+    );
+}
+
+#[test]
+fn lower_plan_tokens_defaults_unpunctuated_text_to_final_period() {
+    let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variant.phone.a", "alpha");
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![phone_token("variant.phone.a")],
+        Some("a".into()),
+    );
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["alpha", "."]);
+}
+
+#[test]
 fn preserves_style_reference_from_utterance_plan() {
     let style = style_ref();
     let request = StyleTts2SynthesisRequest::from_plan(plan(

@@ -66,6 +66,7 @@ window.faceApp = function faceApp() {
     voiceCurrentDraft: null,
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
+    browserSpeechFallbackEnabled: false,
     voiceAwaitingServerAudioTimer: null,
     voiceActiveSpeechUtterance: null,
     llmJobs: [],
@@ -382,7 +383,8 @@ window.faceApp = function faceApp() {
 
     canUseBrowserSpeechFallback(draft) {
       return Boolean(
-        draft?.text
+        this.browserSpeechFallbackEnabled
+          && draft?.text
           && window.speechSynthesis
           && typeof window.SpeechSynthesisUtterance === 'function'
       );
