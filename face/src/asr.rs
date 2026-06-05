@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
@@ -38,6 +41,8 @@ use anyhow::Context;
 #[derive(Clone)]
 pub(crate) struct AsrBackend {
     worker: Arc<Mutex<AsrWorker>>,
+    latest_submitted_sequence: Arc<AtomicU64>,
+    latest_final_sequence: Arc<AtomicU64>,
 }
 
 pub(crate) fn initialize_backend() -> anyhow::Result<Option<AsrBackend>> {
@@ -46,6 +51,8 @@ pub(crate) fn initialize_backend() -> anyhow::Result<Option<AsrBackend>> {
     info!(model = %model_path.display(), "ASR worker ready");
     Ok(Some(AsrBackend {
         worker: Arc::new(Mutex::new(worker)),
+        latest_submitted_sequence: Arc::new(AtomicU64::new(0)),
+        latest_final_sequence: Arc::new(AtomicU64::new(0)),
     }))
 }
 
@@ -492,6 +499,14 @@ fn spawn_group_transcriptions(
     groups: Vec<CompletedSpeechGroup>,
 ) {
     for group in groups {
+        backend
+            .latest_submitted_sequence
+            .fetch_max(group.sequence_end, Ordering::AcqRel);
+        if group.is_final {
+            backend
+                .latest_final_sequence
+                .fetch_max(group.sequence_end, Ordering::AcqRel);
+        }
         let state = state.clone();
         let backend = backend.clone();
         tokio::spawn(async move {
@@ -509,12 +524,26 @@ async fn transcribe_group(
     group: CompletedSpeechGroup,
 ) -> anyhow::Result<Option<TranscriptResult>> {
     tokio::task::spawn_blocking(move || {
-        let original_samples = group.samples;
-        let sentences = backend
-            .worker
-            .lock()
-            .expect("ASR worker lock")
-            .transcribe(original_samples.clone(), group.duration_ms)?;
+        if should_skip_speculative_group(
+            &group,
+            backend.latest_submitted_sequence.load(Ordering::Acquire),
+            backend.latest_final_sequence.load(Ordering::Acquire),
+        ) {
+            return Ok(None);
+        }
+
+        let original_samples = group.samples.clone();
+        let sentences = {
+            let mut worker = backend.worker.lock().expect("ASR worker lock");
+            if should_skip_speculative_group(
+                &group,
+                backend.latest_submitted_sequence.load(Ordering::Acquire),
+                backend.latest_final_sequence.load(Ordering::Acquire),
+            ) {
+                return Ok(None);
+            }
+            worker.transcribe(original_samples.clone(), group.duration_ms)?
+        };
         if sentences.is_empty() {
             return Ok(None);
         }
@@ -530,6 +559,18 @@ async fn transcribe_group(
         }))
     })
     .await?
+}
+
+fn should_skip_speculative_group(
+    group: &CompletedSpeechGroup,
+    latest_submitted_sequence: u64,
+    latest_final_sequence: u64,
+) -> bool {
+    if group.is_final {
+        return false;
+    }
+
+    group.sequence_end < latest_submitted_sequence || group.sequence_end <= latest_final_sequence
 }
 
 fn normalize_transcript_text(text: &str) -> String {
@@ -611,6 +652,14 @@ fn record_transcript(state: &AppState, result: TranscriptResult) {
             detail,
         };
         record_sensation(&state.sensations, sensation.clone());
+        info!(
+            sequence_start = result.sequence_start,
+            sequence_end = result.sequence_end,
+            sentence_index,
+            sentence_count,
+            transcript = %sentence_text,
+            "recorded final ASR transcript"
+        );
         record_audio_sentence_clip(
             state,
             AudioSentenceClipRecord {
@@ -847,6 +896,27 @@ mod tests {
         assert_eq!(groups[0].sequence_end, 2);
     }
 
+    #[test]
+    fn stale_speculative_group_is_skipped_after_newer_audio() {
+        let group = completed_group(3, false);
+
+        assert!(should_skip_speculative_group(&group, 4, 0));
+    }
+
+    #[test]
+    fn speculative_group_is_skipped_after_final_for_same_sequence() {
+        let group = completed_group(5, false);
+
+        assert!(should_skip_speculative_group(&group, 5, 5));
+    }
+
+    #[test]
+    fn final_group_is_never_skipped_by_speculative_filter() {
+        let group = completed_group(3, true);
+
+        assert!(!should_skip_speculative_group(&group, 10, 10));
+    }
+
     fn clip_with_samples(sequence: u64, samples: Vec<f32>) -> AcceptedAudioClip {
         AcceptedAudioClip {
             client_id: "face-browser".to_string(),
@@ -854,6 +924,19 @@ mod tests {
             sequence,
             occurred_at: Utc::now(),
             samples,
+        }
+    }
+
+    fn completed_group(sequence_end: u64, is_final: bool) -> CompletedSpeechGroup {
+        CompletedSpeechGroup {
+            client_id: "face-browser".to_string(),
+            sensor_id: "microphone.default".to_string(),
+            sequence_start: sequence_end.saturating_sub(1),
+            sequence_end,
+            occurred_at: Utc::now(),
+            duration_ms: 1_000,
+            samples: vec![0.05; ASR_FRAME_SAMPLES * 100],
+            is_final,
         }
     }
 }
