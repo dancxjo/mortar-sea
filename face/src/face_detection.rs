@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::app::{AppState, MAX_RECORDED_FACE_CROPS};
 use crate::ingestion::record_sensation;
-use crate::memory::{BBox, FaceVectorRecord};
+use crate::memory::{BBox, FaceMemoryMatch, FaceVectorRecord};
 use crate::messages::{MediaRecord, RawFaceCrop, RawVisionFrame, SensationRecord, SensationSource};
 
 const SIMILAR_FACE_THRESHOLD: f32 = 0.95;
@@ -264,12 +264,70 @@ fn spawn_face_memory_write(
         crop.landmarks.clone(),
         crop.confidence,
     );
+    let face_sensation_id = face_sensation.id;
 
     tokio::spawn(async move {
-        if let Err(err) = face_memory.remember_face_observation(record).await {
-            warn!(%err, "face memory write failed");
+        match face_memory.remember_face_observation(record).await {
+            Ok(matches) if !matches.is_empty() => {
+                debug!(
+                    face_sensation_id = %face_sensation_id,
+                    matches = matches.len(),
+                    "face memory found prior observations"
+                );
+                for m in &matches {
+                    record_sensation(
+                        &state.sensations,
+                        build_face_match_sensation(face_sensation_id, m),
+                    );
+                }
+                crate::realtime_experience::spawn_trace(state.clone());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(%err, "face memory write failed");
+            }
         }
     });
+}
+
+fn build_face_match_sensation(
+    face_sensation_id: Uuid,
+    memory_match: &FaceMemoryMatch,
+) -> SensationRecord {
+    let now = chrono::Utc::now();
+    let detail = serde_json::json!({
+        "face_observation_id": memory_match.face_observation_id,
+        "person_candidate_id": memory_match.person_candidate_id,
+        "score": memory_match.score,
+        "qdrant_point_id": memory_match.qdrant_point_id,
+        "original_observed_at": memory_match.observed_at,
+        "source": memory_match.source,
+        "bbox": memory_match.bbox,
+    });
+    let detail_str = detail.to_string();
+    SensationRecord {
+        id: Uuid::new_v4(),
+        kind: "memory.face_match".to_string(),
+        occurred_at: now,
+        observed_at: now,
+        source: SensationSource {
+            client_id: "memory".to_string(),
+            sensor_id: "face.memory".to_string(),
+            faculty: "face.memory".to_string(),
+        },
+        sequence: 0,
+        media: MediaRecord {
+            mime: "application/json".to_string(),
+            width: 0,
+            height: 0,
+            encoding: "json".to_string(),
+        },
+        provenance: Provenance::derived_from_sensation(face_sensation_id)
+            .with_faculty("face.memory"),
+        data_sha256: sha256_hex(detail_str.as_bytes()),
+        data_bytes: detail_str.len(),
+        detail,
+    }
 }
 
 fn is_similar_to_last_face(last_embedding: &RwLock<Option<Vec<f32>>>, embedding: &[f32]) -> bool {
@@ -442,5 +500,38 @@ mod tests {
         assert!(!is_similar_to_last_face(&last, &[1.0, 0.0]));
         assert!(is_similar_to_last_face(&last, &[1.0, 0.0]));
         assert!(!is_similar_to_last_face(&last, &[0.0, 1.0]));
+    }
+
+    #[test]
+    fn face_match_sensation_carries_provenance_and_score() {
+        let face_sensation_id = Uuid::new_v4();
+        let observation_id = Uuid::new_v4().to_string();
+        let memory_match = FaceMemoryMatch {
+            person_candidate_id: Some("person_candidate:abc".to_string()),
+            qdrant_point_id: "qpt-1".to_string(),
+            face_observation_id: observation_id.clone(),
+            score: 0.92,
+            observed_at: Utc::now(),
+            source: "camera.default/face".to_string(),
+            bbox: Some(BBox {
+                x1: 10.0,
+                y1: 20.0,
+                x2: 30.0,
+                y2: 40.0,
+            }),
+        };
+
+        let record = build_face_match_sensation(face_sensation_id, &memory_match);
+
+        assert_eq!(record.kind, "memory.face_match");
+        assert_eq!(record.source.faculty, "face.memory");
+        assert_eq!(record.source.client_id, "memory");
+        assert!(record.provenance.references_sensation(face_sensation_id));
+        assert_eq!(record.detail["face_observation_id"], observation_id);
+        assert_eq!(record.detail["person_candidate_id"], "person_candidate:abc");
+        let score = record.detail["score"].as_f64().expect("score");
+        assert!((score - 0.92).abs() < 0.001);
+        assert_eq!(record.detail["bbox"]["x1"], 10.0);
+        assert_eq!(record.occurred_at, record.observed_at);
     }
 }

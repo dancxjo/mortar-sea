@@ -65,6 +65,23 @@ candidate. Qdrant answers "what nearby face vectors have I seen?" while Neo4j
 stores the frame/sensation/face-observation relationships and possible
 candidate evidence.
 
+When a newly stored face embedding is sufficiently similar to a prior one
+(cosine similarity ≥ `FACE_MEMORY_MATCH_THRESHOLD`, default 0.86), the pipeline
+emits a `memory.face_match` sensation for each match. This re-enters the
+cognitive loop just like any other sensation, so wits can process it — for
+example, to infer that a known person is present. The sensation's `detail`
+payload contains:
+
+| Field | Meaning |
+|---|---|
+| `face_observation_id` | Neo4j id of the matched prior observation |
+| `person_candidate_id` | Nullable candidate id if one was linked |
+| `score` | Cosine similarity (evidence, not identity) |
+| `qdrant_point_id` | Vector store point id |
+| `original_observed_at` | When the prior observation was recorded |
+| `source` | Sensor path of the prior observation |
+| `bbox` | Bounding box of the prior face, if available |
+
 To run the persistent path locally:
 
 ```sh
