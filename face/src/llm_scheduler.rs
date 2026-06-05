@@ -38,9 +38,9 @@ impl LlmJobKind {
 
     fn priority(self) -> u8 {
         match self {
-            Self::Voice => 0,
             Self::ContextFrame => 1,
             Self::RealtimeExperience => 1,
+            Self::Voice => 1,
             Self::Vision => 2,
         }
     }

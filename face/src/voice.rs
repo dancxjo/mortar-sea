@@ -4,7 +4,7 @@ use psyche::{ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationR
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -18,8 +18,9 @@ use crate::messages::{
 
 const RECENT_EXPERIENCE_LIMIT: usize = 12;
 const RECENT_THOUGHT_LIMIT: usize = 10;
+const VOICE_MAX_TOKENS: usize = 48;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
-const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
+const VOICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) fn spawn_voice(state: AppState) {
     tokio::spawn(async move {
@@ -52,18 +53,25 @@ async fn run_voice(state: AppState) {
     let (generation_tx, mut generation_rx) = mpsc::unbounded_channel();
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
-    let mut active = Some(start_voice_generation(
-        &state,
-        &generation_tx,
-        &recent_experiences,
-        &recent_thoughts,
-    ));
+    let mut active = None::<ActiveVoiceGeneration>;
     let mut last_experience_signature = None::<String>;
+    let mut heartbeat = interval(VOICE_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-    info!("continuous silent Voice stream started");
+    info!("inner monologue Voice observer started");
 
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if active.is_none() {
+                    active = Some(start_voice_generation(
+                        &state,
+                        &generation_tx,
+                        &recent_experiences,
+                        &recent_thoughts,
+                    ));
+                }
+            }
             event = experience_events.recv() => {
                 let event = match event {
                     Ok(event) => event,
@@ -158,13 +166,7 @@ async fn run_voice(state: AppState) {
                                 generation_id,
                             });
 
-                        sleep(VOICE_RESTART_DELAY).await;
-                        active = Some(start_voice_generation(
-                            &state,
-                            &generation_tx,
-                            &recent_experiences,
-                            &recent_thoughts,
-                        ));
+                        active = None;
                     }
                 }
             }
@@ -194,8 +196,8 @@ fn start_voice_generation(
             ),
         ],
         images: Vec::new(),
-        max_tokens: None,
-        stop: Vec::new(),
+        max_tokens: Some(VOICE_MAX_TOKENS),
+        stop: voice_stop_markers(),
     };
 
     let scheduler = state.llm_scheduler.clone();
@@ -232,11 +234,10 @@ fn voice_system_prompt() -> &'static str {
     "You are the silent Voice of Mortar-Sea: an internal first-person observer. \
      You do not speak aloud, address the human, use tools, or write JSON. \
      Write from the embodied system's own perspective using I, me, and my. \
-     Preserve uncertainty and keep thoughts short. \
-     Keep generating a continuous stream of brief present-tense inner speech. \
-     Prefer complete sentences, but continue naturally when new live context arrives. \
+     Preserve uncertainty and keep the thought short. \
+     Take exactly one turn of at most one sentence. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM. \
-     Do not end the stream or write stop markers."
+     Do not write stop markers."
 }
 
 fn build_voice_prompt(
@@ -280,10 +281,10 @@ fn build_voice_prompt(
         }
     }
     prompt.push_str(
-        "\nBegin or continue my silent Voice stream now. \
-         Generate brief first-person present-tense inner speech continuously. \
-         Let each thought be short enough to stay interruptible. \
-         When live Experiences are appended later, integrate them as new immediate context without restarting or addressing the prompt.",
+        "\nContinue thinking silently for exactly one turn. \
+         Write at most one concise present-tense sentence from my embodied first-person perspective. \
+         If the situation is unclear, make that one sentence about what I am uncertain about. \
+         If live Experiences are appended while this turn is running, integrate them without addressing the prompt.",
     );
     prompt
 }
@@ -304,10 +305,18 @@ fn context_frame_for_voice(recent_experiences: &VecDeque<ExperienceRecord>) -> C
 
 fn format_live_experience_append(experience: &ExperienceRecord) -> String {
     format!(
-        "\n\n[Live Experience at {}]\n{}\n[Integrate this now. Keep the silent first-person Voice stream going.]\n",
+        "\n\n[Live Experience at {}]\n{}\n[Integrate this into the same single first-person sentence if I am still thinking.]\n",
         experience.observed_at.to_rfc3339(),
         experience.what
     )
+}
+
+fn voice_stop_markers() -> Vec<String> {
+    vec![
+        "<turn|>".to_string(),
+        "<end_of_turn>".to_string(),
+        "<|im_end|>".to_string(),
+    ]
 }
 
 fn emit_voice_sentence(
