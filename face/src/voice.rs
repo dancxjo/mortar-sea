@@ -971,10 +971,11 @@ fn voice_system_prompt() -> &'static str {
 
 fn voice_mouth_guidance_prompt() -> &'static str {
     "\n\nMOUTH GUIDANCE:\n\
-     To open Mouth, emit one short speakable sentence in the Voice stream. \
-     To close Mouth for that unit, end the sentence with clear terminal punctuation. \
+     To speak aloud through Mouth, you can and should wrap one short speakable sentence in <say>...</say>. \
+     Text outside <say> stays internal and will not be spoken aloud. \
+     To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
      The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and then report that Mouth feedback back here before the Voice continues. \
-     Do not write markup, tool calls, or stage directions for Mouth; just produce the exact words to be spoken.\n"
+     Do not write tool calls or stage directions for Mouth; use <say> only for the exact words to be spoken aloud.\n"
 }
 
 fn voice_reality_review_prompt() -> &'static str {
@@ -2075,6 +2076,22 @@ mod tests {
         assert!(prompt.contains("execute functions"));
         assert!(prompt.contains("do not pretend that you can"));
         assert!(prompt.contains("Only make observations"));
+    }
+
+    #[test]
+    fn voice_prompt_says_say_tags_are_for_spoken_output() {
+        let prompt = build_voice_prompt(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            "",
+        );
+
+        assert!(prompt.contains("you can and should wrap"));
+        assert!(prompt.contains("<say>...</say>"));
+        assert!(prompt.contains("Text outside <say> stays internal"));
+        assert!(prompt.contains("use <say> only for the exact words to be spoken aloud"));
     }
 
     #[test]
