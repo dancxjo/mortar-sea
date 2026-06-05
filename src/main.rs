@@ -17,6 +17,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<mortar_sea::models::ModelsCommand>,
     },
+    #[command(about = "Open a direct terminal chat with the selected local LLM")]
+    LlmTest(mortar_sea::llm_test::LlmTestCommand),
 }
 
 fn main() -> Result<()> {
@@ -24,6 +26,7 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Command::Face) => run_face(),
         Some(Command::Models { command }) => mortar_sea::models::run(command),
+        Some(Command::LlmTest(command)) => mortar_sea::llm_test::run(command),
         None => mortar_sea::models::run(Some(mortar_sea::models::ModelsCommand::Status)),
     }
 }

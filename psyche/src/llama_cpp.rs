@@ -15,7 +15,7 @@ use llama_cpp_4::model::params::LlamaModelParams;
 use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::{max_devices, supports_gpu_offload};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
@@ -33,6 +33,7 @@ pub struct LlamaCppConfig {
     pub threads: usize,
     pub temperature: f32,
     pub top_p: f32,
+    pub top_k: i32,
 }
 
 impl Default for LlamaCppConfig {
@@ -46,8 +47,9 @@ impl Default for LlamaCppConfig {
             threads: std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(4),
-            temperature: 0.8,
+            temperature: 1.0,
             top_p: 0.95,
+            top_k: 64,
         }
     }
 }
@@ -106,6 +108,7 @@ impl LlamaCppEngine {
             max_tokens = config.max_tokens,
             temperature = config.temperature,
             top_p = config.top_p,
+            top_k = config.top_k,
             "llama.cpp model loaded"
         );
 
@@ -304,19 +307,28 @@ impl LlamaGenerationWorker {
 
         let mut batch = LlamaBatch::new(n_ctx, 1);
         let mut n_cur = 0;
-        decode_prompt_tokens(
+        let Some(mut logit_slot) = decode_prompt_tokens(
             &mut ctx,
             &mut batch,
             &prompt_tokens,
             &mut n_cur,
             n_ctx,
             "prompt",
-        )?;
+        )?
+        else {
+            bail!("prompt produced no logits");
+        };
         let mut generated_tokens = 0usize;
-        let mut sampler = build_sampler(self.config.temperature, self.config.top_p);
+        let mut sampler = build_sampler(
+            self.config.temperature,
+            self.config.top_p,
+            self.config.top_k,
+        );
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut stop_detector = StopDetector::new(self.request.stop);
         let mut paused = false;
+        let mut emitted_chars = 0usize;
+        let mut leading_control_tokens = 0usize;
 
         while within_generation_limit(generated_tokens, self.request.max_tokens)
             && (n_cur as usize) < n_ctx
@@ -335,6 +347,7 @@ impl LlamaGenerationWorker {
                 n_ctx,
                 &self.controls,
                 &mut paused,
+                &mut logit_slot,
             )?;
             wait_while_paused(
                 &self.model,
@@ -345,6 +358,7 @@ impl LlamaGenerationWorker {
                 &self.controls,
                 &self.cancel,
                 &mut paused,
+                &mut logit_slot,
             )?;
             if self.cancel.load(Ordering::Relaxed) {
                 return Ok(GenerationOutcome::Cancelled);
@@ -353,16 +367,32 @@ impl LlamaGenerationWorker {
                 break;
             }
 
-            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            let token = sampler.sample(&ctx, logit_slot);
+            if llama_debug_enabled() && generated_tokens < 12 {
+                eprintln!(
+                    "llama sampled token {} eog={} text={:?}",
+                    token.0,
+                    self.model.is_eog_token(token),
+                    token_text_lossy(&self.model, token)
+                );
+            }
             sampler.accept(token);
             if self.model.is_eog_token(token) {
-                debug!(
+                warn!(
                     generation_id = %self.id.0,
                     generated_tokens,
+                    emitted_chars,
                     token_id = token.0,
                     token_text = ?token_text_lossy(&self.model, token),
                     "llama.cpp generation sampled end-of-generation token"
                 );
+                if emitted_chars == 0 && leading_control_tokens < 4 {
+                    leading_control_tokens += 1;
+                    commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
+                    logit_slot = 0;
+                    generated_tokens += 1;
+                    continue;
+                }
                 if self.request.max_tokens.is_some() {
                     debug!(
                         generation_id = %self.id.0,
@@ -372,30 +402,29 @@ impl LlamaGenerationWorker {
                     return Ok(GenerationOutcome::Completed);
                 }
                 commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
+                logit_slot = 0;
                 generated_tokens += 1;
                 continue;
             }
 
             let token_bytes = self
                 .model
-                .token_to_bytes_with_size(token, 64, Special::Plaintext, None)
+                .token_to_bytes_with_size(token, 64, Special::Tokenize, None)
                 .context("failed to decode llama.cpp token")?;
-            let mut text = String::new();
-            let (_, _, had_errors) = decoder.decode_to_string(&token_bytes, &mut text, false);
-            if had_errors {
-                bail!("failed to decode llama.cpp token as UTF-8");
-            }
+            let text = decode_token_bytes(&mut decoder, &token_bytes)?;
             if !text.is_empty() {
                 let outcome = stop_detector.push(&text);
-                if !outcome.text.is_empty()
-                    && sender.send(LlmEvent::Token { text: outcome.text }).is_err()
-                {
-                    debug!(
-                        generation_id = %self.id.0,
-                        generated_tokens,
-                        "llama.cpp generation cancelled because token receiver closed"
-                    );
-                    return Ok(GenerationOutcome::Cancelled);
+                if !outcome.text.is_empty() {
+                    let output_chars = outcome.text.chars().count();
+                    if sender.send(LlmEvent::Token { text: outcome.text }).is_err() {
+                        debug!(
+                            generation_id = %self.id.0,
+                            generated_tokens,
+                            "llama.cpp generation cancelled because token receiver closed"
+                        );
+                        return Ok(GenerationOutcome::Cancelled);
+                    }
+                    emitted_chars += output_chars;
                 }
                 trace!(
                     generation_id = %self.id.0,
@@ -403,6 +432,13 @@ impl LlamaGenerationWorker {
                     "llama.cpp sampled token emitted"
                 );
                 if outcome.stopped {
+                    if emitted_chars == 0 && leading_control_tokens < 4 {
+                        leading_control_tokens += 1;
+                        commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
+                        logit_slot = 0;
+                        generated_tokens += 1;
+                        continue;
+                    }
                     debug!(
                         generation_id = %self.id.0,
                         generated_tokens = generated_tokens + 1,
@@ -413,6 +449,7 @@ impl LlamaGenerationWorker {
             }
 
             commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
+            logit_slot = 0;
             generated_tokens += 1;
         }
 
@@ -442,6 +479,9 @@ struct ResolvedPrompt {
 
 fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<ResolvedPrompt> {
     if request.messages.is_empty() {
+        if llama_debug_enabled() {
+            eprintln!("llama prompt:\n{:?}", request.prompt);
+        }
         return Ok(ResolvedPrompt {
             text: request.prompt.clone(),
             add_bos: AddBos::Always,
@@ -457,10 +497,19 @@ fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<Res
     let text = model
         .apply_chat_template(None, &messages, true)
         .context("failed to apply llama.cpp chat template")?;
+    if llama_debug_enabled() {
+        eprintln!("llama prompt:\n{text:?}");
+    }
     Ok(ResolvedPrompt {
         text,
         add_bos: AddBos::Never,
     })
+}
+
+fn llama_debug_enabled() -> bool {
+    std::env::var("MORTAR_LLAMA_DEBUG")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn within_generation_limit(generated_tokens: usize, max_tokens: Option<usize>) -> bool {
@@ -491,11 +540,15 @@ fn drain_generation_controls(
     n_ctx: usize,
     controls: &Receiver<GenerationControl>,
     paused: &mut bool,
+    logit_slot: &mut i32,
 ) -> Result<()> {
     loop {
         match controls.try_recv() {
             Ok(GenerationControl::AppendPrompt { text }) => {
-                decode_appended_prompt(model, ctx, batch, n_cur, n_ctx, &text)?;
+                if let Some(slot) = decode_appended_prompt(model, ctx, batch, n_cur, n_ctx, &text)?
+                {
+                    *logit_slot = slot;
+                }
             }
             Ok(GenerationControl::SetPaused { paused: next }) => {
                 *paused = next;
@@ -516,6 +569,7 @@ fn wait_while_paused(
     controls: &Receiver<GenerationControl>,
     cancel: &AtomicBool,
     paused: &mut bool,
+    logit_slot: &mut i32,
 ) -> Result<()> {
     while *paused {
         if cancel.load(Ordering::Relaxed) {
@@ -523,7 +577,10 @@ fn wait_while_paused(
         }
         match controls.recv_timeout(std::time::Duration::from_millis(10)) {
             Ok(GenerationControl::AppendPrompt { text }) => {
-                decode_appended_prompt(model, ctx, batch, n_cur, n_ctx, &text)?;
+                if let Some(slot) = decode_appended_prompt(model, ctx, batch, n_cur, n_ctx, &text)?
+                {
+                    *logit_slot = slot;
+                }
             }
             Ok(GenerationControl::SetPaused { paused: next }) => {
                 *paused = next;
@@ -542,12 +599,12 @@ fn decode_appended_prompt(
     n_cur: &mut i32,
     n_ctx: usize,
     text: &str,
-) -> Result<()> {
+) -> Result<Option<i32>> {
     let tokens = model
         .str_to_token(text, AddBos::Never)
         .context("failed to tokenize appended prompt")?;
     if tokens.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let required_tokens = (*n_cur as usize)
@@ -559,9 +616,7 @@ fn decode_appended_prompt(
         );
     }
 
-    decode_prompt_tokens(ctx, batch, &tokens, n_cur, n_ctx, "appended prompt")?;
-
-    Ok(())
+    decode_prompt_tokens(ctx, batch, &tokens, n_cur, n_ctx, "appended prompt")
 }
 
 fn decode_prompt_tokens(
@@ -571,9 +626,9 @@ fn decode_prompt_tokens(
     n_cur: &mut i32,
     n_ctx: usize,
     label: &str,
-) -> Result<()> {
+) -> Result<Option<i32>> {
     if tokens.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let max_decode_tokens =
@@ -585,6 +640,7 @@ fn decode_prompt_tokens(
 
     batch.clear();
     let last_index = tokens.len() - 1;
+    let mut logit_slot = None;
     for chunk_start in (0..tokens.len()).step_by(max_decode_tokens) {
         batch.clear();
         let chunk_end = chunk_start
@@ -600,6 +656,9 @@ fn decode_prompt_tokens(
             batch
                 .add(token, position, &[0], global_index == last_index)
                 .with_context(|| format!("failed to add {label} token to llama.cpp batch"))?;
+            if global_index == last_index {
+                logit_slot = Some(i32::try_from(index).context("logit slot exceeds i32::MAX")?);
+            }
         }
 
         ctx.decode(batch)
@@ -612,7 +671,7 @@ fn decode_prompt_tokens(
         }
     }
 
-    Ok(())
+    Ok(logit_slot)
 }
 
 #[derive(Debug, Default)]
@@ -783,13 +842,31 @@ fn token_text_lossy(model: &LlamaModel, token: llama_cpp_4::token::LlamaToken) -
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn build_sampler(temperature: f32, top_p: f32) -> LlamaSampler {
+fn decode_token_bytes(decoder: &mut encoding_rs::Decoder, token_bytes: &[u8]) -> Result<String> {
+    let mut text = String::new();
+    let capacity = decoder
+        .max_utf8_buffer_length(token_bytes.len())
+        .context("token byte buffer is too large to decode")?;
+    text.reserve(capacity);
+
+    let (result, read, had_errors) = decoder.decode_to_string(token_bytes, &mut text, false);
+    if had_errors {
+        bail!("failed to decode llama.cpp token as UTF-8");
+    }
+    if read != token_bytes.len() || matches!(result, encoding_rs::CoderResult::OutputFull) {
+        bail!("failed to fully decode llama.cpp token bytes");
+    }
+    Ok(text)
+}
+
+fn build_sampler(temperature: f32, top_p: f32, top_k: i32) -> LlamaSampler {
     if temperature <= 0.0 {
         return LlamaSampler::chain_simple([LlamaSampler::greedy()]);
     }
 
     let clamped_top_p = top_p.clamp(0.0, 1.0);
     LlamaSampler::chain_simple([
+        LlamaSampler::top_k(top_k.max(1)),
         LlamaSampler::top_p(clamped_top_p, 1),
         LlamaSampler::temp(temperature),
         LlamaSampler::dist(1234),

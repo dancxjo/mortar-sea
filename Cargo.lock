@@ -2030,6 +2030,7 @@ dependencies = [
  "dirs",
  "inquire",
  "owo-colors",
+ "psyche",
  "serde",
  "serde_json",
  "sha2",

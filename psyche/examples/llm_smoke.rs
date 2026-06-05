@@ -16,8 +16,9 @@ fn main() -> anyhow::Result<()> {
         model_path,
         context_size: 4096,
         max_tokens: 64,
-        temperature: 0.2,
-        top_p: 0.9,
+        temperature: 1.0,
+        top_p: 0.95,
+        top_k: 64,
         ..LlamaCppConfig::default()
     })?;
     let id = engine.start(GenerationRequest {

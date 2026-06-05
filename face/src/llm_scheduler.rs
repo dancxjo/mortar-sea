@@ -93,10 +93,11 @@ impl LlmScheduler {
         let id = Uuid::new_v4();
         let queued_at = Instant::now();
         let (response, result) = oneshot::channel();
+        let prompt_chars = request_prompt_chars(&request);
         info!(
             job_id = %id,
             job_kind = kind.as_str(),
-            prompt_chars = request.prompt.chars().count(),
+            prompt_chars,
             max_tokens = ?request.max_tokens,
             "LLM job queued"
         );
@@ -104,7 +105,7 @@ impl LlmScheduler {
             job_id: id,
             job_kind: kind.as_str().to_string(),
             observed_at: chrono::Utc::now(),
-            prompt_chars: request.prompt.chars().count(),
+            prompt_chars,
             max_tokens: request.max_tokens,
         });
 
@@ -123,6 +124,18 @@ impl LlmScheduler {
     }
 }
 
+fn request_prompt_chars(request: &GenerationRequest) -> usize {
+    if request.messages.is_empty() {
+        return request.prompt.chars().count();
+    }
+
+    request
+        .messages
+        .iter()
+        .map(|message| message.role.chars().count() + message.content.chars().count())
+        .sum()
+}
+
 fn run_scheduler(
     model_path: PathBuf,
     receiver: mpsc::Receiver<SchedulerCommand>,
@@ -133,8 +146,9 @@ fn run_scheduler(
         model_path,
         context_size: llm_context_size(),
         max_tokens: 256,
-        temperature: 0.2,
-        top_p: 0.9,
+        temperature: 1.0,
+        top_p: 0.95,
+        top_k: 64,
         ..LlamaCppConfig::default()
     }) {
         Ok(engine) => engine,
@@ -257,6 +271,16 @@ fn run_generation(
                     }
                 }
                 LlmEvent::Completed => {
+                    if generated.trim().is_empty() {
+                        let error = "LLM generated an empty response".to_string();
+                        let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                            job_id: id,
+                            job_kind: kind.as_str().to_string(),
+                            observed_at: chrono::Utc::now(),
+                            error: error.clone(),
+                        });
+                        bail!(error);
+                    }
                     info!(
                         job_id = %id,
                         job_kind = kind.as_str(),
