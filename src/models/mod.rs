@@ -10,6 +10,6 @@ pub use download::{
 };
 pub use manifest::{
     DEFAULT_FACE_MODEL_ID, DEFAULT_LLM_MODEL_ID, MODEL_ASSETS, MODEL_BUNDLES, ModelAsset,
-    ModelBundle,
+    ModelBundle, bundle_multimodal_projector_asset,
 };
 pub use selection::{selected_bundle, selected_llm_model_label, selected_llm_model_path};

@@ -85,6 +85,7 @@ pub fn run(command: LlmTestCommand) -> Result<()> {
             GenerationRequest {
                 prompt: String::new(),
                 messages: request_messages,
+                images: Vec::new(),
                 max_tokens: Some(command.max_tokens),
                 stop: llm_stop_markers(),
             }
@@ -95,6 +96,7 @@ pub fn run(command: LlmTestCommand) -> Result<()> {
             GenerationRequest {
                 prompt: raw_gemma_prompt(&messages, input, command.no_history)?,
                 messages: Vec::new(),
+                images: Vec::new(),
                 max_tokens: Some(command.max_tokens),
                 stop: llm_stop_markers(),
             }

@@ -14,7 +14,7 @@ use crate::models::manifest::{
 };
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
-    write_selected_model,
+    selected_llm_projector_path, write_selected_model,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,7 @@ pub struct FaceModelPaths {
 #[derive(Debug, Clone)]
 pub struct RuntimeModelPaths {
     pub llm: PathBuf,
+    pub llm_projector: Option<PathBuf>,
     pub face: FaceModelPaths,
 }
 
@@ -47,6 +48,24 @@ pub fn ensure_selected_llm_available() -> Result<PathBuf> {
     selected_llm_model_path()
 }
 
+pub fn ensure_selected_llm_projector_available() -> Result<Option<PathBuf>> {
+    let Some(path) = selected_llm_projector_path()? else {
+        return Ok(None);
+    };
+
+    if std::env::var_os("MORTAR_LLM_MMPROJ").is_some() {
+        if is_non_empty_file(&path) {
+            return Ok(Some(path));
+        }
+        anyhow::bail!(
+            "MORTAR_LLM_MMPROJ points to a missing or empty file: {}",
+            path.display()
+        );
+    }
+
+    Ok(Some(path))
+}
+
 pub fn ensure_face_models_available() -> Result<FaceModelPaths> {
     let bundle = find_bundle(DEFAULT_FACE_MODEL_ID)
         .context("default face model bundle is not registered")?;
@@ -57,6 +76,7 @@ pub fn ensure_face_models_available() -> Result<FaceModelPaths> {
 pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
     Ok(RuntimeModelPaths {
         llm: ensure_selected_llm_available()?,
+        llm_projector: ensure_selected_llm_projector_available()?,
         face: ensure_face_models_available()?,
     })
 }

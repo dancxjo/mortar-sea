@@ -21,8 +21,14 @@ pub(crate) fn spawn_trace(state: AppState) {
         .realtime_experience_active
         .swap(true, Ordering::AcqRel)
     {
+        state
+            .realtime_experience_pending
+            .store(true, Ordering::Release);
         return;
     }
+    state
+        .realtime_experience_pending
+        .store(false, Ordering::Release);
 
     let records = state
         .sensations
@@ -43,6 +49,12 @@ pub(crate) fn spawn_trace(state: AppState) {
         state
             .realtime_experience_active
             .store(false, Ordering::Release);
+        if state
+            .realtime_experience_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            spawn_trace(state);
+        }
         return;
     }
 
@@ -50,6 +62,7 @@ pub(crate) fn spawn_trace(state: AppState) {
     let prompt = build_prompt_from_records(&records, &impressions);
     let events = state.realtime_experience_events.clone();
     let active = state.realtime_experience_active.clone();
+    let pending = state.realtime_experience_pending.clone();
 
     tokio::spawn(async move {
         let _ = events.send(RealTimeExperienceEvent::Prompt {
@@ -62,10 +75,13 @@ pub(crate) fn spawn_trace(state: AppState) {
         if let Err(err) =
             stream_generation(&state, generation_id, prompt.clone(), events.clone()).await
         {
-            let fallback = format!(
-                "{{\"experiences\":[{{\"what\":\"Gemma 4 Experience generation failed: {}\",\"impression_ids\":[]}}]}}",
-                escape_json_string(&err.to_string())
-            );
+            let fallback = json!({
+                "experiences": [{
+                    "what": format!("Gemma 4 Experience generation failed: {err}"),
+                    "impression_ids": []
+                }]
+            })
+            .to_string();
             for token in streamable_chunks(&fallback, 18) {
                 let _ = events.send(RealTimeExperienceEvent::ResponseToken {
                     generation_id,
@@ -77,6 +93,9 @@ pub(crate) fn spawn_trace(state: AppState) {
 
         let _ = events.send(RealTimeExperienceEvent::ResponseDone { generation_id });
         active.store(false, Ordering::Release);
+        if pending.swap(false, Ordering::AcqRel) {
+            spawn_trace(state);
+        }
     });
 }
 
@@ -99,6 +118,7 @@ async fn stream_generation(
                     ),
                     ChatMessage::new("user", prompt),
                 ],
+                images: Vec::new(),
                 max_tokens: Some(256),
                 stop: llm_stop_markers(),
             },
@@ -205,8 +225,4 @@ fn streamable_chunks(text: &str, chunk_size: usize) -> Vec<String> {
     }
 
     chunks
-}
-
-fn escape_json_string(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
 }

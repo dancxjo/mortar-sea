@@ -27,6 +27,7 @@ fn main() -> anyhow::Result<()> {
             ChatMessage::new("system", "Return a concise answer."),
             ChatMessage::new("user", "Say hello in exactly three words."),
         ],
+        images: Vec::new(),
         max_tokens: Some(32),
         stop: vec!["<turn|>".to_string()],
     })?;

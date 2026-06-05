@@ -19,11 +19,11 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dependencies.llama-cpp-4]
-version = "0.3.0"
+version = "0.3.1"
 default-features = false
-features = ["openmp"]
+features = ["mtmd", "openmp"]
 
 [dependencies.llama-cpp-sys-4]
-version = "0.3.0"
+version = "0.3.1"
 default-features = false
-features = ["openmp"]
+features = ["mtmd", "openmp"]

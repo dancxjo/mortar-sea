@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::models::manifest::{
-    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_primary_asset,
-    bundle_required_assets, find_bundle,
+    DEFAULT_LLM_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_multimodal_projector_asset,
+    bundle_primary_asset, bundle_required_assets, find_bundle,
 };
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -21,6 +21,21 @@ pub fn selected_llm_model_path() -> Result<PathBuf> {
     let bundle = selected_bundle()?;
     let asset = bundle_primary_asset(bundle)?;
     Ok(asset_path(&resolve_mortar_home()?, asset))
+}
+
+pub fn selected_llm_projector_path() -> Result<Option<PathBuf>> {
+    if let Some(path) = std::env::var_os("MORTAR_LLM_MMPROJ") {
+        return Ok(Some(PathBuf::from(path)));
+    }
+    if std::env::var_os("MORTAR_LLM_MODEL").is_some() {
+        return Ok(None);
+    }
+
+    let bundle = selected_bundle()?;
+    let Some(asset) = bundle_multimodal_projector_asset(bundle)? else {
+        return Ok(None);
+    };
+    Ok(Some(asset_path(&resolve_mortar_home()?, asset)))
 }
 
 pub fn selected_llm_model_label() -> Result<&'static str> {

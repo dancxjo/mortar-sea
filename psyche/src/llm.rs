@@ -13,9 +13,25 @@ pub struct GenerationId(pub Uuid);
 pub struct GenerationRequest {
     pub prompt: String,
     pub messages: Vec<ChatMessage>,
+    pub images: Vec<GenerationImage>,
     /// Maximum generated tokens, or no explicit generation cap.
     pub max_tokens: Option<usize>,
     pub stop: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationImage {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl GenerationImage {
+    pub fn new(mime: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            mime: mime.into(),
+            data: data.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +143,7 @@ mod tests {
             .start(GenerationRequest {
                 prompt: "say hello".to_owned(),
                 messages: Vec::new(),
+                images: Vec::new(),
                 max_tokens: None,
                 stop: Vec::new(),
             })

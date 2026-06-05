@@ -1,0 +1,12 @@
+diff --git a/llama.cpp/tools/mtmd/clip.cpp b/llama.cpp/tools/mtmd/clip.cpp
+index 4f625d5..be18a0d 100644
+--- a/llama.cpp/tools/mtmd/clip.cpp
++++ b/llama.cpp/tools/mtmd/clip.cpp
+@@ -4381,6 +4381,7 @@ int clip_n_mmproj_embd(const struct clip_ctx * ctx) {
+             return ctx->model.mm_fc_w->ne[1];
+         case PROJECTOR_TYPE_LFM2A:
+             return ctx->model.position_embeddings->ne[0];
++        case PROJECTOR_TYPE_GEMMA4A:
+         case PROJECTOR_TYPE_GEMMA4UA:
+             return ctx->model.hparams.projection_dim;
+         case PROJECTOR_TYPE_GRANITE_SPEECH:

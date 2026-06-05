@@ -56,11 +56,15 @@ pub(crate) struct AppState {
     pub(crate) field_vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
     pub(crate) realtime_experience_active: Arc<AtomicBool>,
+    pub(crate) realtime_experience_pending: Arc<AtomicBool>,
 }
 
 pub async fn run() -> anyhow::Result<()> {
     let models = mortar_sea::models::ensure_runtime_models_available()?;
     info!(model = %models.llm.display(), "selected LLM model is available");
+    if let Some(projector) = &models.llm_projector {
+        info!(projector = %projector.display(), "selected LLM multimodal projector is available");
+    }
     info!(
         detector = %models.face.detector.display(),
         recognizer = %models.face.recognizer.display(),
@@ -68,7 +72,11 @@ pub async fn run() -> anyhow::Result<()> {
         "face models are available"
     );
     let realtime_experience_events = broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0;
-    let llm_scheduler = LlmScheduler::start(models.llm, realtime_experience_events.clone())?;
+    let llm_scheduler = LlmScheduler::start(
+        models.llm.clone(),
+        models.llm_projector.clone(),
+        realtime_experience_events.clone(),
+    )?;
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
@@ -100,6 +108,7 @@ pub async fn run() -> anyhow::Result<()> {
         field_vision_last_sampled: Arc::new(RwLock::new(None)),
         realtime_experience_events,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
+        realtime_experience_pending: Arc::new(AtomicBool::new(false)),
     };
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");

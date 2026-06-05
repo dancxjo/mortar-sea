@@ -1,6 +1,12 @@
 use std::sync::atomic::Ordering;
 
-use psyche::{ChatMessage, GenerationRequest};
+use anyhow::Context;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use image::DynamicImage;
+use psyche::{ChatMessage, GenerationImage, GenerationRequest};
+use serde::Serialize;
+use serde_json::Value;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -10,7 +16,30 @@ use crate::messages::{RawVisionFrame, VisionFieldImpressionRecord};
 
 const MAX_FIELD_VISION_TOKENS: usize = 96;
 const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
-const MAX_FIELD_VISION_DATA_CHARS: usize = 32_000;
+const MAX_FIELD_VISION_DATA_CHARS: usize = 2_000_000;
+const MAX_IMAGE_SUMMARY_SAMPLES: u32 = 6_400;
+
+#[derive(Debug, Clone)]
+struct VisionFieldDescription {
+    text: String,
+    payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FrameVisualSummary {
+    width: u32,
+    height: u32,
+    brightness: &'static str,
+    dominant_color: &'static str,
+    colorfulness: &'static str,
+    contrast: &'static str,
+    visual_detail: &'static str,
+    average_rgb: [u8; 3],
+    luminance_mean: f32,
+    luminance_stddev: f32,
+    saturation_mean: f32,
+    edge_energy: f32,
+}
 
 pub(crate) fn spawn_field_vision(state: AppState) {
     if state.field_vision_active.swap(true, Ordering::AcqRel) {
@@ -60,12 +89,21 @@ fn latest_unsampled_frame(state: &AppState) -> Option<RawVisionFrame> {
 async fn describe_field_of_vision(
     state: &AppState,
     frame: RawVisionFrame,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<VisionFieldDescription> {
     if frame.data.len() > MAX_FIELD_VISION_DATA_CHARS {
-        return Ok(oversized_field_impression(&frame));
+        return Ok(VisionFieldDescription {
+            text: oversized_field_impression(&frame),
+            payload: serde_json::json!({
+                "reason": "payload_too_large",
+                "data_chars": frame.data.len(),
+            }),
+        });
     }
 
-    let prompt = build_field_vision_prompt(&frame);
+    let summary = summarize_frame(&frame)?;
+    let fallback = summary.to_impression();
+    let image_bytes = decode_frame_image_bytes(&frame)?;
+    let prompt = build_field_vision_prompt(&frame, &summary);
     let generated = state
         .llm_scheduler
         .generate(
@@ -76,13 +114,20 @@ async fn describe_field_of_vision(
                     ChatMessage::new("system", field_vision_system_prompt()),
                     ChatMessage::new("user", prompt),
                 ],
+                images: vec![GenerationImage::new(
+                    frame.sensation.media.mime.clone(),
+                    image_bytes,
+                )],
                 max_tokens: Some(MAX_FIELD_VISION_TOKENS),
                 stop: llm_stop_markers(),
             },
         )
         .await?;
 
-    Ok(clean_impression(&generated))
+    Ok(VisionFieldDescription {
+        text: clean_impression(&generated, &fallback),
+        payload: serde_json::to_value(summary).expect("frame visual summary is serializable"),
+    })
 }
 
 fn oversized_field_impression(frame: &RawVisionFrame) -> String {
@@ -104,11 +149,12 @@ If people are visible, do not assume any visible person is me unless the field o
 Do not mention screenshots, photos, frames, cameras, metadata, data URLs, or analysis. Return only the impression sentence."
 }
 
-fn build_field_vision_prompt(frame: &RawVisionFrame) -> String {
+fn build_field_vision_prompt(frame: &RawVisionFrame, summary: &FrameVisualSummary) -> String {
     format!(
-        "The next visual payload is my current field of vision.\n\
+        "My current field of vision is attached as image input. The following facts were also computed from the same visual field.\n\
 source={} sequence={} occurred_at={} size={}x{} mime={}\n\
-<start_of_image>\n{}\n<end_of_image>\n\
+facts={}\n\
+Write one short first-person present-tense impression from the image. Use the computed facts only as support.\n\
 ",
         frame.sensation.source.sensor_id,
         frame.sensation.sequence,
@@ -116,13 +162,217 @@ source={} sequence={} occurred_at={} size={}x{} mime={}\n\
         frame.sensation.media.width,
         frame.sensation.media.height,
         frame.sensation.media.mime,
-        frame.data,
+        serde_json::to_string(summary).expect("frame visual summary is serializable"),
     )
 }
 
-fn clean_impression(generated: &str) -> String {
-    let first_line = generated
-        .trim()
+fn summarize_frame(frame: &RawVisionFrame) -> anyhow::Result<FrameVisualSummary> {
+    summarize_image(&decode_frame_image(frame)?)
+}
+
+fn decode_frame_image(frame: &RawVisionFrame) -> anyhow::Result<DynamicImage> {
+    let bytes = decode_frame_image_bytes(frame)?;
+    image::load_from_memory(&bytes).context("failed to decode vision frame image")
+}
+
+fn decode_frame_image_bytes(frame: &RawVisionFrame) -> anyhow::Result<Vec<u8>> {
+    let base64 = frame
+        .data
+        .split_once(',')
+        .map(|(_, base64)| base64)
+        .context("vision frame data URL is missing base64 separator")?;
+    let bytes = BASE64_STANDARD
+        .decode(base64.trim().as_bytes())
+        .context("failed to decode vision frame payload")?;
+    Ok(bytes)
+}
+
+fn summarize_image(img: &DynamicImage) -> anyhow::Result<FrameVisualSummary> {
+    let rgb = img.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let total_pixels = width
+        .checked_mul(height)
+        .context("vision frame dimensions overflowed")?;
+    if total_pixels == 0 {
+        anyhow::bail!("vision frame image has no pixels");
+    }
+
+    let stride = ((total_pixels as f32 / MAX_IMAGE_SUMMARY_SAMPLES as f32)
+        .sqrt()
+        .ceil() as u32)
+        .max(1);
+
+    let mut count = 0f32;
+    let mut red_sum = 0f32;
+    let mut green_sum = 0f32;
+    let mut blue_sum = 0f32;
+    let mut luminance_sum = 0f32;
+    let mut luminance_sq_sum = 0f32;
+    let mut saturation_sum = 0f32;
+    let mut edge_sum = 0f32;
+    let mut edge_count = 0f32;
+
+    for y in (0..height).step_by(stride as usize) {
+        for x in (0..width).step_by(stride as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let red = r as f32 / 255.0;
+            let green = g as f32 / 255.0;
+            let blue = b as f32 / 255.0;
+            let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+            let max_channel = red.max(green).max(blue);
+            let min_channel = red.min(green).min(blue);
+            let saturation = if max_channel > 0.0 {
+                (max_channel - min_channel) / max_channel
+            } else {
+                0.0
+            };
+
+            red_sum += red;
+            green_sum += green;
+            blue_sum += blue;
+            luminance_sum += luminance;
+            luminance_sq_sum += luminance * luminance;
+            saturation_sum += saturation;
+            count += 1.0;
+
+            if x + stride < width {
+                let [nr, ng, nb] = rgb.get_pixel(x + stride, y).0;
+                let next_luminance = luminance_from_u8(nr, ng, nb);
+                edge_sum += (luminance - next_luminance).abs();
+                edge_count += 1.0;
+            }
+            if y + stride < height {
+                let [nr, ng, nb] = rgb.get_pixel(x, y + stride).0;
+                let next_luminance = luminance_from_u8(nr, ng, nb);
+                edge_sum += (luminance - next_luminance).abs();
+                edge_count += 1.0;
+            }
+        }
+    }
+
+    let red_mean = red_sum / count;
+    let green_mean = green_sum / count;
+    let blue_mean = blue_sum / count;
+    let luminance_mean = luminance_sum / count;
+    let luminance_variance = (luminance_sq_sum / count - luminance_mean * luminance_mean).max(0.0);
+    let luminance_stddev = luminance_variance.sqrt();
+    let saturation_mean = saturation_sum / count;
+    let edge_energy = if edge_count > 0.0 {
+        edge_sum / edge_count
+    } else {
+        0.0
+    };
+
+    Ok(FrameVisualSummary {
+        width,
+        height,
+        brightness: brightness_label(luminance_mean),
+        dominant_color: dominant_color_label(red_mean, green_mean, blue_mean, saturation_mean),
+        colorfulness: colorfulness_label(saturation_mean),
+        contrast: contrast_label(luminance_stddev),
+        visual_detail: visual_detail_label(edge_energy),
+        average_rgb: [
+            (red_mean * 255.0).round().clamp(0.0, 255.0) as u8,
+            (green_mean * 255.0).round().clamp(0.0, 255.0) as u8,
+            (blue_mean * 255.0).round().clamp(0.0, 255.0) as u8,
+        ],
+        luminance_mean,
+        luminance_stddev,
+        saturation_mean,
+        edge_energy,
+    })
+}
+
+fn luminance_from_u8(red: u8, green: u8, blue: u8) -> f32 {
+    0.2126 * red as f32 / 255.0 + 0.7152 * green as f32 / 255.0 + 0.0722 * blue as f32 / 255.0
+}
+
+fn brightness_label(luminance: f32) -> &'static str {
+    if luminance < 0.18 {
+        "very dark"
+    } else if luminance < 0.36 {
+        "dim"
+    } else if luminance < 0.68 {
+        "moderately lit"
+    } else if luminance < 0.86 {
+        "bright"
+    } else {
+        "very bright"
+    }
+}
+
+fn colorfulness_label(saturation: f32) -> &'static str {
+    if saturation < 0.08 {
+        "nearly grayscale"
+    } else if saturation < 0.22 {
+        "muted"
+    } else if saturation < 0.45 {
+        "moderately colorful"
+    } else {
+        "colorful"
+    }
+}
+
+fn contrast_label(stddev: f32) -> &'static str {
+    if stddev < 0.08 {
+        "low contrast"
+    } else if stddev < 0.18 {
+        "moderate contrast"
+    } else {
+        "high contrast"
+    }
+}
+
+fn visual_detail_label(edge_energy: f32) -> &'static str {
+    if edge_energy < 0.025 {
+        "flat"
+    } else if edge_energy < 0.075 {
+        "soft"
+    } else if edge_energy < 0.16 {
+        "detailed"
+    } else {
+        "busy"
+    }
+}
+
+fn dominant_color_label(red: f32, green: f32, blue: f32, saturation: f32) -> &'static str {
+    if saturation < 0.08 {
+        return "gray";
+    }
+
+    if red > green * 1.15 && red > blue * 1.15 {
+        if green > blue * 1.25 { "warm" } else { "red" }
+    } else if green > red * 1.15 && green > blue * 1.15 {
+        "green"
+    } else if blue > red * 1.15 && blue > green * 1.15 {
+        "blue"
+    } else if red > blue * 1.10 && green > blue * 1.10 {
+        "yellow"
+    } else if red > green * 1.10 && blue > green * 1.10 {
+        "magenta"
+    } else if green > red * 1.10 && blue > red * 1.10 {
+        "cyan"
+    } else {
+        "mixed"
+    }
+}
+
+impl FrameVisualSummary {
+    fn to_impression(&self) -> String {
+        format!(
+            "I see a {}, {}, {} field of view dominated by {} tones.",
+            self.brightness, self.colorfulness, self.visual_detail, self.dominant_color
+        )
+    }
+}
+
+fn clean_impression(generated: &str, fallback: &str) -> String {
+    let trimmed_generated = generated.trim();
+    if let Some(json_text) = extract_nonempty_json_string(trimmed_generated) {
+        return json_text;
+    }
+
+    let first_line = trimmed_generated
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -133,14 +383,32 @@ fn clean_impression(generated: &str) -> String {
         .trim_start_matches("Impression:")
         .trim();
 
-    if trimmed.is_empty() {
-        "I am looking at my field of vision.".to_string()
+    if trimmed.is_empty() || looks_like_empty_json_response(trimmed) {
+        fallback.to_string()
     } else {
         trimmed.to_string()
     }
 }
 
-fn record_impression(state: &AppState, frame: RawVisionFrame, how: String) {
+fn extract_nonempty_json_string(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    first_nonempty_json_string(&value)
+}
+
+fn first_nonempty_json_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        Value::Array(values) => values.iter().find_map(first_nonempty_json_string),
+        Value::Object(map) => map.values().find_map(first_nonempty_json_string),
+        _ => None,
+    }
+}
+
+fn looks_like_empty_json_response(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).is_ok()
+}
+
+fn record_impression(state: &AppState, frame: RawVisionFrame, description: VisionFieldDescription) {
     let impression = VisionFieldImpressionRecord {
         id: Uuid::new_v4(),
         sensation_id: frame.sensation.id,
@@ -148,11 +416,11 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, how: String) {
         observed_at: chrono::Utc::now(),
         source: frame.sensation.source.clone(),
         sequence: frame.sensation.sequence,
-        text: how,
+        text: description.text,
         kind: "vision.field".to_string(),
         faculty: "Field Vision Faculty".to_string(),
         confidence: FIELD_VISION_BASE_CONFIDENCE,
-        payload: serde_json::Value::Null,
+        payload: description.payload,
     };
 
     debug!(
@@ -175,6 +443,7 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, how: String) {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use image::{ImageBuffer, Rgb};
 
     fn raw_frame(data: &str) -> RawVisionFrame {
         RawVisionFrame {
@@ -204,15 +473,49 @@ mod tests {
         }
     }
 
+    fn test_summary() -> FrameVisualSummary {
+        FrameVisualSummary {
+            width: 224,
+            height: 224,
+            brightness: "bright",
+            dominant_color: "red",
+            colorfulness: "colorful",
+            contrast: "low contrast",
+            visual_detail: "flat",
+            average_rgb: [240, 20, 20],
+            luminance_mean: 0.28,
+            luminance_stddev: 0.01,
+            saturation_mean: 0.9,
+            edge_energy: 0.0,
+        }
+    }
+
     #[test]
     fn field_vision_prompt_names_live_field_of_vision() {
-        let prompt = build_field_vision_prompt(&raw_frame("data:image/jpeg;base64,abc123"));
+        let prompt =
+            build_field_vision_prompt(&raw_frame("data:image/jpeg;base64,abc123"), &test_summary());
         let system = field_vision_system_prompt();
 
         assert!(system.contains("my live field of vision"));
         assert!(system.contains("not a detached image"));
         assert!(system.contains("unless the field of vision is clearly a mirror or reflection"));
-        assert!(prompt.contains("<start_of_image>\ndata:image/jpeg;base64,abc123\n<end_of_image>"));
+        assert!(prompt.contains("facts={"));
+        assert!(prompt.contains("\"dominant_color\":\"red\""));
+        assert!(!prompt.contains("data:image/jpeg;base64,abc123"));
+    }
+
+    #[test]
+    fn summarize_image_reads_pixels_instead_of_payload_text() {
+        let img = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(4, 4, Rgb([240, 20, 20])));
+        let summary = summarize_image(&img).expect("summary");
+
+        assert_eq!(summary.dominant_color, "red");
+        assert_eq!(summary.colorfulness, "colorful");
+        assert_eq!(summary.average_rgb, [240, 20, 20]);
+        assert_eq!(
+            summary.to_impression(),
+            "I see a dim, colorful, flat field of view dominated by red tones."
+        );
     }
 
     #[test]
@@ -227,8 +530,20 @@ mod tests {
     #[test]
     fn clean_impression_keeps_first_sentence_like_line() {
         assert_eq!(
-            clean_impression("\"I am looking at a desk and monitor.\"\nextra"),
+            clean_impression("\"I am looking at a desk and monitor.\"\nextra", "fallback"),
             "I am looking at a desk and monitor."
+        );
+    }
+
+    #[test]
+    fn clean_impression_rejects_empty_json_strings() {
+        assert_eq!(
+            clean_impression("{\"description\":\"\"}", "fallback description"),
+            "fallback description"
+        );
+        assert_eq!(
+            clean_impression("{\"description\":\"I see a red surface.\"}", "fallback"),
+            "I see a red surface."
         );
     }
 }

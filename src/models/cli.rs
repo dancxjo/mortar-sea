@@ -4,7 +4,9 @@ use inquire::Select;
 use owo_colors::OwoColorize;
 
 use crate::models::download::fetch_model;
-use crate::models::manifest::{MODEL_ASSETS, MODEL_BUNDLES, ModelKind, find_bundle};
+use crate::models::manifest::{
+    MODEL_ASSETS, MODEL_BUNDLES, ModelKind, bundle_required_assets, find_bundle,
+};
 use crate::models::selection::{
     asset_path, bundle_present, is_non_empty_file, model_selection_path, resolve_mortar_home,
     selected_bundle, selected_llm_model_path, write_selected_model,
@@ -149,20 +151,26 @@ fn print_paths() -> Result<()> {
 
 fn print_status() -> Result<()> {
     let bundle = selected_bundle()?;
-    let path = selected_llm_model_path()?;
-    let state = if is_non_empty_file(&path) {
-        "present".green().to_string()
-    } else {
-        "missing".red().to_string()
-    };
     println!(
         "{} {} ({})",
         "selected".cyan(),
         bundle.display_name.bold(),
         bundle.id
     );
-    println!("{} {}", state, path.display());
-    if !is_non_empty_file(&path) {
+    let home = resolve_mortar_home()?;
+    let selected_path = selected_llm_model_path()?;
+    let mut missing = !is_non_empty_file(&selected_path);
+    for asset in bundle_required_assets(bundle)? {
+        let path = asset_path(&home, asset);
+        let state = if is_non_empty_file(&path) {
+            "present".green().to_string()
+        } else {
+            missing = true;
+            "missing".red().to_string()
+        };
+        println!("{} {:<30} {}", state, asset.id, path.display());
+    }
+    if missing {
         println!("{} cargo run models fetch", "fetch with:".dimmed());
     }
 

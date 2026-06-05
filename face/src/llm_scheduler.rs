@@ -26,14 +26,14 @@ pub(crate) enum LlmJobKind {
 impl LlmJobKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::FieldVision => "field_vision",
+            Self::FieldVision => "vision",
             Self::RealtimeExperience => "realtime_experience",
         }
     }
 }
 
 type TokenSink = Box<dyn FnMut(String) + Send + 'static>;
-const DEFAULT_LLM_CONTEXT_SIZE: u32 = 32_768;
+const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
 
 enum SchedulerCommand {
     Generate {
@@ -49,6 +49,7 @@ enum SchedulerCommand {
 impl LlmScheduler {
     pub(crate) fn start(
         model_path: PathBuf,
+        projector_path: Option<PathBuf>,
         events: broadcast::Sender<RealTimeExperienceEvent>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
@@ -56,7 +57,7 @@ impl LlmScheduler {
 
         thread::Builder::new()
             .name("face-llm-scheduler".to_string())
-            .spawn(move || run_scheduler(model_path, receiver, scheduler_events))
+            .spawn(move || run_scheduler(model_path, projector_path, receiver, scheduler_events))
             .context("failed to spawn LLM scheduler thread")?;
 
         Ok(Self { sender, events })
@@ -98,6 +99,7 @@ impl LlmScheduler {
             job_id = %id,
             job_kind = kind.as_str(),
             prompt_chars,
+            image_count = request.images.len(),
             max_tokens = ?request.max_tokens,
             "LLM job queued"
         );
@@ -138,12 +140,17 @@ fn request_prompt_chars(request: &GenerationRequest) -> usize {
 
 fn run_scheduler(
     model_path: PathBuf,
+    projector_path: Option<PathBuf>,
     receiver: mpsc::Receiver<SchedulerCommand>,
     events: broadcast::Sender<RealTimeExperienceEvent>,
 ) {
+    if let Some(projector_path) = &projector_path {
+        info!(projector = %projector_path.display(), "LLM scheduler loading multimodal projector");
+    }
     info!(model = %model_path.display(), "LLM scheduler loading model");
     let mut engine = match LlamaCppEngine::new(LlamaCppConfig {
         model_path,
+        mmproj_path: projector_path,
         context_size: llm_context_size(),
         max_tokens: 256,
         temperature: 1.0,

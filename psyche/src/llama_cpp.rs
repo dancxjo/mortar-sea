@@ -13,6 +13,9 @@ use llama_cpp_4::llama_backend::LlamaBackend;
 use llama_cpp_4::llama_batch::LlamaBatch;
 use llama_cpp_4::model::params::LlamaModelParams;
 use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
+use llama_cpp_4::mtmd::{
+    MtmdBitmap, MtmdContext, MtmdContextParams, MtmdInputChunks, MtmdInputText,
+};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::{max_devices, supports_gpu_offload};
 use tracing::{debug, trace, warn};
@@ -26,6 +29,7 @@ static CUDA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 #[derive(Debug, Clone)]
 pub struct LlamaCppConfig {
     pub model_path: PathBuf,
+    pub mmproj_path: Option<PathBuf>,
     pub gpu_layers: Option<u32>,
     pub cpu_only: bool,
     pub context_size: u32,
@@ -40,6 +44,7 @@ impl Default for LlamaCppConfig {
     fn default() -> Self {
         Self {
             model_path: PathBuf::new(),
+            mmproj_path: None,
             gpu_layers: None,
             cpu_only: false,
             context_size: 2048,
@@ -58,6 +63,7 @@ impl Default for LlamaCppConfig {
 pub struct LlamaCppEngine {
     backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
+    mtmd_context: Option<Arc<MtmdContext>>,
     config: LlamaCppConfig,
     active: HashMap<GenerationId, ActiveGeneration>,
 }
@@ -101,8 +107,33 @@ impl LlamaCppEngine {
                     config.model_path.display()
                 )
             })?;
+        let mtmd_context = if let Some(mmproj_path) = &config.mmproj_path {
+            if !llama_native_logs_enabled() {
+                MtmdContext::void_helper_logs();
+            }
+            let params = MtmdContextParams::default()
+                .use_gpu(!config.cpu_only && !cpu_only_env_requested() && cuda_available())
+                .n_threads(i32::try_from(config.threads).context("threads exceeds i32::MAX")?);
+            let context =
+                MtmdContext::init_from_file(mmproj_path, &model, params).with_context(|| {
+                    format!(
+                        "failed to load llama.cpp multimodal projector at {}",
+                        mmproj_path.display()
+                    )
+                })?;
+            if !context.supports_vision() {
+                bail!(
+                    "llama.cpp multimodal projector at {} does not support vision",
+                    mmproj_path.display()
+                );
+            }
+            Some(Arc::new(context))
+        } else {
+            None
+        };
         debug!(
             model = %config.model_path.display(),
+            mmproj = ?config.mmproj_path,
             gpu_layers,
             context_size = config.context_size,
             max_tokens = config.max_tokens,
@@ -115,6 +146,7 @@ impl LlamaCppEngine {
         Ok(Self {
             backend,
             model: Arc::new(model),
+            mtmd_context,
             config,
             active: HashMap::new(),
         })
@@ -138,6 +170,7 @@ impl LlmEngine for LlamaCppEngine {
             id,
             backend: Arc::clone(&self.backend),
             model: Arc::clone(&self.model),
+            mtmd_context: self.mtmd_context.as_ref().map(Arc::clone),
             config: self.config.clone(),
             request,
             controls: control_receiver,
@@ -241,6 +274,7 @@ struct LlamaGenerationWorker {
     id: GenerationId,
     backend: Arc<LlamaBackend>,
     model: Arc<LlamaModel>,
+    mtmd_context: Option<Arc<MtmdContext>>,
     config: LlamaCppConfig,
     request: GenerationRequest,
     controls: Receiver<GenerationControl>,
@@ -258,12 +292,6 @@ impl LlamaGenerationWorker {
         let context_size = NonZeroU32::new(self.config.context_size)
             .context("llama.cpp context_size must be greater than zero")?;
         let prompt = resolve_prompt(&self.model, &self.request)?;
-        let max_total_tokens = checked_total_tokens(
-            &prompt.text,
-            prompt.add_bos,
-            &self.model,
-            self.request.max_tokens,
-        )?;
 
         let thread_count =
             i32::try_from(self.config.threads).context("threads exceeds i32::MAX")?;
@@ -283,40 +311,71 @@ impl LlamaGenerationWorker {
             .new_context(&self.backend, ctx_params)
             .context("failed to create llama.cpp context")?;
 
-        let prompt_tokens = self
-            .model
-            .str_to_token(&prompt.text, prompt.add_bos)
-            .context("failed to tokenize prompt")?;
-        if prompt_tokens.is_empty() {
-            bail!("prompt produced no tokens");
-        }
-
         let n_ctx = ctx.n_ctx() as usize;
-        debug!(
-            generation_id = %self.id.0,
-            prompt_tokens = prompt_tokens.len(),
-            context_size = n_ctx,
-            max_total_tokens,
-            "llama.cpp prompt tokenized"
-        );
-        if max_total_tokens > n_ctx {
-            bail!(
-                "generation needs {max_total_tokens} context tokens, but context_size is {n_ctx}"
-            );
-        }
-
         let mut batch = LlamaBatch::new(n_ctx, 1);
         let mut n_cur = 0;
-        let Some(mut logit_slot) = decode_prompt_tokens(
-            &mut ctx,
-            &mut batch,
-            &prompt_tokens,
-            &mut n_cur,
-            n_ctx,
-            "prompt",
-        )?
-        else {
-            bail!("prompt produced no logits");
+        let mut logit_slot = if self.request.images.is_empty() {
+            let prompt_tokens = self
+                .model
+                .str_to_token(&prompt.text, prompt.add_bos)
+                .context("failed to tokenize prompt")?;
+            if prompt_tokens.is_empty() {
+                bail!("prompt produced no tokens");
+            }
+            let max_total_tokens =
+                checked_total_tokens_from_prompt_len(prompt_tokens.len(), self.request.max_tokens)?;
+            debug!(
+                generation_id = %self.id.0,
+                prompt_tokens = prompt_tokens.len(),
+                context_size = n_ctx,
+                max_total_tokens,
+                "llama.cpp prompt tokenized"
+            );
+            if max_total_tokens > n_ctx {
+                bail!(
+                    "generation needs {max_total_tokens} context tokens, but context_size is {n_ctx}"
+                );
+            }
+
+            decode_prompt_tokens(
+                &mut ctx,
+                &mut batch,
+                &prompt_tokens,
+                &mut n_cur,
+                n_ctx,
+                "prompt",
+            )?
+            .context("prompt produced no logits")?
+        } else {
+            let mtmd_context = self
+                .mtmd_context
+                .as_ref()
+                .context("image input requires a configured llama.cpp multimodal projector")?;
+            let prompt_tokens = decode_multimodal_prompt(
+                &self.model,
+                &mut ctx,
+                mtmd_context,
+                &prompt,
+                &self.request,
+                &mut n_cur,
+                n_ctx,
+            )?;
+            let max_total_tokens =
+                checked_total_tokens_from_prompt_len(prompt_tokens, self.request.max_tokens)?;
+            debug!(
+                generation_id = %self.id.0,
+                prompt_tokens,
+                image_count = self.request.images.len(),
+                context_size = n_ctx,
+                max_total_tokens,
+                "llama.cpp multimodal prompt tokenized"
+            );
+            if max_total_tokens > n_ctx {
+                bail!(
+                    "generation needs {max_total_tokens} context tokens, but context_size is {n_ctx}"
+                );
+            }
+            -1
         };
         let mut generated_tokens = 0usize;
         let mut sampler = build_sampler(
@@ -479,17 +538,18 @@ struct ResolvedPrompt {
 
 fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<ResolvedPrompt> {
     if request.messages.is_empty() {
+        let prompt = prompt_with_media_markers(&request.prompt, request.images.len());
         if llama_debug_enabled() {
-            eprintln!("llama prompt:\n{:?}", request.prompt);
+            eprintln!("llama prompt:\n{prompt:?}");
         }
         return Ok(ResolvedPrompt {
-            text: request.prompt.clone(),
+            text: prompt,
             add_bos: AddBos::Always,
         });
     }
 
-    let messages = request
-        .messages
+    let request_messages = messages_with_media_markers(&request.messages, request.images.len());
+    let messages = request_messages
         .iter()
         .map(|message| LlamaChatMessage::new(message.role.clone(), message.content.clone()))
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -504,6 +564,38 @@ fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<Res
         text,
         add_bos: AddBos::Never,
     })
+}
+
+fn messages_with_media_markers(
+    messages: &[crate::llm::ChatMessage],
+    image_count: usize,
+) -> Vec<crate::llm::ChatMessage> {
+    if image_count == 0 || messages.is_empty() {
+        return messages.to_vec();
+    }
+
+    let mut messages = messages.to_vec();
+    let target = messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .unwrap_or(messages.len() - 1);
+    messages[target].content = prompt_with_media_markers(&messages[target].content, image_count);
+    messages
+}
+
+fn prompt_with_media_markers(prompt: &str, image_count: usize) -> String {
+    if image_count == 0 {
+        return prompt.to_string();
+    }
+
+    let markers = std::iter::repeat_n(MtmdContext::default_marker(), image_count)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if prompt.trim().is_empty() {
+        markers
+    } else {
+        format!("{markers}\n{prompt}")
+    }
 }
 
 fn llama_debug_enabled() -> bool {
@@ -674,6 +766,65 @@ fn decode_prompt_tokens(
     Ok(logit_slot)
 }
 
+fn decode_multimodal_prompt(
+    _model: &LlamaModel,
+    ctx: &mut LlamaContext<'_>,
+    mtmd_context: &MtmdContext,
+    prompt: &ResolvedPrompt,
+    request: &GenerationRequest,
+    n_cur: &mut i32,
+    n_ctx: usize,
+) -> Result<usize> {
+    let bitmaps = request
+        .images
+        .iter()
+        .map(|image| {
+            MtmdBitmap::from_buf(mtmd_context, &image.data)
+                .with_context(|| format!("failed to decode {} image for mtmd", image.mime))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let bitmap_refs = bitmaps.iter().collect::<Vec<_>>();
+    let input_text =
+        MtmdInputText::new(&prompt.text, matches!(prompt.add_bos, AddBos::Always), true);
+    let mut chunks = MtmdInputChunks::new();
+    mtmd_context
+        .tokenize(&input_text, &bitmap_refs, &mut chunks)
+        .context("failed to tokenize multimodal prompt")?;
+    if chunks.is_empty() {
+        bail!("multimodal prompt produced no chunks");
+    }
+
+    let prompt_positions = usize::try_from(chunks.n_pos().max(0))
+        .unwrap_or(0)
+        .max(chunks.n_tokens());
+    if prompt_positions == 0 {
+        bail!("multimodal prompt produced no tokens");
+    }
+    if prompt_positions > n_ctx {
+        bail!(
+            "multimodal prompt needs {prompt_positions} context tokens, but context_size is {n_ctx}"
+        );
+    }
+
+    let n_batch = i32::try_from(ctx.n_batch()).context("llama.cpp n_batch exceeds i32::MAX")?;
+    anyhow::ensure!(n_batch > 0, "llama.cpp n_batch must be greater than zero");
+
+    let mut new_n_past = *n_cur;
+    mtmd_context
+        .eval_chunks(
+            ctx.as_ptr(),
+            &chunks,
+            *n_cur,
+            0,
+            n_batch,
+            true,
+            &mut new_n_past,
+        )
+        .context("failed to evaluate multimodal prompt")?;
+    *n_cur = new_n_past;
+    Ok(prompt_positions)
+}
+
 #[derive(Debug, Default)]
 struct StopDetector {
     stops: Vec<String>,
@@ -812,16 +963,10 @@ fn cuda_hidden_by_env() -> bool {
         })
 }
 
-fn checked_total_tokens(
-    prompt: &str,
-    add_bos: AddBos,
-    model: &LlamaModel,
+fn checked_total_tokens_from_prompt_len(
+    prompt_tokens: usize,
     max_tokens: Option<usize>,
 ) -> Result<usize> {
-    let prompt_tokens = model
-        .str_to_token(prompt, add_bos)
-        .context("failed to tokenize prompt")?
-        .len();
     match max_tokens {
         Some(max_tokens) => {
             if max_tokens == 0 {
@@ -883,6 +1028,7 @@ fn is_terminal_event(event: &LlmEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::ChatMessage;
 
     #[test]
     fn stop_detector_stops_before_marker_in_single_token() {
@@ -949,5 +1095,33 @@ mod tests {
             }
         );
         assert_eq!(detector.finish(), "");
+    }
+
+    #[test]
+    fn prompt_with_media_markers_places_images_before_text() {
+        let marker = MtmdContext::default_marker();
+
+        assert_eq!(
+            prompt_with_media_markers("Describe this.", 2),
+            format!("{marker} {marker}\nDescribe this.")
+        );
+    }
+
+    #[test]
+    fn messages_with_media_markers_updates_last_user_message() {
+        let marker = MtmdContext::default_marker();
+        let messages = vec![
+            ChatMessage::new("system", "system"),
+            ChatMessage::new("user", "first"),
+            ChatMessage::new("assistant", "ok"),
+            ChatMessage::new("user", "second"),
+        ];
+
+        let messages = messages_with_media_markers(&messages, 1);
+
+        assert_eq!(messages[0].content, "system");
+        assert_eq!(messages[1].content, "first");
+        assert_eq!(messages[2].content, "ok");
+        assert_eq!(messages[3].content, format!("{marker}\nsecond"));
     }
 }
