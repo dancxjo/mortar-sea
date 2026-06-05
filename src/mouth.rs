@@ -108,10 +108,7 @@ impl VoiceMouthGate {
             }
             VoiceStreamEvent::SayText(text) => {
                 if self.pending_say.is_some() {
-                    if !self.pending_text.is_empty() {
-                        self.pending_text.push(' ');
-                    }
-                    self.pending_text.push_str(text.text.trim());
+                    self.pending_text.push_str(&text.text);
                 }
                 Vec::new()
             }
@@ -435,7 +432,11 @@ fn style_description(group: &BreathGroup) -> String {
     if let Some(raw) = group.raw_attributes.as_object() {
         for (key, value) in raw {
             if !matches!(key.as_str(), "boundary" | "tone" | "pace" | "act") {
-                parts.push(format!("{key}={}", value.as_str().unwrap_or_default()));
+                let value = value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                parts.push(format!("{key}={value}"));
             }
         }
     }
