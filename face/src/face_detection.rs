@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use image::GenericImageView;
 use psyche::Provenance;
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::app::{AppState, MAX_RECORDED_FACE_CROPS};
@@ -39,13 +39,29 @@ struct DetectedFaceCrop {
 
 impl FaceDetector {
     pub(crate) fn new(paths: mortar_sea::models::FaceModelPaths) -> Result<Self> {
-        let analyzer = face_id::analyzer::FaceAnalyzer::builder(
-            paths.detector,
-            paths.recognizer,
-            paths.attributes,
-        )
-        .build()
-        .context("failed to initialize face analyzer from local models")?;
+        info!(model = %paths.detector.display(), "loading face detector ONNX session");
+        let detector = face_id::detector::ScrfdDetector::builder(paths.detector)
+            .build()
+            .context("failed to initialize face detector from local model")?;
+        info!("face detector ONNX session ready");
+
+        info!(model = %paths.recognizer.display(), "loading face recognizer ONNX session");
+        let embedder = face_id::embedder::ArcFaceEmbedder::builder(paths.recognizer)
+            .build()
+            .context("failed to initialize face recognizer from local model")?;
+        info!("face recognizer ONNX session ready");
+
+        info!(model = %paths.attributes.display(), "loading face attributes ONNX session");
+        let gender_age = face_id::gender_age::GenderAgeEstimator::builder(paths.attributes)
+            .build()
+            .context("failed to initialize face attributes from local model")?;
+        info!("face attributes ONNX session ready");
+
+        let analyzer = face_id::analyzer::FaceAnalyzer {
+            detector: Mutex::new(detector),
+            embedder: Mutex::new(embedder),
+            gender_age: Mutex::new(gender_age),
+        };
         Ok(Self {
             analyzer: Arc::new(Mutex::new(analyzer)),
         })
