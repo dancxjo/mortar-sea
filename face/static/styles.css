@@ -220,15 +220,56 @@ pre {
   background: rgba(110, 208, 166, 0.16);
 }
 
-.emoji-face {
+.face-avatar {
+  position: relative;
   display: grid;
   place-items: center;
   width: min(170px, 52%);
   aspect-ratio: 1;
   justify-self: end;
+  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.38));
+}
+
+.emoji-face {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
   line-height: 1;
   font-size: clamp(5.2rem, 8vw, 9rem);
-  filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.38));
+}
+
+.face-mouth {
+  position: absolute;
+  left: 50%;
+  bottom: 24%;
+  width: 34%;
+  height: 8%;
+  border: 3px solid rgba(16, 32, 24, 0.92);
+  border-top: 0;
+  border-radius: 0 0 999px 999px;
+  background: rgba(16, 32, 24, 0.18);
+  transform: translateX(-50%) scaleY(0.42);
+  transform-origin: 50% 0;
+  transition: transform 90ms ease, height 90ms ease, background 90ms ease;
+}
+
+.face-avatar.speaking .face-mouth {
+  height: 18%;
+  background: rgba(16, 32, 24, 0.82);
+  transform: translateX(-50%) scaleY(1);
+  animation: mouth-speaking 180ms ease-in-out infinite alternate;
+}
+
+@keyframes mouth-speaking {
+  from {
+    height: 10%;
+    transform: translateX(-50%) scaleY(0.7);
+  }
+  to {
+    height: 20%;
+    transform: translateX(-50%) scaleY(1);
+  }
 }
 
 .panel {
@@ -577,7 +618,7 @@ dd {
     bottom: -15px;
   }
 
-  .emoji-face {
+  .face-avatar {
     width: min(170px, 55vw);
     justify-self: end;
   }

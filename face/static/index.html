@@ -42,7 +42,14 @@
                 <pre class="response-stream" x-text="experienceResponse || 'Waiting for streamed response…'"></pre>
               </details>
             </div>
-            <div class="emoji-face" x-text="faceEmoji" x-bind:aria-label="`face emoji ${faceEmoji}`"></div>
+            <div
+              class="face-avatar"
+              x-bind:class="{ speaking: voiceMouthOpen }"
+              x-bind:aria-label="`face emoji ${faceEmoji}`"
+            >
+              <div class="emoji-face" x-text="faceEmoji"></div>
+              <div class="face-mouth" aria-hidden="true"></div>
+            </div>
           </div>
         </div>
 

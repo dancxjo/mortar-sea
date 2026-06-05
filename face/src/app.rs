@@ -5,17 +5,19 @@ use std::{
     sync::{Arc, RwLock, atomic::AtomicBool},
 };
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::{HeaderName, StatusCode, header},
     response::{Html, IntoResponse},
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, trace, warn};
@@ -29,7 +31,7 @@ use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
     AckMessage, AudioSentenceClipRecord, ErrorMessage, ExperienceRecord, RawFaceCrop,
     RawVisionFrame, RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord,
-    VoiceObservation,
+    VoiceMouthEvent, VoiceObservation,
 };
 use crate::vision;
 use crate::voice;
@@ -66,6 +68,7 @@ pub(crate) struct AppState {
     pub(crate) vision_active: Arc<AtomicBool>,
     pub(crate) vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
+    pub(crate) voice_mouth_events: broadcast::Sender<VoiceMouthEvent>,
     pub(crate) realtime_experience_active: Arc<AtomicBool>,
     pub(crate) realtime_experience_pending: Arc<AtomicBool>,
     pub(crate) asr_backend: Option<crate::asr::AsrBackend>,
@@ -83,7 +86,9 @@ pub async fn run() -> anyhow::Result<()> {
         attributes = %models.face.attributes.display(),
         "face models are available"
     );
+    info!(voice = %models.piper_voice.display(), "selected Piper voice ONNX model is available");
     let realtime_experience_events = broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0;
+    let voice_mouth_events = broadcast::channel(REALTIME_EXPERIENCE_WS_CAPACITY).0;
     let llm_scheduler = LlmScheduler::start(
         models.llm.clone(),
         models.llm_projector.clone(),
@@ -135,6 +140,7 @@ pub async fn run() -> anyhow::Result<()> {
         vision_active: Arc::new(AtomicBool::new(false)),
         vision_last_sampled: Arc::new(RwLock::new(None)),
         realtime_experience_events,
+        voice_mouth_events,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
         realtime_experience_pending: Arc::new(AtomicBool::new(false)),
         asr_backend,
@@ -146,6 +152,10 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/api/sensations", get(recent_sensations))
         .route("/api/asr-sentences", get(recent_asr_sentences))
+        .route(
+            "/api/voice/piper-wav",
+            post(synthesize_piper_onnx_voice_wav),
+        )
         .route("/ws/vision", get(vision_ws))
         .route("/ws/location", get(location_ws))
         .route("/ws/asr", get(asr_ws))
@@ -205,6 +215,72 @@ async fn recent_asr_sentences(State(state): State<AppState>) -> Json<Vec<AudioSe
         .cloned()
         .collect();
     Json(records)
+}
+
+#[derive(Debug, Deserialize)]
+struct VoiceSynthesisRequest {
+    text: String,
+    #[serde(default)]
+    variant: Option<String>,
+}
+
+async fn synthesize_piper_onnx_voice_wav(
+    Json(request): Json<VoiceSynthesisRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let text = request.text.trim().to_string();
+    if text.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "text must not be empty".to_string(),
+        ));
+    }
+    let variant = request.variant.unwrap_or_else(|| "en-US".to_string());
+
+    let wav = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let output_path =
+            PathBuf::from("target/face-mouth").join(format!("voice-{}.wav", Uuid::new_v4()));
+        let artifact =
+            mortar_sea::speak::synthesize_text_with_piper_to_wav(text, variant, &output_path)?;
+        let bytes = std::fs::read(&artifact.path)
+            .map_err(anyhow::Error::from)
+            .with_context(|| {
+                format!("failed to read synthesized WAV {}", artifact.path.display())
+            })?;
+        Ok::<_, anyhow::Error>((bytes, artifact))
+    })
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Piper synthesis task failed: {error}"),
+        )
+    })?
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Piper ONNX voice synthesis failed: {error:#}"),
+        )
+    })?;
+
+    let (bytes, artifact) = wav;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "audio/wav".to_string()),
+            (
+                HeaderName::from_static("x-sample-rate-hz"),
+                artifact.sample_rate_hz.to_string(),
+            ),
+            (
+                HeaderName::from_static("x-samples"),
+                artifact.samples.to_string(),
+            ),
+            (
+                HeaderName::from_static("x-duration-ms"),
+                artifact.duration_ms().to_string(),
+            ),
+        ],
+        bytes,
+    ))
 }
 
 async fn vision_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -388,6 +464,11 @@ async fn handle_realtime_experience_socket(socket: WebSocket, state: AppState) {
             message = receiver.next() => {
                 match message {
                     Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(event) = serde_json::from_str::<VoiceMouthEvent>(&text) {
+                            voice::accept_mouth_event(&state, event);
+                        }
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => {
                         warn!(%err, "real-time experience websocket receive error");

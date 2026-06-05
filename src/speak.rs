@@ -44,14 +44,14 @@ pub enum SpeakBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SpeechSynthesisArtifact {
+pub struct SpeechSynthesisArtifact {
     pub path: PathBuf,
     pub sample_rate_hz: u32,
     pub samples: usize,
 }
 
 impl SpeechSynthesisArtifact {
-    pub(crate) fn duration_ms(&self) -> u64 {
+    pub fn duration_ms(&self) -> u64 {
         if self.sample_rate_hz == 0 {
             return 0;
         }
@@ -111,6 +111,24 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     println!("wav: {}", artifact.path.display());
 
     Ok(())
+}
+
+pub fn synthesize_text_with_piper_to_wav(
+    text: impl Into<String>,
+    variant: impl Into<String>,
+    output_path: &Path,
+) -> Result<SpeechSynthesisArtifact> {
+    // Uses Piper voice ONNX assets through Mortar's backend; never invokes the Piper binary.
+    let phonemicized = EnglishPhonemicizer
+        .phonemicize(&PhonemicizeRequest {
+            text: text.into(),
+            variant: VariantId(variant.into()),
+            style: None,
+        })
+        .context("failed to phonemicize text into a speech plan")?;
+    let plan = utterance_plan_from_phonemicized(&phonemicized);
+    let voice_model = ensure_piper_voice_model_available()?;
+    synthesize_plan_with_piper_to_wav(plan, &voice_model, output_path)
 }
 
 fn synthesize_plan_with_piper_to_wav(

@@ -55,6 +55,32 @@ pub(crate) struct AudioClipMessage {
     pub(crate) data: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum VoiceMouthEvent {
+    VoiceSpeechStarted {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+    },
+    VoiceSpeechFinished {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    VoiceSpeechInterrupted {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct SensationRecord {
     pub(crate) id: Uuid,
@@ -192,6 +218,41 @@ pub(crate) enum RealTimeExperienceEvent {
     VoiceObservation {
         generation_id: Uuid,
         observation: VoiceObservation,
+    },
+    VoiceSpeechDraft {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emoji: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boundary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pace: Option<String>,
+    },
+    VoiceSpeechStarted {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+    },
+    VoiceSpeechFinished {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+    VoiceSpeechInterrupted {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+        reason: String,
     },
     FaceEmoji {
         generation_id: Uuid,

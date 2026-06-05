@@ -49,6 +49,11 @@ window.faceApp = function faceApp() {
     voiceResponse: '',
     voiceHasTokens: false,
     voiceStatus: 'waiting',
+    voiceAudio: null,
+    voiceAudioUrl: null,
+    voiceCurrentDraft: null,
+    voiceUtteranceStartedAt: null,
+    voiceMouthOpen: false,
     llmJobs: [],
     selectedLlmJobId: null,
     mime: 'image/jpeg',
@@ -99,6 +104,7 @@ window.faceApp = function faceApp() {
     stop() {
       this.running = false;
       window.clearTimeout(this.timer);
+      this.stopVoiceMouth('face stopped');
       this.disconnectVision();
       this.stopLocation();
       this.stopAsr();
@@ -107,6 +113,26 @@ window.faceApp = function faceApp() {
         this.stream = null;
       }
       this.cameraMessage = 'Camera idle';
+    },
+
+    stopVoiceMouth(reason) {
+      if (this.voiceCurrentDraft) {
+        this.sendVoiceMouthEvent('voice_speech_interrupted', this.voiceCurrentDraft, { reason });
+      }
+      if (this.voiceAudio) {
+        this.voiceAudio.pause();
+        this.voiceAudio.src = '';
+        this.voiceAudio = null;
+      }
+      if (this.voiceAudioUrl) {
+        URL.revokeObjectURL(this.voiceAudioUrl);
+        this.voiceAudioUrl = null;
+      }
+      if (this.voiceCurrentDraft) {
+        this.voiceCurrentDraft = null;
+        this.voiceUtteranceStartedAt = null;
+      }
+      this.voiceMouthOpen = false;
     },
 
     connectRealtimeExperience() {
@@ -149,7 +175,29 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_response_done') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
-          this.voiceStatus = 'waiting';
+          if (this.voiceStatus !== 'speaking') {
+            this.voiceStatus = 'waiting';
+          }
+          return;
+        }
+        if (message.type === 'voice_speech_draft') {
+          this.activeVoiceGenerationId = message.generation_id;
+          this.speakVoiceDraft(message);
+          return;
+        }
+        if (message.type === 'voice_speech_started') {
+          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceStatus = 'speaking';
+          return;
+        }
+        if (message.type === 'voice_speech_finished') {
+          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceStatus = 'thinking';
+          return;
+        }
+        if (message.type === 'voice_speech_interrupted') {
+          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceStatus = 'thinking';
           return;
         }
         if (message.type === 'voice_observation') {
@@ -207,6 +255,108 @@ window.faceApp = function faceApp() {
         if (!stream) return;
         stream.scrollTop = stream.scrollHeight;
       });
+    },
+
+    async speakVoiceDraft(draft) {
+      this.stopVoiceMouth('superseded by newer voice draft');
+      this.voiceCurrentDraft = draft;
+      this.voiceStatus = 'synthesizing';
+      this.voiceMouthOpen = false;
+
+      let response;
+      try {
+        response = await fetch('/api/voice/piper-wav', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            text: draft.text || '',
+            variant: 'en-US',
+          }),
+        });
+      } catch (error) {
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
+          reason: error.message || 'Piper ONNX voice request failed',
+        });
+        this.clearFinishedVoiceDraft(draft);
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await response.text().catch(() => '');
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
+          reason: message || `Piper ONNX voice request returned ${response.status}`,
+        });
+        this.clearFinishedVoiceDraft(draft);
+        return;
+      }
+
+      if (this.voiceCurrentDraft !== draft) return;
+
+      const blob = await response.blob();
+      const audioUrl = URL.createObjectURL(blob);
+      const audio = new Audio(audioUrl);
+      this.voiceAudio = audio;
+      this.voiceAudioUrl = audioUrl;
+
+      audio.onplay = () => {
+        this.voiceUtteranceStartedAt = performance.now();
+        this.voiceMouthOpen = true;
+        this.voiceStatus = 'speaking';
+        this.sendVoiceMouthEvent('voice_speech_started', draft);
+      };
+      audio.onended = () => {
+        const durationMs = this.voiceUtteranceStartedAt
+          ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
+          : null;
+        this.voiceMouthOpen = false;
+        this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: durationMs });
+        this.clearFinishedVoiceDraft(draft);
+      };
+      audio.onerror = () => {
+        this.voiceMouthOpen = false;
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
+          reason: 'Piper WAV playback failed',
+        });
+        this.clearFinishedVoiceDraft(draft);
+      };
+
+      try {
+        await audio.play();
+      } catch (error) {
+        this.voiceMouthOpen = false;
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
+          reason: error.message || 'Piper WAV playback was blocked',
+        });
+        this.clearFinishedVoiceDraft(draft);
+      }
+    },
+
+    clearFinishedVoiceDraft(draft) {
+      if (this.voiceCurrentDraft !== draft) return;
+      if (this.voiceAudio) {
+        this.voiceAudio.pause();
+        this.voiceAudio.src = '';
+        this.voiceAudio = null;
+      }
+      if (this.voiceAudioUrl) {
+        URL.revokeObjectURL(this.voiceAudioUrl);
+        this.voiceAudioUrl = null;
+      }
+      this.voiceCurrentDraft = null;
+      this.voiceUtteranceStartedAt = null;
+      this.voiceMouthOpen = false;
+    },
+
+    sendVoiceMouthEvent(type, draft, extra = {}) {
+      if (!this.experienceSocket || this.experienceSocket.readyState !== WebSocket.OPEN) return;
+      this.experienceSocket.send(JSON.stringify({
+        type,
+        utterance_id: draft.utterance_id,
+        generation_id: draft.generation_id,
+        observed_at: new Date().toISOString(),
+        text: draft.text || '',
+        ...extra,
+      }));
     },
 
     isLlmJobEvent(type) {

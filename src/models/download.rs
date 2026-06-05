@@ -30,6 +30,7 @@ pub struct RuntimeModelPaths {
     pub llm: PathBuf,
     pub llm_projector: Option<PathBuf>,
     pub face: FaceModelPaths,
+    pub piper_voice: PathBuf,
 }
 
 pub fn ensure_selected_llm_available() -> Result<PathBuf> {
@@ -116,6 +117,7 @@ pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
         llm: ensure_selected_llm_available()?,
         llm_projector: ensure_selected_llm_projector_available()?,
         face: ensure_face_models_available()?,
+        piper_voice: ensure_piper_voice_model_available()?,
     })
 }
 

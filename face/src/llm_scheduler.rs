@@ -1,6 +1,10 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -89,12 +93,14 @@ const VOICE_PUNCTUATION_PAUSE: Duration = Duration::from_millis(90);
 #[derive(Debug, Clone)]
 pub(crate) struct LlmStreamControl {
     appends: Arc<Mutex<VecDeque<String>>>,
+    paused: Arc<AtomicBool>,
 }
 
 impl LlmStreamControl {
     pub(crate) fn new() -> Self {
         Self {
             appends: Arc::new(Mutex::new(VecDeque::new())),
+            paused: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -107,6 +113,18 @@ impl LlmStreamControl {
             .lock()
             .expect("LLM stream append queue lock")
             .push_back(text);
+    }
+
+    pub(crate) fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 }
 
@@ -687,6 +705,37 @@ fn run_generation(
 
     loop {
         let mut made_progress = false;
+        if let Some(control) = &control {
+            if control.is_paused() {
+                let append_result = append_control_prompts(
+                    engine,
+                    generation,
+                    id,
+                    kind,
+                    started_at,
+                    &mut generated,
+                    &mut token_events,
+                    token_sink.as_mut(),
+                    events,
+                    control,
+                )?;
+                if let Some(generated) = append_result.completed {
+                    return Ok(generated);
+                }
+                made_progress |= append_result.made_progress;
+                if made_progress {
+                    trace!(
+                        job_id = %id,
+                        job_kind = kind.as_str(),
+                        response_chars = generated.chars().count(),
+                        "LLM job accepted live prompt input while paused"
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        }
+
         let llm_events = match engine.poll(generation) {
             Ok(events) => events,
             Err(err) => {
@@ -716,39 +765,22 @@ fn run_generation(
         }
 
         if let Some(control) = &control {
-            let appends = {
-                let mut queued = control
-                    .appends
-                    .lock()
-                    .expect("LLM stream append queue lock");
-                queued.drain(..).collect::<Vec<_>>()
-            };
-            made_progress = !appends.is_empty();
-            for append in appends {
-                if let Err(err) = engine.append_prompt(generation, append) {
-                    if let Some(generated) = complete_if_generation_finished(
-                        engine,
-                        generation,
-                        id,
-                        kind,
-                        started_at,
-                        &mut generated,
-                        &mut token_events,
-                        token_sink.as_mut(),
-                        events,
-                    )? {
-                        return Ok(generated);
-                    }
-                    warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
-                    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
-                        job_id: id,
-                        job_kind: kind.as_str().to_string(),
-                        observed_at: chrono::Utc::now(),
-                        error: err.to_string(),
-                    });
-                    return Err(err).context("failed to append live prompt input");
-                }
+            let append_result = append_control_prompts(
+                engine,
+                generation,
+                id,
+                kind,
+                started_at,
+                &mut generated,
+                &mut token_events,
+                token_sink.as_mut(),
+                events,
+                control,
+            )?;
+            if let Some(generated) = append_result.completed {
+                return Ok(generated);
             }
+            made_progress |= append_result.made_progress;
         }
 
         if made_progress {
@@ -762,6 +794,73 @@ fn run_generation(
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+struct ControlAppendResult {
+    made_progress: bool,
+    completed: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_control_prompts(
+    engine: &mut impl LlmEngine,
+    generation: psyche::GenerationId,
+    id: Uuid,
+    kind: LlmJobKind,
+    started_at: Instant,
+    generated: &mut String,
+    token_events: &mut usize,
+    mut token_sink: Option<&mut TokenSink>,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+    control: &LlmStreamControl,
+) -> Result<ControlAppendResult> {
+    let appends = {
+        let mut queued = control
+            .appends
+            .lock()
+            .expect("LLM stream append queue lock");
+        queued.drain(..).collect::<Vec<_>>()
+    };
+    if appends.is_empty() {
+        return Ok(ControlAppendResult {
+            made_progress: false,
+            completed: None,
+        });
+    }
+
+    for append in appends {
+        if let Err(err) = engine.append_prompt(generation, append) {
+            if let Some(generated) = complete_if_generation_finished(
+                engine,
+                generation,
+                id,
+                kind,
+                started_at,
+                generated,
+                token_events,
+                token_sink.as_deref_mut(),
+                events,
+            )? {
+                return Ok(ControlAppendResult {
+                    made_progress: true,
+                    completed: Some(generated),
+                });
+            }
+            warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
+            let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                job_id: id,
+                job_kind: kind.as_str().to_string(),
+                observed_at: chrono::Utc::now(),
+                error: err.to_string(),
+            });
+            return Err(err).context("failed to append live prompt input");
+        }
+    }
+
+    Ok(ControlAppendResult {
+        made_progress: true,
+        completed: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
