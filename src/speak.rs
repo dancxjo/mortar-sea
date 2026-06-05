@@ -6,21 +6,23 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use speech::{
     EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
-    Phonemicizer, ProsodyTrack, Spec, UtteranceId, UtterancePlan, VariantId, phone_display_symbol,
-    phoneme_display_symbol,
+    Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec,
+    UtteranceId, UtterancePlan, VariantId, phone_display_symbol, phoneme_display_symbol,
 };
 use styletts2::{
-    MockStyleTts2Backend, StyleTts2Backend, StyleTts2SymbolMapper, StyleTts2SynthesisRequest,
-    styletts2_en_us_symbol_set,
+    BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
+    StyleTts2PlanOptions, StyleTts2SynthesisRequest, prepare_styletts2_plan,
+    styletts2_en_us_symbol_set, validate_styletts2_plan,
 };
 
 #[cfg(feature = "styletts2-onnx")]
 use styletts2::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend};
 
 use crate::models::{
-    ensure_piper_voice_model_available, ensure_styletts2_default_reference_audio_available,
-    ensure_styletts2_model_available,
+    ensure_piper_voice_model_available, ensure_styletts2_model_available,
 };
+#[cfg(feature = "styletts2-onnx")]
+use crate::models::ensure_styletts2_default_reference_audio_available;
 use crate::piper::{
     PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
 };
@@ -51,6 +53,14 @@ pub struct SpeakCommand {
     pub embedding_scale: f64,
     #[arg(long, default_value_t = 0)]
     pub style_seed: u64,
+    #[arg(long)]
+    pub debug_pronunciation: bool,
+    #[arg(long, default_value_t = DEFAULT_MAX_TTS_SYMBOLS)]
+    pub max_tts_symbols: usize,
+    #[arg(long)]
+    pub no_tts_chunking: bool,
+    #[arg(long)]
+    pub fail_on_guessed_pronunciation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -86,29 +96,65 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         })
         .context("failed to phonemicize text into a speech plan")?;
     let plan = utterance_plan_from_phonemicized(&phonemicized);
+    if command.fail_on_guessed_pronunciation
+        && phonemicized.warnings.iter().any(is_guessed_pronunciation)
+    {
+        anyhow::bail!(
+            "guessed pronunciation encountered: {}",
+            phonemicized
+                .warnings
+                .iter()
+                .filter(|warning| is_guessed_pronunciation(warning))
+                .map(|warning| warning.token.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     let backend_label = match command.backend {
         SpeakBackend::Mock => "mock",
         SpeakBackend::Styletts2 => "styletts2",
         SpeakBackend::Piper => "piper",
     };
+    let styletts2_plan = match command.backend {
+        SpeakBackend::Mock | SpeakBackend::Styletts2 => Some(
+            prepare_styletts2_plan(&plan, &styletts2_en_us_symbol_set(), styletts2_options(&command))
+                .context("failed to prepare StyleTTS2 synthesis plan")?,
+        ),
+        SpeakBackend::Piper => None,
+    };
     let backend_symbols = match command.backend {
-        SpeakBackend::Mock | SpeakBackend::Styletts2 => styletts2_en_us_symbol_set()
-            .lower(&plan)
-            .context("failed to lower speech spine tokens into StyleTTS2 symbols")?
-            .tokens
+        SpeakBackend::Mock | SpeakBackend::Styletts2 => styletts2_plan
+            .as_ref()
+            .expect("StyleTTS2 plan should be prepared")
+            .chunks
             .iter()
+            .flat_map(|chunk| &chunk.symbols)
             .map(|token| token.symbol.clone())
             .collect::<Vec<_>>(),
         SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols,
     };
     let artifact = match command.backend {
         SpeakBackend::Mock => {
-            synthesize_plan_with_mock_to_wav(plan, &command.output, command.sample_rate_hz)?
+            synthesize_backend_plan_with_mock_to_wav(
+                styletts2_plan
+                    .clone()
+                    .expect("StyleTTS2 plan should be prepared"),
+                &command.output,
+                command.sample_rate_hz,
+            )?
         }
         SpeakBackend::Styletts2 => {
             let primary_model = ensure_styletts2_model_available()?;
-            synthesize_plan_with_styletts2_to_wav(plan, &primary_model, &command.output, &command)?
+            synthesize_backend_plan_with_styletts2_to_wav(
+                styletts2_plan
+                    .clone()
+                    .expect("StyleTTS2 plan should be prepared"),
+                &plan,
+                &primary_model,
+                &command.output,
+                &command,
+            )?
         }
         SpeakBackend::Piper => {
             let voice_model = ensure_piper_voice_model_available()?;
@@ -121,8 +167,35 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     println!("variant: {}", phonemicized.variant.0);
     println!("text: {}", phonemicized.text);
     println!("phonemes: {}", format_phonemes(&phonemicized));
+    if command.debug_pronunciation {
+        println!(
+            "phonemes_debug: {}",
+            format_phonemes_with_features(&phonemicized)
+        );
+    }
     println!("phones: {}", format_phones(&phonemicized));
     println!("backend_symbols: {}", backend_symbols.join(" "));
+    if let Some(plan) = &styletts2_plan {
+        println!("chunks:");
+        for (index, chunk) in plan.chunks.iter().enumerate() {
+            println!(
+                "  {}: {}",
+                index + 1,
+                chunk
+                    .symbols
+                    .iter()
+                    .map(|token| token.symbol.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+    }
+    if !phonemicized.warnings.is_empty() {
+        println!("warnings:");
+        for warning in &phonemicized.warnings {
+            println!("  {}", format_warning(warning));
+        }
+    }
     println!("sample_rate_hz: {}", artifact.sample_rate_hz);
     println!("samples: {}", artifact.samples);
     println!("wav: {}", artifact.path.display());
@@ -180,6 +253,7 @@ pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> Ut
         intended_morphemes: Vec::new(),
         intended_phonemes: output.phonemes.clone(),
         target_phones: output.phones.clone(),
+        boundaries: output.boundaries.clone(),
         target_prosody: ProsodyTrack::default(),
         target_acoustics: Vec::new(),
         style: None,
@@ -191,16 +265,52 @@ pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> Ut
     }
 }
 
+fn styletts2_options(command: &SpeakCommand) -> StyleTts2PlanOptions {
+    StyleTts2PlanOptions {
+        max_symbols_per_chunk: command.max_tts_symbols,
+        chunking_enabled: !command.no_tts_chunking,
+    }
+}
+
+fn is_guessed_pronunciation(warning: &PronunciationWarning) -> bool {
+    matches!(
+        warning.kind,
+        PronunciationWarningKind::GuessedWord
+            | PronunciationWarningKind::MixedAlphaNumeric
+            | PronunciationWarningKind::UnknownPronunciation
+    )
+}
+
+fn format_warning(warning: &PronunciationWarning) -> String {
+    if is_guessed_pronunciation(warning) {
+        format!("guessed pronunciation: {}", warning.token)
+    } else {
+        warning.message.clone()
+    }
+}
+
 pub(crate) fn synthesize_plan_with_mock_to_wav(
     plan: UtterancePlan,
     output_path: &Path,
     sample_rate_hz: u32,
 ) -> Result<SpeechSynthesisArtifact> {
-    styletts2_en_us_symbol_set()
-        .lower(&plan)
-        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &styletts2_en_us_symbol_set(),
+        StyleTts2PlanOptions::default(),
+    )
+    .context("failed to prepare StyleTTS2 synthesis plan")?;
+    synthesize_backend_plan_with_mock_to_wav(backend_plan, output_path, sample_rate_hz)
+}
 
-    let request = StyleTts2SynthesisRequest::from_plan(plan);
+fn synthesize_backend_plan_with_mock_to_wav(
+    backend_plan: BackendSynthesisPlan,
+    output_path: &Path,
+    sample_rate_hz: u32,
+) -> Result<SpeechSynthesisArtifact> {
+    validate_styletts2_plan(&backend_plan).context("invalid StyleTTS2 synthesis plan")?;
+    let request =
+        StyleTts2SynthesisRequest::from_backend_plan(backend_plan, None, None, ProsodyTrack::default());
     let mut backend = MockStyleTts2Backend::new(sample_rate_hz);
     let output = backend
         .synthesize(&request)
@@ -217,16 +327,13 @@ pub(crate) fn synthesize_plan_with_mock_to_wav(
 }
 
 #[cfg(feature = "styletts2-onnx")]
-fn synthesize_plan_with_styletts2_to_wav(
-    plan: UtterancePlan,
+fn synthesize_backend_plan_with_styletts2_to_wav(
+    backend_plan: BackendSynthesisPlan,
+    plan: &UtterancePlan,
     primary_model_path: &Path,
     output_path: &Path,
     command: &SpeakCommand,
 ) -> Result<SpeechSynthesisArtifact> {
-    styletts2_en_us_symbol_set()
-        .lower(&plan)
-        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
-
     let model_dir = primary_model_path
         .parent()
         .context("StyleTTS2 primary model path has no parent directory")?;
@@ -240,7 +347,12 @@ fn synthesize_plan_with_styletts2_to_wav(
             seed: command.style_seed,
         })
         .context("invalid StyleTTS2 diffusion options")?;
-    let mut request = StyleTts2SynthesisRequest::from_plan(plan);
+    let mut request = StyleTts2SynthesisRequest::from_backend_plan(
+        backend_plan,
+        plan.speaker.clone(),
+        plan.style.clone(),
+        plan.target_prosody.clone(),
+    );
     let default_references = ensure_styletts2_default_reference_audio_available()
         .context("failed to prepare default StyleTTS2 reference audio")?;
     let voice_reference = command
@@ -270,8 +382,9 @@ fn synthesize_plan_with_styletts2_to_wav(
 }
 
 #[cfg(not(feature = "styletts2-onnx"))]
-fn synthesize_plan_with_styletts2_to_wav(
-    _plan: UtterancePlan,
+fn synthesize_backend_plan_with_styletts2_to_wav(
+    _backend_plan: BackendSynthesisPlan,
+    _plan: &UtterancePlan,
     _primary_model_path: &Path,
     _output_path: &Path,
     _command: &SpeakCommand,
@@ -298,11 +411,64 @@ fn format_phones(output: &PhonemicizeOutput) -> String {
         .phones
         .iter()
         .filter_map(|token| match &token.phone {
-            Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+            Spec::Known(id) if id.as_str() != "boundary.word" => {
+                Some(phone_display_symbol(id).to_string())
+            }
             _ => None,
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn format_phonemes_with_features(output: &PhonemicizeOutput) -> String {
+    output
+        .phonemes
+        .iter()
+        .filter_map(|token| match &token.phoneme {
+            Spec::Known(id) => {
+                let symbol = phoneme_display_symbol(id);
+                let stress = token_feature_category(token, "stress");
+                let reduced = token_feature_bool(token, "reduced_vowel");
+                let mut annotations = Vec::new();
+                if let Some(stress) = stress {
+                    annotations.push(stress.to_string());
+                }
+                if reduced == Some(true) {
+                    annotations.push("reduced".into());
+                }
+                if annotations.is_empty() {
+                    Some(symbol.to_string())
+                } else {
+                    Some(format!("{symbol}({})", annotations.join(",")))
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn token_feature_category<'a>(token: &'a speech::PhonemeToken, name: &str) -> Option<&'a str> {
+    let value = token
+        .features
+        .values
+        .get(&speech::FeatureId(format!("phonology.{name}")))?;
+    match value {
+        Spec::Known(speech::FeatureValue::Category(value)) => Some(value),
+        Spec::Known(speech::FeatureValue::Text(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn token_feature_bool(token: &speech::PhonemeToken, name: &str) -> Option<bool> {
+    let value = token
+        .features
+        .values
+        .get(&speech::FeatureId(format!("phonology.{name}")))?;
+    match value {
+        Spec::Known(speech::FeatureValue::Bool(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn write_wav_mono_f32(path: &Path, sample_rate_hz: u32, samples: &[f32]) -> Result<()> {
@@ -360,18 +526,22 @@ mod tests {
             })
             .expect("phonemicize");
         let plan = utterance_plan_from_phonemicized(&phonemicized);
-        let lowered = styletts2_en_us_symbol_set()
-            .lower(&plan)
-            .expect("lower symbols");
-        let symbols = lowered
-            .tokens
+        let backend_plan = prepare_styletts2_plan(
+            &plan,
+            &styletts2_en_us_symbol_set(),
+            StyleTts2PlanOptions::default(),
+        )
+        .expect("prepare plan");
+        let symbols = backend_plan
+            .chunks
             .iter()
+            .flat_map(|chunk| &chunk.symbols)
             .map(|token| token.symbol.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(
             symbols,
-            ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D", "."]
+            ["HH", "ə", "L", "OW", "|", "W", "ɝ", "L", "D", "."]
         );
         assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
     }
@@ -386,20 +556,24 @@ mod tests {
             })
             .expect("phonemicize");
         let plan = utterance_plan_from_phonemicized(&phonemicized);
-        let lowered = styletts2_en_us_symbol_set()
-            .lower(&plan)
-            .expect("lower symbols");
-        let symbols = lowered
-            .tokens
+        let backend_plan = prepare_styletts2_plan(
+            &plan,
+            &styletts2_en_us_symbol_set(),
+            StyleTts2PlanOptions::default(),
+        )
+        .expect("prepare plan");
+        let symbols = backend_plan
+            .chunks
             .iter()
+            .flat_map(|chunk| &chunk.symbols)
             .map(|token| token.symbol.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(
             symbols,
             [
-                "HH", "AH", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "AH",
-                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "AH",
+                "HH", "ə", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "ə",
+                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "ə",
                 "L", "OW", "|", "M", "AY", "|", "R", "AE", "G", "T", "AY", "M", "|", "G", "AE",
                 "L", "."
             ]

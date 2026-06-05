@@ -1,11 +1,13 @@
 use speech::{
-    EvidenceProvenance, EvidenceSource, FeatureBundle, PhoneId, PhoneToken, PhonemeId,
-    PhonemeToken, ProsodyTrack, SpeakerId, Spec, StyleRef, StyleSource, UtteranceId, UtterancePlan,
-    VariantId,
+    BoundaryKind, EvidenceProvenance, EvidenceSource, FeatureBundle, PauseKind, PhoneId,
+    PhoneToken, PhonemeId, PhonemeToken, ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken,
+    StyleRef, StyleSource, TerminalPunctuation, TextSpan, UtteranceId, UtterancePlan, VariantId,
 };
 use styletts2::{
-    MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config, StyleTts2SymbolSource,
-    StyleTts2SynthesisRequest, SymbolLoweringError, SymbolSet,
+    BackendSynthesisPlan, MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config,
+    StyleTts2PlanOptions, StyleTts2SymbolSource, StyleTts2SymbolToken, StyleTts2SynthesisRequest,
+    SynthesisChunk, SymbolLoweringError, SymbolSet, prepare_styletts2_plan,
+    styletts2_en_us_symbol_set, validate_styletts2_plan,
 };
 
 #[test]
@@ -84,7 +86,7 @@ fn lowers_phoneme_and_phone_tokens_without_language_hardcoding() {
 }
 
 #[test]
-fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
+fn lower_plan_tokens_preserves_typed_punctuation_at_word_boundaries() {
     let symbol_set =
         SymbolSet::new(["alpha", "|", ".", "!"]).with_alias("variant.phone.a", "alpha");
     let plan = plan(
@@ -95,6 +97,10 @@ fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
             phone_token("variant.phone.a"),
             phone_token("boundary.word"),
             phone_token("variant.phone.a"),
+        ],
+        vec![
+            terminal_boundary(0, TerminalPunctuation::Exclamation),
+            terminal_boundary(1, TerminalPunctuation::Period),
         ],
         Some("a! a".into()),
     );
@@ -118,9 +124,9 @@ fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
         sources,
         [
             StyleTts2SymbolSource::Phone,
-            StyleTts2SymbolSource::TextPunctuation,
+            StyleTts2SymbolSource::BoundaryPunctuation,
             StyleTts2SymbolSource::Phone,
-            StyleTts2SymbolSource::TextPunctuation
+            StyleTts2SymbolSource::BoundaryPunctuation
         ]
     );
 }
@@ -142,6 +148,12 @@ fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
             phone_token("variant.phone.a"),
             phone_token("boundary.word"),
             phone_token("variant.phone.a"),
+        ],
+        vec![
+            word_boundary(0),
+            word_boundary(1),
+            comma_boundary(2),
+            terminal_boundary(3, TerminalPunctuation::Period),
         ],
         Some("a-b c, d.".into()),
     );
@@ -169,6 +181,7 @@ fn lower_plan_tokens_defaults_unpunctuated_text_to_final_period() {
         None,
         Vec::new(),
         vec![phone_token("variant.phone.a")],
+        Vec::new(),
         Some("a".into()),
     );
 
@@ -190,7 +203,8 @@ fn preserves_style_reference_from_utterance_plan() {
     let request = StyleTts2SynthesisRequest::from_plan(plan(
         Some(SpeakerId("speaker.alice".into())),
         Some(style.clone()),
-        vec![phoneme_token("variant.phoneme.a")],
+        vec![phoneme_token("en-US.arpabet.AH")],
+        Vec::new(),
         Vec::new(),
         Some("a".into()),
     ));
@@ -206,14 +220,14 @@ fn keeps_speaker_identity_separate_from_style_reference() {
         Some(speaker.clone()),
         Some(style.clone()),
         Vec::new(),
-        vec![phone_token("variant.phone.a")],
+        vec![phone_token("ipa.phone.ə")],
+        Vec::new(),
         Some("a".into()),
     ));
 
     assert_eq!(request.speaker, Some(speaker));
     assert_eq!(request.style, Some(style));
-    assert_eq!(request.utterance_plan.speaker, request.speaker);
-    assert_eq!(request.utterance_plan.style, request.style);
+    assert_eq!(request.backend_plan.utterance_id, UtteranceId("utt.test".into()));
 }
 
 #[test]
@@ -222,9 +236,10 @@ fn mock_backend_returns_deterministic_finite_pcm() {
         None,
         None,
         vec![
-            phoneme_token("variant.phoneme.a"),
-            phoneme_token("variant.phoneme.b"),
+            phoneme_token("en-US.arpabet.AH"),
+            phoneme_token("en-US.arpabet.B"),
         ],
+        Vec::new(),
         Vec::new(),
         Some("ab".into()),
     ));
@@ -247,7 +262,7 @@ fn mock_backend_returns_deterministic_finite_pcm() {
 #[test]
 fn empty_utterance_produces_empty_mock_waveform() {
     let request =
-        StyleTts2SynthesisRequest::from_plan(plan(None, None, Vec::new(), Vec::new(), None));
+        StyleTts2SynthesisRequest::from_plan(plan(None, None, Vec::new(), Vec::new(), Vec::new(), None));
     let mut backend = MockStyleTts2Backend::default();
 
     let output = backend
@@ -278,7 +293,8 @@ fn output_sample_rate_is_propagated_from_backend() {
     let request = StyleTts2SynthesisRequest::from_plan(plan(
         None,
         None,
-        vec![phoneme_token("variant.phoneme.a")],
+        vec![phoneme_token("en-US.arpabet.AH")],
+        Vec::new(),
         Vec::new(),
         Some("a".into()),
     ));
@@ -291,11 +307,94 @@ fn output_sample_rate_is_propagated_from_backend() {
     assert_eq!(output.sample_rate_hz, 16_000);
 }
 
+#[test]
+fn en_us_phone_lowering_preserves_schwa_and_strut_distinction() {
+    let lowered = styletts2_en_us_symbol_set()
+        .lower_phone_tokens(&[
+            phone_token("ipa.phone.ə"),
+            phone_token("ipa.phone.ʌ"),
+            phone_token("ipa.phone.ɚ"),
+            phone_token("ipa.phone.ɝ"),
+        ])
+        .expect("reduced phones should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["ə", "ʌ", "ɚ", "ɝ"]);
+}
+
+#[test]
+fn prepared_plan_chunks_long_input_on_word_boundaries() {
+    let phones = vec![
+        phone_token("variant.phone.a"),
+        phone_token("boundary.word"),
+        phone_token("variant.phone.a"),
+        phone_token("boundary.word"),
+        phone_token("variant.phone.a"),
+        phone_token("boundary.word"),
+        phone_token("variant.phone.a"),
+    ];
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        phones,
+        vec![
+            word_boundary(0),
+            word_boundary(1),
+            word_boundary(2),
+            terminal_boundary(3, TerminalPunctuation::Period),
+        ],
+        Some("a a a a".into()),
+    );
+    let symbol_set = SymbolSet::new(["alpha", "|", "."]).with_alias("variant.phone.a", "alpha");
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &symbol_set,
+        StyleTts2PlanOptions {
+            max_symbols_per_chunk: 3,
+            chunking_enabled: true,
+        },
+    )
+    .expect("prepare plan");
+
+    assert!(backend_plan.chunks.len() > 1);
+    assert!(backend_plan
+        .chunks
+        .iter()
+        .all(|chunk| chunk.symbols.len() <= 3));
+}
+
+#[test]
+fn preflight_rejects_unknown_symbols_before_backend_runtime() {
+    let plan = BackendSynthesisPlan {
+        utterance_id: UtteranceId("utt.test".into()),
+        variant: VariantId("variant.test".into()),
+        text: Some("bad".into()),
+        max_symbols_per_chunk: 10,
+        chunks: vec![SynthesisChunk {
+            symbols: vec![StyleTts2SymbolToken {
+                symbol: "NOT_A_STYLETTS2_SYMBOL".into(),
+                source: StyleTts2SymbolSource::Phoneme,
+            }],
+            terminal: None,
+            source_text: None,
+        }],
+    };
+
+    let error = validate_styletts2_plan(&plan).expect_err("unknown symbol should fail");
+    assert!(error.to_string().contains("unknown StyleTTS2 symbol"));
+}
+
 fn plan(
     speaker: Option<SpeakerId>,
     style: Option<StyleRef>,
     phonemes: Vec<PhonemeToken>,
     phones: Vec<PhoneToken>,
+    boundaries: Vec<SpeechBoundaryToken>,
     intended_text: Option<String>,
 ) -> UtterancePlan {
     UtterancePlan {
@@ -306,6 +405,7 @@ fn plan(
         intended_morphemes: Vec::new(),
         intended_phonemes: phonemes,
         target_phones: phones,
+        boundaries,
         target_prosody: ProsodyTrack::default(),
         target_acoustics: Vec::new(),
         style,
@@ -313,10 +413,47 @@ fn plan(
     }
 }
 
+fn word_boundary(after_grapheme_index: usize) -> SpeechBoundaryToken {
+    SpeechBoundaryToken {
+        kind: BoundaryKind::Word,
+        after_grapheme_index,
+        span: None,
+        terminal: None,
+        pause: None,
+    }
+}
+
+fn comma_boundary(after_grapheme_index: usize) -> SpeechBoundaryToken {
+    SpeechBoundaryToken {
+        kind: BoundaryKind::Phrase,
+        after_grapheme_index,
+        span: None,
+        terminal: None,
+        pause: Some(PauseKind::Comma),
+    }
+}
+
+fn terminal_boundary(
+    after_grapheme_index: usize,
+    terminal: TerminalPunctuation,
+) -> SpeechBoundaryToken {
+    SpeechBoundaryToken {
+        kind: BoundaryKind::Phrase,
+        after_grapheme_index,
+        span: Some(TextSpan {
+            start_char: after_grapheme_index,
+            end_char: after_grapheme_index + 1,
+        }),
+        terminal: Some(terminal),
+        pause: None,
+    }
+}
+
 fn phoneme_token(id: &str) -> PhonemeToken {
     PhonemeToken {
         phoneme: Spec::Known(PhonemeId(id.into())),
         span: None,
+        features: FeatureBundle::default(),
         realized_as: Vec::new(),
         confidence: 1.0,
         provenance: provenance(),

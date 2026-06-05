@@ -37,6 +37,8 @@ pub struct PhoneToken {
 pub struct PhonemeToken {
     pub phoneme: Spec<PhonemeId>,
     pub span: Option<TimeSpan>,
+    #[serde(default)]
+    pub features: FeatureBundle,
     pub realized_as: Vec<PhoneToken>,
     pub confidence: f32,
     pub provenance: EvidenceProvenance,

@@ -25,12 +25,17 @@
 pub mod backend;
 pub mod config;
 pub mod mock;
+pub mod plan;
 pub mod request;
 pub mod symbols;
 
 pub use backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput};
 pub use config::{StyleTts2Config, StyleTts2ConfigError, StyleTts2ModelPaths};
 pub use mock::MockStyleTts2Backend;
+pub use plan::{
+    BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, StyleTts2PlanOptions, SynthesisChunk,
+    prepare_styletts2_plan, validate_styletts2_plan,
+};
 pub use request::StyleTts2SynthesisRequest;
 pub use symbols::{
     StyleTts2SymbolMapper, StyleTts2SymbolSequence, StyleTts2SymbolSource, StyleTts2SymbolToken,

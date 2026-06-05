@@ -7,6 +7,7 @@ use crate::morphology::MorphemeToken;
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::{ProsodyTrack, Syllable};
+use crate::segment::SpeechBoundaryToken;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Utterance {
@@ -19,6 +20,8 @@ pub struct Utterance {
     pub phonemes: Vec<PhonemeToken>,
     pub phones: Vec<PhoneToken>,
     pub syllables: Vec<Syllable>,
+    #[serde(default)]
+    pub boundaries: Vec<SpeechBoundaryToken>,
     pub acoustic_frames: Vec<AcousticFrame>,
     pub prosody: ProsodyTrack,
     pub provenance: EvidenceProvenance,
@@ -33,6 +36,8 @@ pub struct UtterancePlan {
     pub intended_morphemes: Vec<MorphemeToken>,
     pub intended_phonemes: Vec<PhonemeToken>,
     pub target_phones: Vec<PhoneToken>,
+    #[serde(default)]
+    pub boundaries: Vec<SpeechBoundaryToken>,
     pub target_prosody: ProsodyTrack,
     pub target_acoustics: Vec<AcousticFrame>,
     pub style: Option<StyleRef>,

@@ -1,29 +1,48 @@
 use serde::{Deserialize, Serialize};
-use speech::{PhoneToken, PhonemeToken, ProsodyTrack, SpeakerId, StyleRef, UtterancePlan};
+use speech::{ProsodyTrack, SpeakerId, StyleRef, UtterancePlan};
+
+use crate::plan::{BackendSynthesisPlan, StyleTts2PlanOptions, prepare_styletts2_plan};
+use crate::symbols::styletts2_en_us_symbol_set;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StyleTts2SynthesisRequest {
-    pub utterance_plan: UtterancePlan,
+    pub backend_plan: BackendSynthesisPlan,
     pub speaker: Option<SpeakerId>,
     pub style: Option<StyleRef>,
     pub speaker_reference_audio_uri: Option<String>,
     pub style_reference_audio_uri: Option<String>,
-    pub phoneme_tokens: Vec<PhonemeToken>,
-    pub phone_tokens: Vec<PhoneToken>,
     pub prosody: ProsodyTrack,
 }
 
 impl StyleTts2SynthesisRequest {
     pub fn from_plan(utterance_plan: UtterancePlan) -> Self {
+        let backend_plan = prepare_styletts2_plan(
+            &utterance_plan,
+            &styletts2_en_us_symbol_set(),
+            StyleTts2PlanOptions::default(),
+        )
+        .expect("default StyleTTS2 plan preparation should succeed");
+        Self::from_backend_plan(
+            backend_plan,
+            utterance_plan.speaker.clone(),
+            utterance_plan.style.clone(),
+            utterance_plan.target_prosody.clone(),
+        )
+    }
+
+    pub fn from_backend_plan(
+        backend_plan: BackendSynthesisPlan,
+        speaker: Option<SpeakerId>,
+        style: Option<StyleRef>,
+        prosody: ProsodyTrack,
+    ) -> Self {
         Self {
-            speaker: utterance_plan.speaker.clone(),
-            style: utterance_plan.style.clone(),
+            backend_plan,
+            speaker,
+            style,
             speaker_reference_audio_uri: None,
             style_reference_audio_uri: None,
-            phoneme_tokens: utterance_plan.intended_phonemes.clone(),
-            phone_tokens: utterance_plan.target_phones.clone(),
-            prosody: utterance_plan.target_prosody.clone(),
-            utterance_plan,
+            prosody,
         }
     }
 
@@ -38,12 +57,11 @@ impl StyleTts2SynthesisRequest {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.phoneme_tokens.is_empty()
-            && self.phone_tokens.is_empty()
-            && self
-                .utterance_plan
-                .intended_text
-                .as_deref()
-                .is_none_or(str::is_empty)
+        self.backend_plan.chunks.is_empty()
+            || self
+                .backend_plan
+                .chunks
+                .iter()
+                .all(|chunk| chunk.symbols.is_empty())
     }
 }

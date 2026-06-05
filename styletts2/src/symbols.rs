@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use speech::{PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, Spec, UtterancePlan};
+use speech::{
+    BoundaryKind, PauseKind, PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, Spec,
+    SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
+};
 use thiserror::Error;
 
 use crate::backend::StyleTts2Error;
@@ -29,7 +32,8 @@ pub struct StyleTts2SymbolToken {
 pub enum StyleTts2SymbolSource {
     Phoneme,
     Phone,
-    TextPunctuation,
+    Boundary,
+    BoundaryPunctuation,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -131,12 +135,11 @@ impl SymbolSet {
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         if !plan.target_phones.is_empty() {
-            return self
-                .lower_phone_tokens_with_text(&plan.target_phones, plan.intended_text.as_deref());
+            return self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries);
         }
 
         let mut sequence = self.lower_phoneme_tokens(&plan.intended_phonemes)?;
-        self.append_final_punctuation(&mut sequence, plan.intended_text.as_deref());
+        self.append_boundary_or_default_terminal(&mut sequence.tokens, &plan.boundaries);
         Ok(sequence)
     }
 
@@ -172,14 +175,11 @@ impl SymbolSet {
         Ok(StyleTts2SymbolSequence { tokens: lowered })
     }
 
-    fn lower_phone_tokens_with_text(
+    fn lower_phone_tokens_with_boundaries(
         &self,
         tokens: &[PhoneToken],
-        intended_text: Option<&str>,
+        boundaries: &[SpeechBoundaryToken],
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
-        let punctuation_after_words = intended_text
-            .map(punctuation_after_words)
-            .unwrap_or_default();
         let mut lowered = Vec::new();
         let mut word_index = 0;
         let mut in_word = false;
@@ -190,14 +190,10 @@ impl SymbolSet {
             };
             if token_id == "boundary.word" {
                 if in_word {
-                    if !self.push_punctuation_after_word(
-                        &mut lowered,
-                        &punctuation_after_words,
-                        word_index,
-                    ) {
+                    if !self.push_boundary_after_word(&mut lowered, boundaries, word_index) {
                         lowered.push(StyleTts2SymbolToken {
                             symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
-                            source: StyleTts2SymbolSource::Phone,
+                            source: StyleTts2SymbolSource::Boundary,
                         });
                     }
                     word_index += 1;
@@ -214,57 +210,73 @@ impl SymbolSet {
         }
 
         if in_word {
-            self.push_punctuation_after_word(&mut lowered, &punctuation_after_words, word_index);
+            self.push_boundary_after_word(&mut lowered, boundaries, word_index);
             self.append_final_punctuation_if_missing(&mut lowered);
         }
 
         Ok(StyleTts2SymbolSequence { tokens: lowered })
     }
 
-    fn push_punctuation_after_word(
+    fn push_boundary_after_word(
         &self,
         lowered: &mut Vec<StyleTts2SymbolToken>,
-        punctuation_after_words: &[Option<&'static str>],
+        boundaries: &[SpeechBoundaryToken],
         word_index: usize,
     ) -> bool {
-        let Some(Some(symbol)) = punctuation_after_words.get(word_index) else {
+        let Some(boundary) = boundaries
+            .iter()
+            .filter(|boundary| boundary.terminal.is_some() || boundary.pause.is_some())
+            .chain(boundaries.iter())
+            .find(|boundary| boundary.after_grapheme_index == word_index)
+        else {
             return false;
         };
-        self.push_text_punctuation(lowered, symbol)
+        if let Some(symbol) = boundary_symbol(boundary) {
+            return self.push_boundary_symbol(lowered, symbol, boundary_symbol_source(boundary));
+        }
+        false
     }
 
-    fn append_final_punctuation(
+    fn append_boundary_or_default_terminal(
         &self,
-        sequence: &mut StyleTts2SymbolSequence,
-        intended_text: Option<&str>,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        boundaries: &[SpeechBoundaryToken],
     ) {
-        if let Some(symbol) = intended_text.and_then(final_punctuation_symbol) {
-            self.push_text_punctuation(&mut sequence.tokens, symbol);
+        if let Some(symbol) = boundaries
+            .iter()
+            .filter(|boundary| boundary.terminal.is_some() || boundary.pause.is_some())
+            .find_map(boundary_symbol)
+        {
+            self.push_boundary_symbol(lowered, symbol, StyleTts2SymbolSource::BoundaryPunctuation);
         }
-        self.append_final_punctuation_if_missing(&mut sequence.tokens);
+        self.append_final_punctuation_if_missing(lowered);
     }
 
     fn append_final_punctuation_if_missing(&self, lowered: &mut Vec<StyleTts2SymbolToken>) {
+        if lowered.is_empty() {
+            return;
+        }
         if lowered
             .last()
             .is_some_and(|token| is_terminal_punctuation(&token.symbol))
         {
             return;
         }
-        self.push_text_punctuation(lowered, ".");
+        self.push_boundary_symbol(lowered, ".", StyleTts2SymbolSource::BoundaryPunctuation);
     }
 
-    fn push_text_punctuation(
+    fn push_boundary_symbol(
         &self,
         lowered: &mut Vec<StyleTts2SymbolToken>,
         symbol: &'static str,
+        source: StyleTts2SymbolSource,
     ) -> bool {
         if !self.symbols.contains(symbol) {
             return false;
         }
         lowered.push(StyleTts2SymbolToken {
             symbol: symbol.to_string(),
-            source: StyleTts2SymbolSource::TextPunctuation,
+            source,
         });
         true
     }
@@ -301,10 +313,12 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
+    let reduced_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
         arpabet_symbols
             .into_iter()
+            .chain(reduced_phone_symbols.into_iter())
             .chain(punctuation_symbols.into_iter()),
     );
 
@@ -316,11 +330,19 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
             set = set.with_alias(format!("en-US.arpabet.{symbol}{stress}"), symbol);
         }
     }
+    set = set
+        .with_alias("en-US.arpabet.AH0", "ə")
+        .with_alias("en-US.arpabet.AH1", "ʌ")
+        .with_alias("en-US.arpabet.AH2", "ʌ")
+        .with_alias("en-US.arpabet.ER0", "ɚ")
+        .with_alias("en-US.arpabet.ER1", "ɝ")
+        .with_alias("en-US.arpabet.ER2", "ɝ");
 
     for (phone_id, symbol) in [
         ("ipa.phone.ɑ", "AA"),
         ("ipa.phone.æ", "AE"),
-        ("ipa.phone.ʌ", "AH"),
+        ("ipa.phone.ʌ", "ʌ"),
+        ("ipa.phone.ə", "ə"),
         ("ipa.phone.ɔ", "AO"),
         ("ipa.phone.aʊ", "AW"),
         ("ipa.phone.aɪ", "AY"),
@@ -329,7 +351,8 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.d", "D"),
         ("ipa.phone.ð", "DH"),
         ("ipa.phone.ɛ", "EH"),
-        ("ipa.phone.ɝ", "ER"),
+        ("ipa.phone.ɝ", "ɝ"),
+        ("ipa.phone.ɚ", "ɚ"),
         ("ipa.phone.eɪ", "EY"),
         ("ipa.phone.f", "F"),
         ("ipa.phone.ɡ", "G"),
@@ -365,131 +388,29 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     set.with_alias("boundary.word", "|")
 }
 
-fn punctuation_after_words(text: &str) -> Vec<Option<&'static str>> {
-    let word_spans = word_spans(text);
-    word_spans
-        .iter()
-        .enumerate()
-        .map(|(index, (_, end))| {
-            let next_start = word_spans
-                .get(index + 1)
-                .map(|(start, _)| *start)
-                .unwrap_or(text.len());
-            punctuation_symbol(&text[*end..next_start])
-        })
-        .collect()
-}
-
-fn word_spans(text: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    let mut start = None;
-    for (byte_index, character) in text.char_indices() {
-        if is_word_chunk_character(character) {
-            start.get_or_insert(byte_index);
-            continue;
-        }
-
-        if let Some(start_byte) = start.take() {
-            push_word_chunk_spans(text, start_byte, byte_index, &mut spans);
-        }
+fn boundary_symbol(boundary: &SpeechBoundaryToken) -> Option<&'static str> {
+    if let Some(terminal) = boundary.terminal {
+        return Some(match terminal {
+            TerminalPunctuation::Period => ".",
+            TerminalPunctuation::Question => "?",
+            TerminalPunctuation::Exclamation => "!",
+        });
     }
-
-    if let Some(start_byte) = start {
-        push_word_chunk_spans(text, start_byte, text.len(), &mut spans);
+    if matches!(boundary.pause, Some(PauseKind::Comma)) {
+        return Some(",");
     }
-    spans
-}
-
-fn is_word_chunk_character(character: char) -> bool {
-    character.is_alphabetic() || is_apostrophe(character) || character == '-'
-}
-
-fn is_apostrophe(character: char) -> bool {
-    matches!(character, '\'' | '’' | '‘' | 'ʼ')
-}
-
-fn push_word_chunk_spans(
-    text: &str,
-    start_byte: usize,
-    end_byte: usize,
-    spans: &mut Vec<(usize, usize)>,
-) {
-    let mut part_start = None;
-    for (offset, character) in text[start_byte..end_byte].char_indices() {
-        let byte_index = start_byte + offset;
-        if character == '-' {
-            if let Some(part_start_byte) = part_start.take() {
-                push_camelcase_word_spans(text, part_start_byte, byte_index, spans);
-            }
-            continue;
-        }
-
-        part_start.get_or_insert(byte_index);
+    if boundary.kind == BoundaryKind::Word {
+        return Some("|");
     }
+    None
+}
 
-    if let Some(part_start_byte) = part_start {
-        push_camelcase_word_spans(text, part_start_byte, end_byte, spans);
+fn boundary_symbol_source(boundary: &SpeechBoundaryToken) -> StyleTts2SymbolSource {
+    if boundary.terminal.is_some() || boundary.pause.is_some() {
+        StyleTts2SymbolSource::BoundaryPunctuation
+    } else {
+        StyleTts2SymbolSource::Boundary
     }
-}
-
-fn push_camelcase_word_spans(
-    text: &str,
-    start_byte: usize,
-    end_byte: usize,
-    spans: &mut Vec<(usize, usize)>,
-) {
-    let mut part_start = start_byte;
-    let mut previous = None;
-    let mut iterator = text[start_byte..end_byte].char_indices().peekable();
-    while let Some((offset, character)) = iterator.next() {
-        let byte_index = start_byte + offset;
-        if let Some(previous_character) = previous
-            && should_split_camelcase_part(previous_character, character, iterator.peek())
-        {
-            push_word_span(text, part_start, byte_index, spans);
-            part_start = byte_index;
-        }
-        previous = Some(character);
-    }
-
-    push_word_span(text, part_start, end_byte, spans);
-}
-
-fn should_split_camelcase_part(
-    previous: char,
-    current: char,
-    next: Option<&(usize, char)>,
-) -> bool {
-    previous.is_lowercase()
-        && current.is_uppercase()
-        && next.is_some_and(|(_, next)| next.is_uppercase())
-}
-
-fn push_word_span(text: &str, start_byte: usize, end_byte: usize, spans: &mut Vec<(usize, usize)>) {
-    let surface = &text[start_byte..end_byte];
-    if surface
-        .trim_matches(|character: char| !character.is_alphabetic())
-        .is_empty()
-    {
-        return;
-    }
-    spans.push((start_byte, end_byte));
-}
-
-fn final_punctuation_symbol(text: &str) -> Option<&'static str> {
-    punctuation_symbol(text)
-}
-
-fn punctuation_symbol(text: &str) -> Option<&'static str> {
-    text.chars().rev().find_map(|character| match character {
-        '.' | '…' => Some("."),
-        '!' => Some("!"),
-        '?' => Some("?"),
-        ',' => Some(","),
-        ';' => Some(";"),
-        ':' => Some(":"),
-        _ => None,
-    })
 }
 
 fn is_terminal_punctuation(symbol: &str) -> bool {

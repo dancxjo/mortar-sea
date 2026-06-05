@@ -39,9 +39,11 @@ impl StyleTts2Backend for MockStyleTts2Backend {
         }
 
         let token_count = request
-            .phone_tokens
-            .len()
-            .max(request.phoneme_tokens.len())
+            .backend_plan
+            .chunks
+            .iter()
+            .map(|chunk| chunk.symbols.len())
+            .sum::<usize>()
             .max(1);
         let samples_per_token = (self.sample_rate_hz / 50).max(1) as usize;
         let sample_count = token_count * samples_per_token;

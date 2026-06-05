@@ -4,6 +4,7 @@ use crate::feature::FeatureBundle;
 use crate::ids::{PhoneId, PhonemeId};
 use crate::prosody::{ProsodicContext, Stress};
 use crate::spec::Spec;
+use crate::time::TextSpan;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,4 +71,27 @@ pub enum BoundaryKind {
     Phrase,
     BreathGroup,
     Turn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalPunctuation {
+    Period,
+    Question,
+    Exclamation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseKind {
+    Comma,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechBoundaryToken {
+    pub kind: BoundaryKind,
+    pub after_grapheme_index: usize,
+    pub span: Option<TextSpan>,
+    pub terminal: Option<TerminalPunctuation>,
+    pub pause: Option<PauseKind>,
 }

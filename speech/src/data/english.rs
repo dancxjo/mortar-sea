@@ -84,6 +84,8 @@ const W: PhoneId = PhoneId::borrowed("ipa.phone.w");
 const CH: PhoneId = PhoneId::borrowed("ipa.phone.tʃ");
 const JH: PhoneId = PhoneId::borrowed("ipa.phone.dʒ");
 const TAP: PhoneId = PhoneId::borrowed("ipa.phone.ɾ");
+const SCHWA: PhoneId = PhoneId::borrowed("ipa.phone.ə");
+const R_COLORED_SCHWA: PhoneId = PhoneId::borrowed("ipa.phone.ɚ");
 const SYLLABLE_BREAK: PhoneId = PhoneId::borrowed("ipa.phone.|");
 
 const LEGAL_ONSETS: &[&[PhoneId]] = &[
@@ -234,6 +236,23 @@ fn phone_inventory() -> PhoneInventory {
     let mut phones = HashMap::new();
     for entry in ARPABET {
         let phone = arpabet::phone_for_entry(entry);
+        phones.insert(phone.id.clone(), phone);
+    }
+    for (phone_ref, base, ipa) in [(SCHWA, "AH", "ə"), (R_COLORED_SCHWA, "ER", "ɚ")] {
+        let mut features = arpabet::entry(base)
+            .map(arpabet::feature_bundle)
+            .unwrap_or_default();
+        features.values.insert(
+            FeatureId("phonology.reduced_vowel".into()),
+            Spec::Known(FeatureValue::Bool(true)),
+        );
+        let phone = crate::phonetics::Phone {
+            id: phone_ref,
+            ipa: ipa.into(),
+            features,
+            aliases: Vec::new(),
+            status: crate::segment::SegmentStatus::Allophonic,
+        };
         phones.insert(phone.id.clone(), phone);
     }
     for phone_ref in [TAP, SYLLABLE_BREAK] {

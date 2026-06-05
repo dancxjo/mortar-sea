@@ -1,4 +1,5 @@
 use crate::data::arpabet;
+use crate::data::cmudict::CmuStress;
 use crate::evidence::{EvidenceProvenance, EvidenceSource};
 use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, PhoneId, PhonemeId};
@@ -297,6 +298,10 @@ fn default_phone_id(variant: &LinguisticVariant, token: &PhonemeToken) -> Spec<P
         };
     };
 
+    if let Some(phone) = stress_aware_phone_id(token) {
+        return Spec::Known(phone);
+    }
+
     variant
         .phonemes
         .phonemes
@@ -318,10 +323,35 @@ fn default_phone_id(variant: &LinguisticVariant, token: &PhonemeToken) -> Spec<P
         .unwrap_or(Spec::Unknown)
 }
 
+fn stress_aware_phone_id(token: &PhonemeToken) -> Option<PhoneId> {
+    let (base, stress) = token_cmu_base_and_stress(token).or_else(|| {
+        let Spec::Known(id) = &token.phoneme else {
+            return None;
+        };
+        let symbol = phoneme_display_symbol(id);
+        let (base, stress) = arpabet::split_stress(symbol);
+        Some((base.to_string(), stress.and_then(cmu_stress_from_digit)))
+    })?;
+    arpabet::reduced_phone_for_cmu(&base, stress)
+}
+
+fn token_cmu_base_and_stress(token: &PhonemeToken) -> Option<(String, Option<CmuStress>)> {
+    let source_schema = token_category_feature(&token.features, "source_schema")?;
+    if source_schema != "cmudict" && source_schema != "arpabet" {
+        return None;
+    }
+    let base = token_category_feature(&token.features, "base_symbol")?.to_string();
+    let stress = token_category_feature(&token.features, "stress").and_then(cmu_stress_from_name);
+    Some((base, stress))
+}
+
 fn phoneme_token_features(
     variant: &LinguisticVariant,
     token: &PhonemeToken,
 ) -> Option<FeatureBundle> {
+    if !token.features.values.is_empty() {
+        return Some(token.features.clone());
+    }
     let Spec::Known(id) = &token.phoneme else {
         return None;
     };
@@ -345,6 +375,35 @@ fn phoneme_base_symbol(id: &PhonemeId) -> &str {
     arpabet::split_stress(symbol).0
 }
 
+fn token_category_feature<'a>(features: &'a FeatureBundle, name: &str) -> Option<&'a str> {
+    let value = features
+        .values
+        .get(&FeatureId(format!("phonology.{name}")))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) => Some(value),
+        Spec::Known(FeatureValue::Text(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn cmu_stress_from_name(name: &str) -> Option<CmuStress> {
+    match name {
+        "primary" => Some(CmuStress::Primary),
+        "secondary" => Some(CmuStress::Secondary),
+        "unstressed" => Some(CmuStress::Unstressed),
+        _ => None,
+    }
+}
+
+fn cmu_stress_from_digit(digit: char) -> Option<CmuStress> {
+    match digit {
+        '1' => Some(CmuStress::Primary),
+        '2' => Some(CmuStress::Secondary),
+        '0' => Some(CmuStress::Unstressed),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +415,7 @@ mod tests {
         PhonemeToken {
             phoneme: Spec::Known(arpabet::phoneme_id(variant, symbol)),
             span: None,
+            features: FeatureBundle::default(),
             realized_as: Vec::new(),
             confidence: 1.0,
             provenance: EvidenceProvenance {
@@ -370,6 +430,7 @@ mod tests {
         PhonemeToken {
             phoneme: Spec::Unknown,
             span: None,
+            features: FeatureBundle::default(),
             realized_as: Vec::new(),
             confidence: 0.0,
             provenance: EvidenceProvenance {
@@ -384,6 +445,7 @@ mod tests {
         PhonemeToken {
             phoneme: Spec::Unspecified,
             span: None,
+            features: FeatureBundle::default(),
             realized_as: Vec::new(),
             confidence: 0.0,
             provenance: EvidenceProvenance {
@@ -425,7 +487,7 @@ mod tests {
             &RealizationOptions::default(),
         );
 
-        assert_eq!(symbols(&phones), ["ɑ", "ɾ", "ɝ"]);
+        assert_eq!(symbols(&phones), ["ɑ", "ɾ", "ɚ"]);
     }
 
     #[test]
@@ -444,7 +506,7 @@ mod tests {
             },
         );
 
-        assert_eq!(symbols(&phones), ["ɑ", "t", "ɝ"]);
+        assert_eq!(symbols(&phones), ["ɑ", "t", "ɚ"]);
     }
 
     #[test]
@@ -460,7 +522,7 @@ mod tests {
             &RealizationOptions::default(),
         );
 
-        assert_eq!(symbols(&phones), ["ʌ", "t", "ɝ"]);
+        assert_eq!(symbols(&phones), ["ə", "t", "ɚ"]);
     }
 
     #[test]
@@ -503,7 +565,7 @@ mod tests {
             &RealizationOptions::default(),
         );
 
-        assert_eq!(symbols(&phones), ["ɑ", "t", "ɝ"]);
+        assert_eq!(symbols(&phones), ["ɑ", "t", "ɚ"]);
     }
 
     #[test]
@@ -538,7 +600,7 @@ mod tests {
             &RealizationOptions::default(),
         );
 
-        assert_eq!(symbols(&phones), ["ɑ", "ɾ", "ɝ"]);
+        assert_eq!(symbols(&phones), ["ɑ", "ɾ", "ɚ"]);
     }
 
     #[test]

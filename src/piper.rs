@@ -136,14 +136,40 @@ pub fn piper_voice_config_path(model_path: &Path) -> PathBuf {
 pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
     let mut symbols = Vec::new();
     if !plan.target_phones.is_empty() {
+        let punctuation_after_words = plan
+            .intended_text
+            .as_deref()
+            .map(punctuation_after_words)
+            .unwrap_or_default();
+        let mut word_index = 0;
+        let mut in_word = false;
         for token in &plan.target_phones {
             let Spec::Known(phone_id) = &token.phone else {
                 continue;
             };
             if phone_id.0 == "boundary.word" {
-                push_symbol(&mut symbols, " ");
+                if in_word {
+                    push_symbol(
+                        &mut symbols,
+                        punctuation_after_words
+                            .get(word_index)
+                            .and_then(|symbol| *symbol)
+                            .unwrap_or(" "),
+                    );
+                    word_index += 1;
+                    in_word = false;
+                }
             } else {
                 push_symbol(&mut symbols, piper_symbol_for_phone_id(&phone_id.0));
+                in_word = true;
+            }
+        }
+        if in_word {
+            if let Some(symbol) = punctuation_after_words
+                .get(word_index)
+                .and_then(|symbol| *symbol)
+            {
+                push_symbol(&mut symbols, symbol);
             }
         }
     } else {
@@ -154,6 +180,7 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             push_symbol(&mut symbols, phoneme_display_symbol(phoneme_id));
         }
     }
+    append_default_terminal_symbol(&mut symbols);
     PiperPhonemeSequence { symbols }
 }
 
@@ -202,6 +229,140 @@ fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
     }
 }
 
+fn append_default_terminal_symbol(symbols: &mut Vec<String>) {
+    if symbols.is_empty()
+        || symbols
+            .last()
+            .is_some_and(|symbol| is_terminal_symbol(symbol))
+    {
+        return;
+    }
+    push_symbol(symbols, ".");
+}
+
+fn punctuation_after_words(text: &str) -> Vec<Option<&'static str>> {
+    let word_spans = word_spans(text);
+    word_spans
+        .iter()
+        .enumerate()
+        .map(|(index, (_, end))| {
+            let next_start = word_spans
+                .get(index + 1)
+                .map(|(start, _)| *start)
+                .unwrap_or(text.len());
+            punctuation_symbol(&text[*end..next_start])
+        })
+        .collect()
+}
+
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (byte_index, character) in text.char_indices() {
+        if is_word_chunk_character(character) {
+            start.get_or_insert(byte_index);
+            continue;
+        }
+
+        if let Some(start_byte) = start.take() {
+            push_word_chunk_spans(text, start_byte, byte_index, &mut spans);
+        }
+    }
+
+    if let Some(start_byte) = start {
+        push_word_chunk_spans(text, start_byte, text.len(), &mut spans);
+    }
+    spans
+}
+
+fn is_word_chunk_character(character: char) -> bool {
+    character.is_alphabetic() || is_apostrophe(character) || character == '-'
+}
+
+fn is_apostrophe(character: char) -> bool {
+    matches!(character, '\'' | '’' | '‘' | 'ʼ')
+}
+
+fn push_word_chunk_spans(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    let mut part_start = None;
+    for (offset, character) in text[start_byte..end_byte].char_indices() {
+        let byte_index = start_byte + offset;
+        if character == '-' {
+            if let Some(part_start_byte) = part_start.take() {
+                push_camelcase_word_spans(text, part_start_byte, byte_index, spans);
+            }
+            continue;
+        }
+
+        part_start.get_or_insert(byte_index);
+    }
+
+    if let Some(part_start_byte) = part_start {
+        push_camelcase_word_spans(text, part_start_byte, end_byte, spans);
+    }
+}
+
+fn push_camelcase_word_spans(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    let mut part_start = start_byte;
+    let mut previous = None;
+    let mut iterator = text[start_byte..end_byte].char_indices().peekable();
+    while let Some((offset, character)) = iterator.next() {
+        let byte_index = start_byte + offset;
+        if let Some(previous_character) = previous
+            && should_split_camelcase_part(previous_character, character, iterator.peek())
+        {
+            push_word_span(text, part_start, byte_index, spans);
+            part_start = byte_index;
+        }
+        previous = Some(character);
+    }
+
+    push_word_span(text, part_start, end_byte, spans);
+}
+
+fn should_split_camelcase_part(
+    previous: char,
+    current: char,
+    next: Option<&(usize, char)>,
+) -> bool {
+    previous.is_lowercase()
+        && current.is_uppercase()
+        && next.is_some_and(|(_, next)| next.is_uppercase())
+}
+
+fn push_word_span(text: &str, start_byte: usize, end_byte: usize, spans: &mut Vec<(usize, usize)>) {
+    let surface = &text[start_byte..end_byte];
+    if surface
+        .trim_matches(|character: char| !character.is_alphabetic())
+        .is_empty()
+    {
+        return;
+    }
+    spans.push((start_byte, end_byte));
+}
+
+fn punctuation_symbol(text: &str) -> Option<&'static str> {
+    text.chars().rev().find_map(|character| match character {
+        '.' | '…' => Some("."),
+        '!' => Some("!"),
+        '?' => Some("?"),
+        ',' => Some(","),
+        ';' => Some(";"),
+        ':' => Some(":"),
+        _ => None,
+    })
+}
+
 impl PiperPhonemeSequence {
     pub fn to_text_ids_compatible(&self, config: &PiperVoiceConfig) -> Result<PiperIdSequence> {
         let text_sequence = self.with_utterance_termination(config);
@@ -241,18 +402,26 @@ impl PiperPhonemeSequence {
     }
 
     fn with_utterance_termination(&self, config: &PiperVoiceConfig) -> Self {
-        if self.symbols.is_empty()
-            || self
-                .symbols
-                .last()
-                .is_some_and(|symbol| is_terminal_symbol(symbol))
-            || !can_encode_terminal_phrase_break(config)
-        {
+        if self.symbols.is_empty() {
             return self.clone();
         }
 
         let mut terminated = self.clone();
-        terminated.symbols.push("|".to_string());
+        if let Some(last) = terminated.symbols.last_mut()
+            && is_terminal_symbol(last)
+        {
+            if can_encode_piper_symbol(last, config) {
+                return terminated;
+            }
+            if let Some(symbol) = compatible_terminal_symbol(Some(last), config) {
+                *last = symbol.to_string();
+            }
+            return terminated;
+        }
+
+        if let Some(symbol) = compatible_terminal_symbol(None, config) {
+            terminated.symbols.push(symbol.to_string());
+        }
         terminated
     }
 
@@ -549,11 +718,29 @@ fn config_has_piper_framing(config: &PiperVoiceConfig) -> bool {
 }
 
 fn is_terminal_symbol(symbol: &str) -> bool {
-    matches!(symbol, "|" | "." | "," | "!" | "?" | "$")
+    matches!(symbol, "|" | "." | "!" | "?" | "$")
 }
 
-fn can_encode_terminal_phrase_break(config: &PiperVoiceConfig) -> bool {
-    config.phoneme_id_map.contains_key("|") || expand_espeak_phoneme("|", config).is_some()
+fn can_encode_piper_symbol(symbol: &str, config: &PiperVoiceConfig) -> bool {
+    config.phoneme_id_map.contains_key(symbol) || expand_espeak_phoneme(symbol, config).is_some()
+}
+
+fn compatible_terminal_symbol<'a>(
+    requested: Option<&'a str>,
+    config: &PiperVoiceConfig,
+) -> Option<&'a str> {
+    if let Some(symbol) = requested
+        && can_encode_piper_symbol(symbol, config)
+    {
+        return Some(symbol);
+    }
+    if can_encode_piper_symbol(".", config) {
+        return Some(".");
+    }
+    if can_encode_piper_symbol("|", config) {
+        return Some("|");
+    }
+    None
 }
 
 fn expand_espeak_phoneme(symbol: &str, config: &PiperVoiceConfig) -> Option<Vec<String>> {
@@ -993,6 +1180,7 @@ mod tests {
             intended_morphemes: Vec::new(),
             intended_phonemes: phonemicized.phonemes,
             target_phones: phonemicized.phones,
+            boundaries: phonemicized.boundaries,
             target_prosody: ProsodyTrack::default(),
             target_acoustics: Vec::new(),
             style: None,
@@ -1002,7 +1190,70 @@ mod tests {
         let sequence = piper_sequence_from_plan(&plan);
         assert_eq!(
             sequence.symbols,
-            vec!["HH", "AH", "L", "OW", " ", "W", "ER", "L", "D"]
+            vec!["HH", "AH", "L", "OW", " ", "W", "ER", "L", "D", "."]
+        );
+    }
+
+    #[test]
+    fn piper_sequence_preserves_text_terminal_punctuation_from_mortar_plan() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "hello world?".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(sequence.symbols.last().map(String::as_str), Some("?"));
+    }
+
+    #[test]
+    fn piper_sequence_aligns_punctuation_with_split_surface_words() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "hello-world, okay.".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(
+            sequence.symbols,
+            vec![
+                "HH", "AH", "L", "OW", " ", "W", "ER", "L", "D", ",", "OW", "K", "EY", "."
+            ]
         );
     }
 
@@ -1034,5 +1285,32 @@ mod tests {
         .expect("ids");
 
         assert_eq!(ids.ids, vec![1, 2, 6, 2, 7, 2, 4, 2, 8, 2, 9, 2, 5, 2, 3]);
+    }
+
+    #[test]
+    fn compatible_ids_preserve_encodable_terminal_punctuation() {
+        let config = config_from_json(
+            r#"
+            {
+              "audio": { "sample_rate": 22050 },
+              "phoneme_id_map": {
+                "^": [1],
+                "_": [2],
+                "$": [3],
+                "?": [13],
+                "a": [6],
+                "ɪ": [7]
+              }
+            }
+            "#,
+        );
+
+        let ids = PiperPhonemeSequence {
+            symbols: vec!["AY".into(), "?".into()],
+        }
+        .to_text_ids_compatible(&config)
+        .expect("ids");
+
+        assert_eq!(ids.ids, vec![1, 2, 6, 2, 7, 2, 13, 2, 3]);
     }
 }

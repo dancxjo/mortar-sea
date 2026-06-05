@@ -8,8 +8,12 @@ use ort::value::{DynTensorValueType, Tensor};
 use speech::{StyleRef, StyleSource};
 
 use crate::backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput};
+use crate::plan::{
+    styletts2_character_id, styletts2_text_for_symbol, styletts2_token_ids_for_symbols,
+    validate_styletts2_plan,
+};
 use crate::request::StyleTts2SynthesisRequest;
-use crate::symbols::{StyleTts2SymbolMapper, StyleTts2SymbolSequence, styletts2_en_us_symbol_set};
+use crate::symbols::StyleTts2SymbolSequence;
 
 const SAMPLE_RATE_HZ: u32 = 24_000;
 const DIFFUSION_ONNX: &str =
@@ -163,9 +167,8 @@ impl StyleTts2Backend for StyleTts2OnnxBackend {
         &mut self,
         request: &StyleTts2SynthesisRequest,
     ) -> Result<StyleTts2SynthesisOutput, StyleTts2Error> {
-        let lowered = styletts2_en_us_symbol_set().lower(&request.utterance_plan)?;
-        let token_ids = styletts2_token_ids(&lowered)?;
-        if token_ids.is_empty() {
+        self.preflight_request(request)?;
+        if request.is_empty() {
             return Ok(StyleTts2SynthesisOutput {
                 sample_rate_hz: SAMPLE_RATE_HZ,
                 pcm_mono_f32: Vec::new(),
@@ -173,6 +176,29 @@ impl StyleTts2Backend for StyleTts2OnnxBackend {
             });
         }
 
+        let mut pcm_mono_f32 = Vec::new();
+        for chunk in &request.backend_plan.chunks {
+            let token_ids = styletts2_token_ids_for_symbols(&chunk.symbols)?;
+            if token_ids.is_empty() {
+                continue;
+            }
+            pcm_mono_f32.extend(self.synthesize_token_ids(request, token_ids)?);
+        }
+
+        Ok(StyleTts2SynthesisOutput {
+            sample_rate_hz: SAMPLE_RATE_HZ,
+            pcm_mono_f32,
+            realized_utterance: None,
+        })
+    }
+}
+
+impl StyleTts2OnnxBackend {
+    fn synthesize_token_ids(
+        &mut self,
+        request: &StyleTts2SynthesisRequest,
+        token_ids: Vec<i64>,
+    ) -> Result<Vec<f32>, StyleTts2Error> {
         let token_len = i64::try_from(token_ids.len())
             .map_err(|_| invalid_output("StyleTTS2 token sequence is too long"))?;
         let encoder_input = Tensor::from_array((vec![1_i64, token_len], token_ids.clone()))
@@ -228,15 +254,37 @@ impl StyleTts2Backend for StyleTts2OnnxBackend {
             ));
         }
 
-        Ok(StyleTts2SynthesisOutput {
-            sample_rate_hz: SAMPLE_RATE_HZ,
-            pcm_mono_f32: samples,
-            realized_utterance: None,
-        })
+        Ok(samples)
     }
-}
 
-impl StyleTts2OnnxBackend {
+    fn preflight_request(
+        &self,
+        request: &StyleTts2SynthesisRequest,
+    ) -> Result<(), StyleTts2Error> {
+        validate_styletts2_plan(&request.backend_plan)?;
+        validate_diffusion_options(&self.diffusion_options)?;
+
+        let speaker_uri = request
+            .speaker_reference_audio_uri
+            .as_deref()
+            .or(self.speaker_reference_audio_uri.as_deref());
+        let style_uri = request
+            .style_reference_audio_uri
+            .as_deref()
+            .or(self.style_reference_audio_uri.as_deref())
+            .or_else(|| reference_audio_uri_from_style(request.style.as_ref()));
+
+        if let Some(uri) = speaker_uri {
+            ensure_reference_wav_readable(uri)?;
+        }
+        if let Some(uri) = style_uri
+            && Some(uri) != speaker_uri
+        {
+            ensure_reference_wav_readable(uri)?;
+        }
+        Ok(())
+    }
+
     fn resolve_style_vector(
         &mut self,
         request: &StyleTts2SynthesisRequest,
@@ -461,92 +509,7 @@ impl StyleTts2OnnxBackend {
 }
 
 fn styletts2_token_ids(sequence: &StyleTts2SymbolSequence) -> Result<Vec<i64>, StyleTts2Error> {
-    let mut ipa = String::new();
-    for token in &sequence.tokens {
-        ipa.push_str(arpabet_to_styletts2_text(&token.symbol)?);
-    }
-    let ipa = ipa.trim();
-    if ipa.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut ids = Vec::with_capacity(ipa.chars().count() + 2);
-    ids.push(0);
-    for character in ipa.chars() {
-        let id = styletts2_character_id(character).ok_or_else(|| {
-            invalid_output(format!(
-                "StyleTTS2 text-cleaner vocabulary has no token for `{character}`"
-            ))
-        })?;
-        ids.push(id);
-    }
-    ids.push(0);
-    Ok(ids)
-}
-
-fn arpabet_to_styletts2_text(symbol: &str) -> Result<&'static str, StyleTts2Error> {
-    let ipa = match symbol {
-        "AA" => "ɑ",
-        "AE" => "æ",
-        "AH" => "ə",
-        "AO" => "ɔ",
-        "AW" => "aʊ",
-        "AY" => "aɪ",
-        "B" => "b",
-        "CH" => "ʧ",
-        "D" => "d",
-        "DH" => "ð",
-        "EH" => "ɛ",
-        "ER" => "ɜːɹ",
-        "EY" => "eɪ",
-        "F" => "f",
-        "G" => "ɡ",
-        "HH" => "h",
-        "IH" => "ɪ",
-        "IY" => "i",
-        "JH" => "ʤ",
-        "K" => "k",
-        "L" => "l",
-        "M" => "m",
-        "N" => "n",
-        "NG" => "ŋ",
-        "OW" => "oʊ",
-        "OY" => "ɔɪ",
-        "P" => "p",
-        "R" => "ɹ",
-        "S" => "s",
-        "SH" => "ʃ",
-        "T" => "t",
-        "TH" => "θ",
-        "UH" => "ʊ",
-        "UW" => "u",
-        "V" => "v",
-        "W" => "w",
-        "Y" => "j",
-        "Z" => "z",
-        "ZH" => "ʒ",
-        "|" => " ",
-        "." => ". ",
-        "!" => "! ",
-        "?" => "? ",
-        "," => ", ",
-        ";" => "; ",
-        ":" => ": ",
-        _ => {
-            return Err(invalid_output(format!(
-                "cannot map lowered ARPAbet symbol `{symbol}` to StyleTTS2 text-cleaner input"
-            )));
-        }
-    };
-    Ok(ipa)
-}
-
-fn styletts2_character_id(character: char) -> Option<i64> {
-    const SYMBOLS: &str = "$;:,.!?¡¿—…\"«»“” ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘̩ᵻ";
-    SYMBOLS
-        .chars()
-        .position(|symbol| symbol == character)
-        .map(|index| index as i64)
+    styletts2_token_ids_for_symbols(&sequence.tokens)
 }
 
 fn reference_audio_uri_from_style(style: Option<&StyleRef>) -> Option<&str> {
@@ -699,6 +662,23 @@ fn reference_audio_path(uri: &str) -> Result<PathBuf, StyleTts2Error> {
         )));
     }
     Ok(PathBuf::from(uri))
+}
+
+fn ensure_reference_wav_readable(uri: &str) -> Result<(), StyleTts2Error> {
+    let path = reference_audio_path(uri)?;
+    let reader = hound::WavReader::open(&path).map_err(|error| {
+        backend_error(format!(
+            "failed to open StyleTTS2 reference WAV {}: {error}",
+            path.display()
+        ))
+    })?;
+    if reader.spec().channels == 0 {
+        return Err(invalid_output(format!(
+            "StyleTTS2 reference WAV {} has zero channels",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn read_reference_wav_mono_24khz(path: &Path) -> Result<Vec<f32>, StyleTts2Error> {
@@ -1032,6 +1012,26 @@ mod tests {
         assert_eq!(ids[0], 0);
         assert_eq!(ids.last(), Some(&0));
         assert!(ids.contains(&styletts2_character_id('!').expect("punctuation id")));
+    }
+
+    #[test]
+    fn affricates_lower_to_espeak_style_digraph_tokens() {
+        assert_eq!(styletts2_text_for_symbol("CH").expect("CH maps"), "tʃ");
+        assert_eq!(styletts2_text_for_symbol("JH").expect("JH maps"), "dʒ");
+
+        let ids = styletts2_token_ids(&StyleTts2SymbolSequence {
+            tokens: vec![token("CH"), token("EY"), token("N"), token("JH")],
+        })
+        .expect("token ids");
+
+        let expected_inner = ['t', 'ʃ', 'e', 'ɪ', 'n', 'd', 'ʒ']
+            .into_iter()
+            .map(|character| styletts2_character_id(character).expect("character id"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(&ids[1..ids.len() - 1], expected_inner.as_slice());
+        assert!(!ids.contains(&styletts2_character_id('ʧ').expect("ligature CH id")));
+        assert!(!ids.contains(&styletts2_character_id('ʤ').expect("ligature JH id")));
     }
 
     fn token(symbol: &str) -> StyleTts2SymbolToken {

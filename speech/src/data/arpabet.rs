@@ -1,3 +1,4 @@
+use crate::data::cmudict::{CmuPhoneme, CmuStress};
 use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::phonetics::Phone;
@@ -122,6 +123,35 @@ pub fn is_vowel(symbol: &str) -> bool {
     entry(base).is_some_and(|entry| entry.major == "vowel")
 }
 
+pub fn reduced_phone_for_cmu(base: &str, stress: Option<CmuStress>) -> Option<PhoneId> {
+    match (base, stress) {
+        ("AH", Some(CmuStress::Unstressed)) => Some(phone_id_for_ipa("ə")),
+        ("AH", Some(CmuStress::Primary | CmuStress::Secondary)) => Some(phone_id_for_ipa("ʌ")),
+        ("ER", Some(CmuStress::Unstressed)) => Some(phone_id_for_ipa("ɚ")),
+        ("ER", Some(CmuStress::Primary | CmuStress::Secondary)) => Some(phone_id_for_ipa("ɝ")),
+        _ => None,
+    }
+}
+
+pub fn is_reduced_vowel(base: &str, stress: Option<CmuStress>) -> bool {
+    matches!((base, stress), ("AH" | "ER", Some(CmuStress::Unstressed)))
+}
+
+pub fn cmu_token_features(cmu: &CmuPhoneme) -> FeatureBundle {
+    let mut bundle = entry(&cmu.base).map(feature_bundle).unwrap_or_default();
+    put(&mut bundle, "source_schema", "cmudict");
+    put(&mut bundle, "base_symbol", &cmu.base);
+    if let Some(stress) = cmu.stress {
+        put(&mut bundle, "stress", stress_feature_value(stress));
+    }
+    put_bool(
+        &mut bundle,
+        "reduced_vowel",
+        is_reduced_vowel(&cmu.base, cmu.stress),
+    );
+    bundle
+}
+
 pub fn phone_id_for_ipa(ipa: &str) -> PhoneId {
     PhoneId::from(format!("ipa.phone.{ipa}"))
 }
@@ -192,4 +222,12 @@ fn put_bool(bundle: &mut FeatureBundle, name: &str, value: bool) {
         FeatureId(format!("phonology.{name}")),
         Spec::Known(FeatureValue::Bool(value)),
     );
+}
+
+fn stress_feature_value(stress: CmuStress) -> &'static str {
+    match stress {
+        CmuStress::Primary => "primary",
+        CmuStress::Secondary => "secondary",
+        CmuStress::Unstressed => "unstressed",
+    }
 }
