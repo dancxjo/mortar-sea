@@ -1,5 +1,7 @@
 use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 
+use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
 use mortar_sea::voice_stream::{
     BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser, parse_voice_stream,
@@ -844,11 +846,89 @@ fn draft_voice_speech(
             tone,
             pace,
         });
+    synthesize_voice_speech_audio(state, generation_id, observation.id, thought.text.clone());
 
     Some(PendingVoiceSpeech {
         observation,
         generation_id,
     })
+}
+
+fn synthesize_voice_speech_audio(
+    state: &AppState,
+    generation_id: Uuid,
+    utterance_id: Uuid,
+    text: String,
+) {
+    let state = state.clone();
+    let events = state.realtime_experience_events.clone();
+    tokio::spawn(async move {
+        let text_for_task = text.clone();
+        let wav = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let output_path =
+                PathBuf::from("target/face-mouth").join(format!("voice-{utterance_id}.wav"));
+            let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
+                text_for_task,
+                "en-US",
+                &output_path,
+            )?;
+            let bytes = std::fs::read(&artifact.path)?;
+            Ok((bytes, artifact))
+        })
+        .await;
+
+        match wav {
+            Ok(Ok((bytes, artifact))) => {
+                info!(
+                    %utterance_id,
+                    %generation_id,
+                    path = %artifact.path.display(),
+                    sample_rate_hz = artifact.sample_rate_hz,
+                    samples = artifact.samples,
+                    duration_ms = artifact.duration_ms(),
+                    bytes = bytes.len(),
+                    "Mouth synthesized Piper WAV for browser playback"
+                );
+                let _ = events.send(RealTimeExperienceEvent::VoiceSpeechAudio {
+                    utterance_id,
+                    generation_id,
+                    observed_at: chrono::Utc::now(),
+                    text,
+                    mime: "audio/wav".to_string(),
+                    sample_rate_hz: artifact.sample_rate_hz,
+                    samples: artifact.samples,
+                    duration_ms: artifact.duration_ms(),
+                    data: general_purpose::STANDARD.encode(bytes),
+                });
+            }
+            Ok(Err(error)) => {
+                warn!(%utterance_id, %generation_id, error = %format!("{error:#}"), "Mouth Piper synthesis failed");
+                accept_mouth_event(
+                    &state,
+                    VoiceMouthEvent::VoiceSpeechInterrupted {
+                        utterance_id,
+                        generation_id,
+                        observed_at: chrono::Utc::now(),
+                        text,
+                        reason: format!("Mouth Piper synthesis failed: {error:#}"),
+                    },
+                );
+            }
+            Err(error) => {
+                warn!(%utterance_id, %generation_id, %error, "Mouth Piper synthesis task failed");
+                accept_mouth_event(
+                    &state,
+                    VoiceMouthEvent::VoiceSpeechInterrupted {
+                        utterance_id,
+                        generation_id,
+                        observed_at: chrono::Utc::now(),
+                        text,
+                        reason: format!("Mouth Piper synthesis task failed: {error}"),
+                    },
+                );
+            }
+        }
+    });
 }
 
 fn speech_boundary_hint(boundary: &SpeechBoundary) -> Option<String> {

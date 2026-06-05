@@ -191,7 +191,12 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_speech_draft') {
           this.activeVoiceGenerationId = message.generation_id;
-          this.speakVoiceDraft(message);
+          this.prepareVoiceDraft(message);
+          return;
+        }
+        if (message.type === 'voice_speech_audio') {
+          this.activeVoiceGenerationId = message.generation_id;
+          this.playVoiceSpeechAudio(message);
           return;
         }
         if (message.type === 'voice_speech_started') {
@@ -207,6 +212,10 @@ window.faceApp = function faceApp() {
         if (message.type === 'voice_speech_interrupted') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
           this.voiceStatus = 'thinking';
+          if (message.reason) {
+            this.voiceLastError = message.reason;
+            this.voicePlaybackDetail = message.reason;
+          }
           return;
         }
         if (message.type === 'voice_observation') {
@@ -266,51 +275,25 @@ window.faceApp = function faceApp() {
       });
     },
 
-    async speakVoiceDraft(draft) {
+    prepareVoiceDraft(draft) {
       this.stopVoiceMouth('superseded by newer voice draft');
       this.voiceCurrentDraft = draft;
       this.voiceStatus = 'synthesizing';
       this.voiceLastError = '';
-      this.voicePlaybackDetail = `Synthesizing "${draft.text || ''}"`;
+      this.voicePlaybackDetail = `Waiting for server audio for "${draft.text || ''}"`;
       this.voiceMouthOpen = false;
+    },
 
-      let response;
-      try {
-        response = await fetch('/api/voice/piper-wav', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            text: draft.text || '',
-            variant: 'en-US',
-          }),
-        });
-      } catch (error) {
-        this.voiceLastError = error.message || 'Piper ONNX voice request failed';
-        this.voicePlaybackDetail = this.voiceLastError;
-        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: this.voiceLastError,
-        });
-        this.clearFinishedVoiceDraft(draft);
-        return;
-      }
+    async playVoiceSpeechAudio(audioMessage) {
+      const draft = this.voiceCurrentDraft && this.voiceDraftMatches(this.voiceCurrentDraft, audioMessage)
+        ? this.voiceCurrentDraft
+        : audioMessage;
+      this.voiceCurrentDraft = draft;
 
-      if (!response.ok) {
-        const message = await response.text().catch(() => '');
-        this.voiceLastError = message || `Piper ONNX voice request returned ${response.status}`;
-        this.voicePlaybackDetail = this.voiceLastError;
-        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: this.voiceLastError,
-        });
-        this.clearFinishedVoiceDraft(draft);
-        return;
-      }
-
-      if (this.voiceCurrentDraft !== draft) return;
-
-      const blob = await response.blob();
-      const durationMs = response.headers.get('x-duration-ms');
-      const samples = response.headers.get('x-samples');
-      this.voicePlaybackDetail = `WAV ready: ${durationMs || '?'} ms, ${samples || '?'} samples, ${blob.size} bytes`;
+      const blob = this.base64ToBlob(audioMessage.data || '', audioMessage.mime || 'audio/wav');
+      const durationMs = audioMessage.duration_ms;
+      const samples = audioMessage.samples;
+      this.voicePlaybackDetail = `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples, ${blob.size} bytes`;
       console.info('Mortar voice WAV ready', {
         utterance_id: draft.utterance_id,
         duration_ms: durationMs,
@@ -410,6 +393,28 @@ window.faceApp = function faceApp() {
         });
         this.clearFinishedVoiceDraft(draft);
       }
+    },
+
+    voiceDraftMatches(draft, message) {
+      return draft
+        && message
+        && draft.utterance_id === message.utterance_id
+        && draft.generation_id === message.generation_id;
+    },
+
+    base64ToBlob(data, mime) {
+      const binary = window.atob(data);
+      const chunkSize = 32768;
+      const chunks = [];
+      for (let offset = 0; offset < binary.length; offset += chunkSize) {
+        const slice = binary.slice(offset, offset + chunkSize);
+        const bytes = new Uint8Array(slice.length);
+        for (let index = 0; index < slice.length; index += 1) {
+          bytes[index] = slice.charCodeAt(index);
+        }
+        chunks.push(bytes);
+      }
+      return new Blob(chunks, { type: mime });
     },
 
     clearFinishedVoiceDraft(draft) {
