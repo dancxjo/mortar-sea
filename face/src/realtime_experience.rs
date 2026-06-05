@@ -540,7 +540,7 @@ fn sanitize_context_items_with_limit(
     let mut sanitized = Vec::new();
 
     for item in items {
-        let Some(item) = compact_context_text(&item, MAX_CONTEXT_FRAME_TEXT_CHARS) else {
+        let Some(item) = sanitize_context_text(&item, section) else {
             continue;
         };
         if is_bad_context_item(&item, section) {
@@ -556,6 +556,14 @@ fn sanitize_context_items_with_limit(
     }
 
     sanitized
+}
+
+fn sanitize_context_text(text: &str, section: ContextSection) -> Option<String> {
+    if matches!(section, ContextSection::What) {
+        normalize_context_text(text)
+    } else {
+        compact_context_text(text, MAX_CONTEXT_FRAME_TEXT_CHARS)
+    }
 }
 
 fn compact_context_frame(context: ContextFrame) -> ContextFrame {
@@ -738,11 +746,7 @@ fn is_sensor_status_context_item(item: &str) -> bool {
 }
 
 fn compact_context_text(text: &str, max_chars: usize) -> Option<String> {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let compact = compact.trim();
-    if compact.is_empty() {
-        return None;
-    }
+    let compact = normalize_context_text(text)?;
 
     let mut shortened = String::new();
     for (index, ch) in compact.chars().enumerate() {
@@ -754,6 +758,16 @@ fn compact_context_text(text: &str, max_chars: usize) -> Option<String> {
     }
 
     Some(shortened)
+}
+
+fn normalize_context_text(text: &str) -> Option<String> {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        return None;
+    }
+
+    Some(compact.to_owned())
 }
 
 fn is_bad_context_item(item: &str, section: ContextSection) -> bool {
@@ -1228,6 +1242,36 @@ mod tests {
         );
         assert_eq!(context.where_, vec!["a room with shelves".to_owned()]);
         assert_eq!(context.why, fallback.why);
+    }
+
+    #[test]
+    fn generated_context_frame_keeps_full_what_bullets() {
+        let fallback = ContextFrame {
+            who: Vec::new(),
+            what: vec!["fallback".to_owned()],
+            where_: Vec::new(),
+            when: "now".to_owned(),
+            why: vec!["Understand what appears to be happening right now.".to_owned()],
+            how: Vec::new(),
+        };
+        let long_what = "A person is describing a specific workflow at the desk with several details about the tools, timing, camera view, and current interaction that should remain intact in the context frame.";
+        let generated = json!({
+            "context_frame": {
+                "who": [],
+                "what": [long_what],
+                "where": [],
+                "when": "now",
+                "why": [],
+                "how": []
+            }
+        })
+        .to_string();
+
+        let context =
+            parse_generated_context_frame(&generated, &fallback).expect("generated context frame");
+
+        assert_eq!(context.what, vec![long_what.to_owned()]);
+        assert!(!context.render().contains('…'));
     }
 
     #[test]

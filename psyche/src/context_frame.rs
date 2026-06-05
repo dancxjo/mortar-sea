@@ -88,7 +88,7 @@ fn collect_what(
             TimelineEntry::Experience(experience) => {
                 push_unique(
                     &mut what,
-                    compact_text(&experience.what, MAX_CONTEXT_TEXT_CHARS),
+                    normalize_context_text(&experience.what),
                     max_items,
                 );
             }
@@ -101,14 +101,14 @@ fn collect_what(
                         .payload
                         .get("what")
                         .and_then(Value::as_str)
-                        .and_then(|text| compact_text(text, MAX_CONTEXT_TEXT_CHARS)),
+                        .and_then(normalize_context_text),
                     max_items,
                 );
             }
             TimelineEntry::Impression(impression) => {
                 push_unique(
                     &mut what,
-                    compact_text(&impression.text, MAX_CONTEXT_TEXT_CHARS),
+                    normalize_context_text(&impression.text),
                     max_items,
                 );
             }
@@ -119,7 +119,7 @@ fn collect_what(
                         .payload
                         .get("text")
                         .and_then(Value::as_str)
-                        .and_then(|text| compact_text(text, MAX_CONTEXT_TEXT_CHARS)),
+                        .and_then(normalize_context_text),
                     max_items,
                 );
             }
@@ -491,11 +491,7 @@ fn format_when(window: &[TimelineEntry]) -> String {
 }
 
 fn compact_text(text: &str, max_chars: usize) -> Option<String> {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let compact = compact.trim();
-    if compact.is_empty() {
-        return None;
-    }
+    let compact = normalize_context_text(text)?;
 
     let mut shortened = String::new();
     for (index, ch) in compact.chars().enumerate() {
@@ -507,6 +503,16 @@ fn compact_text(text: &str, max_chars: usize) -> Option<String> {
     }
 
     Some(shortened)
+}
+
+fn normalize_context_text(text: &str) -> Option<String> {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        return None;
+    }
+
+    Some(compact.to_owned())
 }
 
 fn push_unique(items: &mut Vec<String>, value: Option<String>, max_items: usize) {
@@ -597,6 +603,25 @@ mod tests {
         assert!(context.how.contains(&"ASR Faculty".to_owned()));
         assert!(context.when.contains("4 entries"));
         assert_eq!(context.render().matches("WHO\n").count(), 1);
+    }
+
+    #[test]
+    fn context_frame_keeps_full_what_bullets() {
+        let t0 = now();
+        let long_what = "A person is describing a specific workflow at the desk with several details about the tools, timing, camera view, and current interaction that should remain intact in the context frame.";
+        let impression = Impression::new(Vec::new(), t0, t0, long_what);
+        let experience = Experience::new(vec![impression.id], t0, t0, long_what);
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Impression(impression));
+        frame.push(TimelineEntry::Experience(experience));
+
+        let context = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let rendered = context.render();
+
+        assert_eq!(context.what[0], long_what);
+        assert!(rendered.contains(&format!("- {long_what}")));
+        assert!(!rendered.contains('…'));
     }
 
     #[test]

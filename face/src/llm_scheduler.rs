@@ -423,6 +423,41 @@ mod tests {
         assert_eq!(engine.append_attempts, 1);
     }
 
+    #[test]
+    fn controlled_generation_appends_live_input_while_tokens_continue() {
+        let id = Uuid::new_v4();
+        let mut engine = ScriptedEngine::new(
+            id,
+            [
+                vec![LlmEvent::Token {
+                    text: "still".to_owned(),
+                }],
+                vec![LlmEvent::Token {
+                    text: " going".to_owned(),
+                }],
+                vec![LlmEvent::Completed],
+            ],
+        );
+        let control = LlmStreamControl::new();
+        control.append_prompt("live experience update");
+        let (events, _receiver) = tokio::sync::broadcast::channel(8);
+
+        let generated = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::Voice,
+            Instant::now(),
+            GenerationRequest::default(),
+            Some(control),
+            None,
+            &events,
+        )
+        .expect("live prompt input should append during active generation");
+
+        assert_eq!(generated, "still going");
+        assert_eq!(engine.append_attempts, 1);
+    }
+
     struct ScriptedEngine {
         id: GenerationId,
         polls: VecDeque<Vec<LlmEvent>>,
@@ -678,7 +713,9 @@ fn run_generation(
             )? {
                 return Ok(generated);
             }
-        } else if let Some(control) = &control {
+        }
+
+        if let Some(control) = &control {
             let appends = {
                 let mut queued = control
                     .appends
