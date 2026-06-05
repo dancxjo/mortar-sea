@@ -885,6 +885,14 @@ mod tests {
             .expect("contraction should phonemicize");
 
         assert_eq!(phoneme_symbols(&output), ["AY1", "L"]);
+        assert!(output.warnings.iter().all(|warning| {
+            !matches!(
+                warning.kind,
+                PronunciationWarningKind::GuessedWord
+                    | PronunciationWarningKind::MixedAlphaNumeric
+                    | PronunciationWarningKind::UnknownPronunciation
+            )
+        }));
         assert!(
             output
                 .phonemes
@@ -1056,6 +1064,24 @@ mod tests {
             token.provenance.source == EvidenceSource::Rule
                 && token.provenance.method.contains("unknown-word fallback")
                 && token.confidence < 1.0
+        }));
+    }
+
+    #[test]
+    fn punctuation_emits_typed_boundaries() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("hello, world?", "en-US"))
+            .expect("punctuated text should phonemicize");
+
+        assert!(output.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::Phrase
+                && boundary.after_grapheme_index == 0
+                && boundary.pause == Some(PauseKind::Comma)
+        }));
+        assert!(output.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::Phrase
+                && boundary.after_grapheme_index == 1
+                && boundary.terminal == Some(TerminalPunctuation::Question)
         }));
     }
 }
