@@ -7,7 +7,7 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 #[cfg(feature = "piper-onnx")]
 use ort::value::{DynTensorValueType, Tensor, TensorElementType};
 use serde_json::Value;
-use speech::{Spec, UtterancePlan, phone_display_symbol, phoneme_display_symbol};
+use speech::{Spec, UtterancePlan, phoneme_display_symbol};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PiperVoiceConfig {
@@ -143,7 +143,7 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             if phone_id.0 == "boundary.word" {
                 push_symbol(&mut symbols, " ");
             } else {
-                push_symbol(&mut symbols, phone_display_symbol(phone_id));
+                push_symbol(&mut symbols, piper_symbol_for_phone_id(&phone_id.0));
             }
         }
     } else {
@@ -155,6 +155,51 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
         }
     }
     PiperPhonemeSequence { symbols }
+}
+
+fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
+    match phone_id {
+        "ipa.phone.ɑ" => "AA",
+        "ipa.phone.æ" => "AE",
+        "ipa.phone.ʌ" => "AH",
+        "ipa.phone.ɔ" => "AO",
+        "ipa.phone.aʊ" => "AW",
+        "ipa.phone.aɪ" => "AY",
+        "ipa.phone.b" => "B",
+        "ipa.phone.tʃ" => "CH",
+        "ipa.phone.d" => "D",
+        "ipa.phone.ð" => "DH",
+        "ipa.phone.ɛ" => "EH",
+        "ipa.phone.ɝ" | "ipa.phone.ɚ" => "ER",
+        "ipa.phone.eɪ" => "EY",
+        "ipa.phone.f" => "F",
+        "ipa.phone.ɡ" => "G",
+        "ipa.phone.h" => "HH",
+        "ipa.phone.ɪ" => "IH",
+        "ipa.phone.iː" | "ipa.phone.i" => "IY",
+        "ipa.phone.dʒ" => "JH",
+        "ipa.phone.k" => "K",
+        "ipa.phone.l" => "L",
+        "ipa.phone.m" => "M",
+        "ipa.phone.n" => "N",
+        "ipa.phone.ŋ" => "NG",
+        "ipa.phone.oʊ" => "OW",
+        "ipa.phone.ɔɪ" => "OY",
+        "ipa.phone.p" => "P",
+        "ipa.phone.ɹ" => "R",
+        "ipa.phone.s" => "S",
+        "ipa.phone.ʃ" => "SH",
+        "ipa.phone.t" | "ipa.phone.ɾ" => "T",
+        "ipa.phone.θ" => "TH",
+        "ipa.phone.ʊ" => "UH",
+        "ipa.phone.uː" | "ipa.phone.u" => "UW",
+        "ipa.phone.v" => "V",
+        "ipa.phone.w" => "W",
+        "ipa.phone.j" => "Y",
+        "ipa.phone.z" => "Z",
+        "ipa.phone.ʒ" => "ZH",
+        _ => phone_id.rsplit('.').next().unwrap_or(phone_id),
+    }
 }
 
 impl PiperPhonemeSequence {
@@ -624,6 +669,7 @@ fn is_arpabet_vowel(symbol: &str) -> bool {
     )
 }
 
+#[cfg(feature = "piper-onnx")]
 fn validate_config(config: &PiperVoiceConfig) -> Result<()> {
     ensure!(
         config.sample_rate_hz > 0,
@@ -833,6 +879,7 @@ fn resolve_tensor_by_alias<'a>(
         .find_map(|alias| specs.iter().find(|spec| spec.name == *alias))
 }
 
+#[cfg(feature = "piper-onnx")]
 fn inference_scales(config: &PiperVoiceConfig) -> [f32; 3] {
     [
         config.noise_scale.unwrap_or(0.667),
@@ -955,7 +1002,7 @@ mod tests {
         let sequence = piper_sequence_from_plan(&plan);
         assert_eq!(
             sequence.symbols,
-            vec!["h", "ʌ", "l", "oʊ", " ", "w", "ɝ", "l", "d"]
+            vec!["HH", "AH", "L", "OW", " ", "W", "ER", "L", "D"]
         );
     }
 
