@@ -1,6 +1,9 @@
 use std::collections::{HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
+use mortar_sea::voice_stream::{
+    BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser,
+};
 use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -80,7 +83,8 @@ pub(crate) fn accept_mouth_event(state: &AppState, event: VoiceMouthEvent) {
 struct ActiveVoiceGeneration {
     generation_id: Uuid,
     control: LlmStreamControl,
-    segmenter: VoiceSentenceSegmenter,
+    voice_stream: VoiceStreamParser,
+    pending_breath_groups: VecDeque<BreathGroup>,
     experience_ids: Vec<Uuid>,
 }
 
@@ -280,24 +284,20 @@ async fn run_voice(state: AppState) {
                             },
                         );
                         remember_generated_tail(&mut generated_tail, &text);
-                        if pending_speech.is_some() {
-                            continue;
-                        }
-                        for sentence in current.segmenter.push_str(&text) {
-                            if let Some(draft) = draft_voice_speech(
-                                &state,
-                                current.generation_id,
-                                sentence,
-                                &current.experience_ids,
-                            ) {
+                        collect_voice_stream_events(
+                            current.generation_id,
+                            current.voice_stream.push_chunk(&text),
+                            &mut current.pending_breath_groups,
+                        );
+                        if pending_speech.is_none() {
+                            if let Some(draft) = draft_next_voice_speech(&state, current) {
                                 current.control.pause();
                                 pending_speech = Some(draft);
-                                break;
                             }
                         }
                     }
                     VoiceGenerationEvent::Done { generation_id, result } => {
-                        let Some(current) = active.take() else {
+                        let Some(mut current) = active.take() else {
                             continue;
                         };
                         if current.generation_id != generation_id {
@@ -310,17 +310,16 @@ async fn run_voice(state: AppState) {
                                 if generated_tail.trim().is_empty() {
                                     remember_generated_tail(&mut generated_tail, &generated);
                                 }
+                                collect_voice_stream_events(
+                                    current.generation_id,
+                                    current.voice_stream.finish(),
+                                    &mut current.pending_breath_groups,
+                                );
                                 if pending_speech.is_none() {
-                                    for sentence in current.segmenter.finish() {
-                                        if let Some(draft) = draft_voice_speech(
-                                            &state,
-                                            current.generation_id,
-                                            sentence,
-                                            &current.experience_ids,
-                                        ) {
-                                            pending_speech = Some(draft);
-                                            break;
-                                        }
+                                    if let Some(draft) =
+                                        draft_next_voice_speech(&state, &mut current)
+                                    {
+                                        pending_speech = Some(draft);
                                     }
                                 }
                             }
@@ -698,6 +697,7 @@ async fn handle_voice_mouth_event(
                 state,
                 active,
                 generation_tx,
+                pending_speech,
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
@@ -750,6 +750,7 @@ async fn handle_voice_mouth_event(
                 state,
                 active,
                 generation_tx,
+                pending_speech,
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
@@ -772,13 +773,57 @@ fn pending_matches(
     })
 }
 
+fn collect_voice_stream_events(
+    generation_id: Uuid,
+    events: Vec<VoiceStreamEvent>,
+    pending_breath_groups: &mut VecDeque<BreathGroup>,
+) {
+    for event in events {
+        match event {
+            VoiceStreamEvent::BreathGroup(group) => {
+                pending_breath_groups.push_back(group);
+            }
+            VoiceStreamEvent::ParseWarning(warning) => {
+                warn!(
+                    %generation_id,
+                    message = %warning.message,
+                    "Voice stream parse warning"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn draft_next_voice_speech(
+    state: &AppState,
+    current: &mut ActiveVoiceGeneration,
+) -> Option<PendingVoiceSpeech> {
+    while let Some(group) = current.pending_breath_groups.pop_front() {
+        if let Some(draft) = draft_voice_speech(
+            state,
+            current.generation_id,
+            group,
+            &current.experience_ids,
+        ) {
+            return Some(draft);
+        }
+    }
+
+    None
+}
+
 fn draft_voice_speech(
     state: &AppState,
     generation_id: Uuid,
-    sentence: String,
+    group: BreathGroup,
     experience_ids: &[Uuid],
 ) -> Option<PendingVoiceSpeech> {
-    let thought = parse_voice_thought(&sentence)?;
+    let (fallback_boundary, fallback_tone, fallback_pace) = speech_hints_for_text(&group.text);
+    let boundary = speech_boundary_hint(&group.boundary).or(fallback_boundary);
+    let tone = group.tone.clone().or(fallback_tone);
+    let pace = group.pace.clone().or(fallback_pace);
+    let thought = parse_voice_thought(&group.text)?;
     let observed_at = chrono::Utc::now();
     let observation = VoiceObservation {
         id: Uuid::new_v4(),
@@ -790,7 +835,6 @@ fn draft_voice_speech(
         confidence: VOICE_OBSERVATION_CONFIDENCE,
     };
 
-    let (boundary, tone, pace) = speech_hints_for_text(&thought.text);
     let _ = state
         .realtime_experience_events
         .send(RealTimeExperienceEvent::VoiceSpeechDraft {
@@ -808,6 +852,16 @@ fn draft_voice_speech(
         observation,
         generation_id,
     })
+}
+
+fn speech_boundary_hint(boundary: &SpeechBoundary) -> Option<String> {
+    match boundary {
+        SpeechBoundary::Continuing | SpeechBoundary::Final | SpeechBoundary::Interrupted => {
+            Some(boundary.as_attr_value().to_string())
+        }
+        SpeechBoundary::Unknown(value) if !value.trim().is_empty() => Some(value.clone()),
+        SpeechBoundary::Unknown(_) => None,
+    }
 }
 
 fn speech_hints_for_text(text: &str) -> (Option<String>, Option<String>, Option<String>) {
@@ -857,6 +911,7 @@ async fn resume_or_restart_voice_generation(
     state: &AppState,
     active: &mut Option<ActiveVoiceGeneration>,
     generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
+    pending_speech: &mut Option<PendingVoiceSpeech>,
     recent_experiences: &mut VecDeque<ExperienceRecord>,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
@@ -872,6 +927,13 @@ async fn resume_or_restart_voice_generation(
             current
                 .control
                 .append_prompt(format_voice_speech_feedback(feedback));
+        }
+        if pending_speech.is_none() {
+            if let Some(draft) = draft_next_voice_speech(state, current) {
+                current.control.pause();
+                *pending_speech = Some(draft);
+                return;
+            }
         }
         current.control.resume();
         return;
@@ -945,7 +1007,8 @@ fn start_voice_generation(
     ActiveVoiceGeneration {
         generation_id,
         control,
-        segmenter: VoiceSentenceSegmenter::new(),
+        voice_stream: VoiceStreamParser::default(),
+        pending_breath_groups: VecDeque::new(),
         experience_ids,
     }
 }
@@ -974,6 +1037,7 @@ fn voice_mouth_guidance_prompt() -> &'static str {
      To speak aloud through Mouth, you can and should wrap one short speakable sentence in <say>...</say>. \
      Text outside <say> stays internal and will not be spoken aloud. \
      To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
+     If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
      The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and then report that Mouth feedback back here before the Voice continues. \
      Do not write tool calls or stage directions for Mouth; use <say> only for the exact words to be spoken aloud.\n"
 }
