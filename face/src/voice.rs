@@ -1636,7 +1636,7 @@ fn split_trailing_emoji(text: &str) -> (&str, Option<String>) {
             continue;
         }
 
-        if ch.is_whitespace() && saw_emoji_base {
+        if saw_emoji_base {
             break;
         }
 
