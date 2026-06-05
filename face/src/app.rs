@@ -60,7 +60,7 @@ pub(crate) struct AppState {
     pub(crate) voice_impression_ids: Arc<RwLock<HashSet<Uuid>>>,
     pub(crate) llm_scheduler: LlmScheduler,
     pub(crate) voice_llm_scheduler: Option<LlmScheduler>,
-    pub(crate) face_detector: Arc<FaceDetector>,
+    pub(crate) face_detector: Arc<RwLock<Option<Arc<FaceDetector>>>>,
     pub(crate) face_detection_active: Arc<AtomicBool>,
     pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) face_detection_last_embedding: Arc<RwLock<Option<Vec<f32>>>>,
@@ -104,9 +104,8 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         None
     };
-    info!("initializing face analyzer");
-    let face_detector = Arc::new(FaceDetector::new(models.face)?);
-    info!("face analyzer ready");
+    let face_detector = Arc::new(RwLock::new(None));
+    spawn_face_analyzer_initialization(models.face, Arc::clone(&face_detector));
     let asr_backend = crate::asr::initialize_backend()?;
     let face_memory_config = FaceMemoryConfig::from_env()?;
     let face_memory = FaceMemory::from_config(&face_memory_config)?;
@@ -184,6 +183,29 @@ fn dedicated_voice_llm_enabled() -> bool {
         .ok()
         .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
         .unwrap_or(true)
+}
+
+fn spawn_face_analyzer_initialization(
+    paths: mortar_sea::models::FaceModelPaths,
+    target: Arc<RwLock<Option<Arc<FaceDetector>>>>,
+) {
+    info!("initializing face analyzer in background");
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || FaceDetector::new(paths))
+            .await
+            .context("face analyzer initialization task failed")
+            .and_then(|result| result);
+
+        match result {
+            Ok(detector) => {
+                *target.write().expect("face analyzer target lock") = Some(Arc::new(detector));
+                info!("face analyzer ready");
+            }
+            Err(err) => {
+                error!(%err, "face analyzer failed to initialize");
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {

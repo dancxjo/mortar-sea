@@ -86,9 +86,22 @@ pub(crate) fn spawn_face_detection(state: AppState) {
                 state.face_detection_active.store(false, Ordering::Release);
                 return;
             };
+            let Some(face_detector) = state
+                .face_detector
+                .read()
+                .expect("face analyzer lock")
+                .clone()
+            else {
+                debug!(
+                    source_frame_id = %frame.sensation.id,
+                    "face analyzer is not ready; skipping face detection"
+                );
+                state.face_detection_active.store(false, Ordering::Release);
+                return;
+            };
 
             let source_frame_id = frame.sensation.id;
-            match state.face_detector.detect_faces(frame.clone()).await {
+            match face_detector.detect_faces(frame.clone()).await {
                 Ok(crops) => {
                     let emitted = record_face_crops(&state, frame, crops);
                     if emitted > 0 {
