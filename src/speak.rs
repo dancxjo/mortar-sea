@@ -579,4 +579,29 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn fail_on_guessed_pronunciation_stops_before_synthesis() {
+        let error = run(SpeakCommand {
+            text: "zzq".into(),
+            variant: "en-US".into(),
+            backend: SpeakBackend::Mock,
+            output: PathBuf::from("target/should-not-write.wav"),
+            sample_rate_hz: 24_000,
+            voice_wav: None,
+            style_wav: None,
+            diffusion_steps: 5,
+            style_alpha: 0.3,
+            style_beta: 0.7,
+            embedding_scale: 1.0,
+            style_seed: 0,
+            debug_pronunciation: false,
+            max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
+            no_tts_chunking: false,
+            fail_on_guessed_pronunciation: true,
+        })
+        .expect_err("guessed pronunciation should fail");
+
+        assert!(error.to_string().contains("guessed pronunciation"));
+    }
 }
