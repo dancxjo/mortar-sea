@@ -19,6 +19,8 @@ const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
 const MAX_FIELD_VISION_DATA_CHARS: usize = 2_000_000;
 const MAX_IMAGE_SUMMARY_SAMPLES: u32 = 6_400;
 const MAX_FIELD_VISION_LOG_CHARS: usize = 220;
+const FIELD_VISION_FALLBACK_IMPRESSION: &str =
+    "I have a live visual field, but I cannot make out a grounded visual impression from it.";
 
 #[derive(Debug, Clone)]
 struct VisionFieldDescription {
@@ -102,9 +104,8 @@ async fn describe_field_of_vision(
     }
 
     let summary = summarize_frame(&frame)?;
-    let fallback = summary.to_impression();
     let image_bytes = decode_frame_image_bytes(&frame)?;
-    let prompt = build_field_vision_prompt(&frame, &summary);
+    let prompt = build_field_vision_prompt();
     let generated = state
         .llm_scheduler
         .generate(
@@ -126,7 +127,7 @@ async fn describe_field_of_vision(
         .await?;
 
     Ok(VisionFieldDescription {
-        text: clean_impression(&generated, &fallback),
+        text: clean_impression(&generated, FIELD_VISION_FALLBACK_IMPRESSION),
         payload: serde_json::to_value(summary).expect("frame visual summary is serializable"),
     })
 }
@@ -139,32 +140,26 @@ fn oversized_field_impression(frame: &RawVisionFrame) -> String {
 }
 
 fn llm_stop_markers() -> Vec<String> {
-    vec!["<turn|>".to_string()]
+    vec![
+        "<turn|>".to_string(),
+        "<end_of_turn>".to_string(),
+        "<|im_end|>".to_string(),
+    ]
 }
 
 fn field_vision_system_prompt() -> &'static str {
     "You are the field-vision faculty between the eye and the Wit. \
 You receive my live field of vision, not a detached image.\n\
+Infer only from the attached visual input. Name concrete visible objects, people, layout, text, or activity when present.\n\
 Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
 If people are visible, do not assume any visible person is me unless the field of vision is clearly a mirror or reflection.\n\
-Do not mention screenshots, photos, frames, cameras, metadata, data URLs, or analysis. Return only the impression sentence."
+Do not mention screenshots, photos, frames, cameras, metadata, data URLs, computed facts, or analysis. Return only the impression sentence."
 }
 
-fn build_field_vision_prompt(frame: &RawVisionFrame, summary: &FrameVisualSummary) -> String {
-    format!(
-        "My current field of vision is attached as image input. The following facts were also computed from the same visual field.\n\
-source={} sequence={} occurred_at={} size={}x{} mime={}\n\
-facts={}\n\
-Write one short first-person present-tense impression from the image. Use the computed facts only as support.\n\
-",
-        frame.sensation.source.sensor_id,
-        frame.sensation.sequence,
-        frame.sensation.occurred_at.to_rfc3339(),
-        frame.sensation.media.width,
-        frame.sensation.media.height,
-        frame.sensation.media.mime,
-        serde_json::to_string(summary).expect("frame visual summary is serializable"),
-    )
+fn build_field_vision_prompt() -> &'static str {
+    "My current field of vision is attached as image input.\n\
+Write one short first-person present-tense impression from the visual content. \
+Prefer concrete scene details over lighting or color summaries."
 }
 
 fn summarize_frame(frame: &RawVisionFrame) -> anyhow::Result<FrameVisualSummary> {
@@ -358,17 +353,8 @@ fn dominant_color_label(red: f32, green: f32, blue: f32, saturation: f32) -> &'s
     }
 }
 
-impl FrameVisualSummary {
-    fn to_impression(&self) -> String {
-        format!(
-            "I see a {}, {}, {} field of view dominated by {} tones.",
-            self.brightness, self.colorfulness, self.visual_detail, self.dominant_color
-        )
-    }
-}
-
 fn clean_impression(generated: &str, fallback: &str) -> String {
-    let trimmed_generated = generated.trim();
+    let trimmed_generated = strip_known_stop_markers(generated.trim());
     if let Some(json_text) = extract_nonempty_json_string(trimmed_generated) {
         return json_text;
     }
@@ -388,6 +374,19 @@ fn clean_impression(generated: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn strip_known_stop_markers(mut text: &str) -> &str {
+    loop {
+        let trimmed = text.trim();
+        let without_marker = ["<turn|>", "<end_of_turn>", "<|im_end|>"]
+            .iter()
+            .find_map(|marker| trimmed.strip_suffix(marker).map(str::trim));
+        match without_marker {
+            Some(next) if next != trimmed => text = next,
+            _ => return trimmed,
+        }
     }
 }
 
@@ -489,34 +488,20 @@ mod tests {
         }
     }
 
-    fn test_summary() -> FrameVisualSummary {
-        FrameVisualSummary {
-            width: 224,
-            height: 224,
-            brightness: "bright",
-            dominant_color: "red",
-            colorfulness: "colorful",
-            contrast: "low contrast",
-            visual_detail: "flat",
-            average_rgb: [240, 20, 20],
-            luminance_mean: 0.28,
-            luminance_stddev: 0.01,
-            saturation_mean: 0.9,
-            edge_energy: 0.0,
-        }
-    }
-
     #[test]
     fn field_vision_prompt_names_live_field_of_vision() {
-        let prompt =
-            build_field_vision_prompt(&raw_frame("data:image/jpeg;base64,abc123"), &test_summary());
+        let prompt = build_field_vision_prompt();
         let system = field_vision_system_prompt();
 
         assert!(system.contains("my live field of vision"));
         assert!(system.contains("not a detached image"));
+        assert!(system.contains("Infer only from the attached visual input"));
         assert!(system.contains("unless the field of vision is clearly a mirror or reflection"));
-        assert!(prompt.contains("facts={"));
-        assert!(prompt.contains("\"dominant_color\":\"red\""));
+        assert!(prompt.contains("concrete scene details"));
+        assert!(!prompt.contains("facts="));
+        assert!(!prompt.contains("source="));
+        assert!(!prompt.contains("mime="));
+        assert!(!prompt.contains("\"dominant_color\""));
         assert!(!prompt.contains("data:image/jpeg;base64,abc123"));
     }
 
@@ -528,10 +513,6 @@ mod tests {
         assert_eq!(summary.dominant_color, "red");
         assert_eq!(summary.colorfulness, "colorful");
         assert_eq!(summary.average_rgb, [240, 20, 20]);
-        assert_eq!(
-            summary.to_impression(),
-            "I see a dim, colorful, flat field of view dominated by red tones."
-        );
     }
 
     #[test]
@@ -547,6 +528,10 @@ mod tests {
     fn clean_impression_keeps_first_sentence_like_line() {
         assert_eq!(
             clean_impression("\"I am looking at a desk and monitor.\"\nextra", "fallback"),
+            "I am looking at a desk and monitor."
+        );
+        assert_eq!(
+            clean_impression("I am looking at a desk and monitor.<|im_end|>", "fallback"),
             "I am looking at a desk and monitor."
         );
     }

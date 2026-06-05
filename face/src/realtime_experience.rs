@@ -249,7 +249,7 @@ fn select_records_for_experience_prompt<'a>(
 fn fallback_impression_for_record(record: &SensationRecord) -> String {
     match record.kind.as_str() {
         "vision.face_crop" => format!("I see a face (in my eye \"{}\").", record.source.sensor_id),
-        "vision.frame" => format!("I see something with my eye ({}).", record.source.sensor_id),
+        "vision.frame" => format!("I'm looking with my eye ({}).", record.source.sensor_id),
         _ => format!("I sense {} from {}.", record.kind, record.source.sensor_id),
     }
 }
