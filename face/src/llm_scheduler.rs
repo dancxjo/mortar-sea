@@ -18,6 +18,40 @@ pub(crate) struct LlmScheduler {
     events: broadcast::Sender<RealTimeExperienceEvent>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LlmSchedulerConfig {
+    pub(crate) model_path: PathBuf,
+    pub(crate) projector_path: Option<PathBuf>,
+    pub(crate) context_size: u32,
+    pub(crate) max_tokens: usize,
+    pub(crate) gpu_layers: Option<u32>,
+    pub(crate) cpu_only: bool,
+}
+
+impl LlmSchedulerConfig {
+    pub(crate) fn main(model_path: PathBuf, projector_path: Option<PathBuf>) -> Self {
+        Self {
+            model_path,
+            projector_path,
+            context_size: llm_context_size("MORTAR_LLAMA_CONTEXT_SIZE", DEFAULT_LLM_CONTEXT_SIZE),
+            max_tokens: 256,
+            gpu_layers: None,
+            cpu_only: false,
+        }
+    }
+
+    pub(crate) fn dedicated_voice(model_path: PathBuf) -> Self {
+        Self {
+            model_path: voice_llm_model_path().unwrap_or(model_path),
+            projector_path: voice_llm_projector_path(),
+            context_size: llm_context_size("MORTAR_VOICE_LLAMA_CONTEXT_SIZE", 8_192),
+            max_tokens: 96,
+            gpu_layers: voice_llm_gpu_layers(),
+            cpu_only: voice_llm_cpu_only(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LlmJobKind {
     Vision,
@@ -99,13 +133,16 @@ impl LlmScheduler {
         projector_path: Option<PathBuf>,
         events: broadcast::Sender<RealTimeExperienceEvent>,
     ) -> Result<Self> {
-        Self::start_named("face-llm-scheduler", model_path, projector_path, events)
+        Self::start_named(
+            "face-llm-scheduler",
+            LlmSchedulerConfig::main(model_path, projector_path),
+            events,
+        )
     }
 
     pub(crate) fn start_named(
         thread_name: impl Into<String>,
-        model_path: PathBuf,
-        projector_path: Option<PathBuf>,
+        config: LlmSchedulerConfig,
         events: broadcast::Sender<RealTimeExperienceEvent>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
@@ -114,15 +151,7 @@ impl LlmScheduler {
 
         thread::Builder::new()
             .name(thread_name.clone())
-            .spawn(move || {
-                run_scheduler(
-                    thread_name,
-                    model_path,
-                    projector_path,
-                    receiver,
-                    scheduler_events,
-                )
-            })
+            .spawn(move || run_scheduler(thread_name, config, receiver, scheduler_events))
             .context("failed to spawn LLM scheduler thread")?;
 
         Ok(Self { sender, events })
@@ -245,24 +274,33 @@ fn request_prompt_preview(request: &GenerationRequest, max_chars: usize) -> Stri
 
 fn run_scheduler(
     worker_name: String,
-    model_path: PathBuf,
-    projector_path: Option<PathBuf>,
+    config: LlmSchedulerConfig,
     receiver: mpsc::Receiver<SchedulerCommand>,
     events: broadcast::Sender<RealTimeExperienceEvent>,
 ) {
-    if let Some(projector_path) = &projector_path {
+    if let Some(projector_path) = &config.projector_path {
         info!(
             worker = %worker_name,
             projector = %projector_path.display(),
             "LLM scheduler loading multimodal projector"
         );
     }
-    info!(worker = %worker_name, model = %model_path.display(), "LLM scheduler loading model");
+    info!(
+        worker = %worker_name,
+        model = %config.model_path.display(),
+        context_size = config.context_size,
+        max_tokens = config.max_tokens,
+        gpu_layers = ?config.gpu_layers,
+        cpu_only = config.cpu_only,
+        "LLM scheduler loading model"
+    );
     let mut engine = match LlamaCppEngine::new(LlamaCppConfig {
-        model_path,
-        mmproj_path: projector_path,
-        context_size: llm_context_size(),
-        max_tokens: 256,
+        model_path: config.model_path,
+        mmproj_path: config.projector_path,
+        gpu_layers: config.gpu_layers,
+        cpu_only: config.cpu_only,
+        context_size: config.context_size,
+        max_tokens: config.max_tokens,
         temperature: 1.0,
         top_p: 0.95,
         top_k: 64,
@@ -347,12 +385,37 @@ fn pop_next_command(pending: &mut VecDeque<SchedulerCommand>) -> Option<Schedule
     pending.remove(index)
 }
 
-fn llm_context_size() -> u32 {
-    std::env::var("MORTAR_LLAMA_CONTEXT_SIZE")
+fn llm_context_size(env_key: &str, default: u32) -> u32 {
+    std::env::var(env_key)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_LLM_CONTEXT_SIZE)
+        .unwrap_or(default)
+}
+
+fn voice_llm_model_path() -> Option<PathBuf> {
+    std::env::var_os("MORTAR_VOICE_LLM_MODEL")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn voice_llm_projector_path() -> Option<PathBuf> {
+    std::env::var_os("MORTAR_VOICE_LLM_MMPROJ")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn voice_llm_gpu_layers() -> Option<u32> {
+    std::env::var("MORTAR_VOICE_LLAMA_GPU_LAYERS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn voice_llm_cpu_only() -> bool {
+    std::env::var("MORTAR_VOICE_LLAMA_CPU_ONLY")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(true)
 }
 
 fn run_generation(

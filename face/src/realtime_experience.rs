@@ -86,13 +86,7 @@ pub(crate) fn spawn_trace(state: AppState) {
             match stream_generation(&state, generation_id, prompt.clone(), events.clone()).await {
                 Ok(generated) => generated,
                 Err(err) => {
-                    let fallback = json!({
-                        "experiences": [{
-                            "what": format!("Gemma 4 Experience generation failed: {err}"),
-                            "impression_ids": []
-                        }]
-                    })
-                    .to_string();
+                    let fallback = format!("Gemma 4 Experience generation failed: {err}");
                     for token in streamable_chunks(&fallback, 18) {
                         let _ = events.send(RealTimeExperienceEvent::ResponseToken {
                             generation_id,
@@ -129,7 +123,7 @@ async fn stream_generation(
                 messages: vec![
                     ChatMessage::new(
                         "system",
-                        "You are the real-time Experience generator. Return only the requested JSON.",
+                        "You are the real-time Experience generator. Write first-person lived experience from the system's perspective. Return only plain text, not JSON.",
                     ),
                     ChatMessage::new("user", prompt),
                 ],
@@ -145,20 +139,6 @@ async fn stream_generation(
             },
         )
         .await
-}
-
-#[derive(Debug, Deserialize)]
-struct ExperienceResponse {
-    experiences: Vec<ExperienceDraft>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExperienceDraft {
-    what: String,
-    #[serde(default)]
-    impression_ids: Vec<Uuid>,
-    #[serde(default)]
-    confidence: Option<f32>,
 }
 
 fn record_generated_experiences(
@@ -201,58 +181,58 @@ fn parse_experience_records(
     generated: &str,
     impressions: &[VisionImpressionRecord],
 ) -> Vec<ExperienceRecord> {
-    let Some(json) = extract_json(generated) else {
+    let Some(what) = generated_experience_text(generated) else {
         return Vec::new();
     };
-    let drafts = serde_json::from_str::<ExperienceResponse>(json)
-        .map(|response| response.experiences)
-        .or_else(|_| serde_json::from_str::<Vec<ExperienceDraft>>(json));
-    let Ok(drafts) = drafts else {
-        return Vec::new();
-    };
+    let observed_at = chrono::Utc::now();
+    let impression_ids = recent_experience_impression_ids(impressions);
+    let occurred_at = impression_ids
+        .iter()
+        .filter_map(|id| {
+            impressions
+                .iter()
+                .find(|impression| impression.id == *id)
+                .map(|impression| impression.occurred_at)
+        })
+        .max()
+        .or_else(|| impressions.last().map(|impression| impression.occurred_at))
+        .unwrap_or(observed_at);
 
-    let fallback_impression_ids = impressions
+    vec![ExperienceRecord {
+        id: Uuid::new_v4(),
+        observed_at,
+        occurred_at,
+        what,
+        impression_ids,
+        confidence: 0.55,
+    }]
+}
+
+fn generated_experience_text(generated: &str) -> Option<String> {
+    let text = generated
+        .replace("<start_of_turn>model", "")
+        .replace("<end_of_turn>", "")
+        .replace("<turn|>", "");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim();
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
+    }
+}
+
+fn recent_experience_impression_ids(impressions: &[VisionImpressionRecord]) -> Vec<Uuid> {
+    let mut ids = impressions
         .iter()
         .rev()
         .take(RECENT_VISION_IMPRESSION_PROMPT_LIMIT)
         .map(|impression| impression.id)
         .collect::<Vec<_>>();
-    let observed_at = chrono::Utc::now();
-
-    drafts
-        .into_iter()
-        .filter_map(|draft| {
-            let what = draft.what.trim();
-            if what.is_empty() {
-                return None;
-            }
-            let impression_ids = if draft.impression_ids.is_empty() {
-                fallback_impression_ids.clone()
-            } else {
-                draft.impression_ids
-            };
-            let occurred_at = impression_ids
-                .iter()
-                .filter_map(|id| {
-                    impressions
-                        .iter()
-                        .find(|impression| impression.id == *id)
-                        .map(|impression| impression.occurred_at)
-                })
-                .max()
-                .or_else(|| impressions.last().map(|impression| impression.occurred_at))
-                .unwrap_or(observed_at);
-
-            Some(ExperienceRecord {
-                id: Uuid::new_v4(),
-                observed_at,
-                occurred_at,
-                what: what.to_owned(),
-                impression_ids,
-                confidence: draft.confidence.unwrap_or(0.55).clamp(0.0, 1.0),
-            })
-        })
-        .collect()
+    ids.reverse();
+    ids.dedup();
+    ids
 }
 
 fn extract_json(generated: &str) -> Option<&str> {
@@ -1130,6 +1110,37 @@ mod tests {
         assert!(prompt.contains(&format!("SENSATION vision.frame id={original_id}")));
         assert!(prompt.contains(impression_text));
         assert!(prompt.contains(&format!("about=[{original_id}]")));
+        assert!(prompt.contains("Return only plain text, not JSON"));
+        assert!(prompt.contains("Write as first-person lived experience"));
+        assert!(prompt.contains("what I see, where I am, and what seems present"));
+        assert!(!prompt.contains("{\"experiences\""));
+    }
+
+    #[test]
+    fn generated_plain_text_becomes_one_experience_for_recent_impressions() {
+        let t0 = chrono::Utc::now();
+        let old = vision_impression(Uuid::new_v4(), t0, "Old context.");
+        let old_id = old.id;
+        let first = vision_impression(
+            Uuid::new_v4(),
+            t0 + ChronoDuration::milliseconds(10),
+            "A man is present.",
+        );
+        let second = vision_impression(
+            Uuid::new_v4(),
+            t0 + ChronoDuration::milliseconds(20),
+            "The same man is still near the camera.",
+        );
+        let generated = "\nA man appears to be present near the camera. The repeated views seem to be the same ongoing moment, not separate events.\n";
+
+        let records = parse_experience_records(generated, &[old, first.clone(), second.clone()]);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].what,
+            "A man appears to be present near the camera. The repeated views seem to be the same ongoing moment, not separate events."
+        );
+        assert_eq!(records[0].impression_ids, vec![old_id, first.id, second.id]);
     }
 
     #[test]

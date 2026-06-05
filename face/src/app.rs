@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::face_detection::{self, FaceDetector};
 use crate::ingestion::{accept_frame, accept_location, sequence_from_raw_json};
-use crate::llm_scheduler::LlmScheduler;
+use crate::llm_scheduler::{LlmScheduler, LlmSchedulerConfig};
 use crate::location;
 use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
@@ -53,6 +53,7 @@ pub(crate) struct AppState {
     pub(crate) voice_observations: Arc<RwLock<VecDeque<VoiceObservation>>>,
     pub(crate) voice_impression_ids: Arc<RwLock<HashSet<Uuid>>>,
     pub(crate) llm_scheduler: LlmScheduler,
+    pub(crate) voice_llm_scheduler: Option<LlmScheduler>,
     pub(crate) face_detector: Arc<FaceDetector>,
     pub(crate) face_detection_active: Arc<AtomicBool>,
     pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
@@ -83,6 +84,16 @@ pub async fn run() -> anyhow::Result<()> {
         models.llm_projector.clone(),
         realtime_experience_events.clone(),
     )?;
+    let voice_llm_scheduler = if dedicated_voice_llm_enabled() {
+        info!("dedicated voice LLM scheduler enabled");
+        Some(LlmScheduler::start_named(
+            "face-voice-llm-scheduler",
+            LlmSchedulerConfig::dedicated_voice(models.llm.clone()),
+            realtime_experience_events.clone(),
+        )?)
+    } else {
+        None
+    };
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
@@ -108,6 +119,7 @@ pub async fn run() -> anyhow::Result<()> {
         voice_observations: Arc::new(RwLock::new(VecDeque::new())),
         voice_impression_ids: Arc::new(RwLock::new(HashSet::new())),
         llm_scheduler,
+        voice_llm_scheduler,
         face_detector,
         face_detection_active: Arc::new(AtomicBool::new(false)),
         face_detection_last_sampled: Arc::new(RwLock::new(None)),
@@ -144,6 +156,13 @@ pub async fn run() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn dedicated_voice_llm_enabled() -> bool {
+    std::env::var("MORTAR_VOICE_LLM_DEDICATED")
+        .ok()
+        .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(true)
 }
 
 async fn shutdown_signal() {

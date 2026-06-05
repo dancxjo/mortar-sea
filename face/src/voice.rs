@@ -200,7 +200,10 @@ fn start_voice_generation(
         stop: voice_stop_markers(),
     };
 
-    let scheduler = state.llm_scheduler.clone();
+    let scheduler = state
+        .voice_llm_scheduler
+        .clone()
+        .unwrap_or_else(|| state.llm_scheduler.clone());
     let events = state.realtime_experience_events.clone();
     let control_for_task = control.clone();
     let tx = generation_tx.clone();

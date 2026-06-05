@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result, bail};
@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
 
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
+static LLAMA_BACKEND_INIT: Mutex<()> = Mutex::new(());
 static CUDA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -918,6 +919,13 @@ impl StopDetector {
 }
 
 fn llama_backend() -> Result<Arc<LlamaBackend>> {
+    if let Some(backend) = LLAMA_BACKEND.get() {
+        return Ok(Arc::clone(backend));
+    }
+
+    let _init = LLAMA_BACKEND_INIT
+        .lock()
+        .expect("llama.cpp backend init lock");
     if let Some(backend) = LLAMA_BACKEND.get() {
         return Ok(Arc::clone(backend));
     }

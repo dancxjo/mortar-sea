@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
@@ -178,8 +177,12 @@ fn format_realtime_experience_prompt_with_cluster_gap(
         "You are the real-time Experience generator, the first Wit in the comprehension pipeline.\n\
          Consume the timeline in order. Do not group by faculty or source.\n\
          Treat impressions as evidence, not certainty.\n\
-         Return only JSON: {\"experiences\":[{\"what\":\"...\",\"impression_ids\":[\"...\"]}]}.\n\
-         Experiences should explain what appears to be happening right now, not summarize events.\n\n\
+         Return only plain text, not JSON, Markdown, bullets, or labels.\n\
+         Write as first-person lived experience from the system's point of view, using I/me/my when natural.\n\
+         Turn sensor and faculty evidence into what I experience: what I see, where I am, and what seems present.\n\
+         Use salient details from impressions as experienced details; do not narrate sensors, camera input, GPS registration, monitoring, or what \"the user\" is doing.\n\
+         Write a few sentences about the experience of all impressions together; do not force it into one sentence.\n\
+         Explain what appears to be happening right now, not a redundant list of events.\n\n\
          ContextFrame:\n",
     );
     prompt.push_str(&prompt_safe_context_frame_render(context_frame));
@@ -318,32 +321,11 @@ fn prompt_safe_context_frame_render(context_frame: &ContextFrame) -> String {
         .replace('>', "\\u003e")
 }
 
-#[derive(Debug, Deserialize)]
-struct ExperienceResponse {
-    experiences: Vec<ExperienceDraft>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExperienceDraft {
-    what: String,
-    #[serde(default)]
-    impression_ids: Vec<Uuid>,
-}
-
 fn parse_experiences(generated: &str, entries: &[TimelineEntry]) -> Vec<Experience> {
-    let Some(json) = extract_json(generated) else {
+    let Some(what) = generated_experience_text(generated) else {
         return Vec::new();
     };
-
-    let drafts = serde_json::from_str::<ExperienceResponse>(json)
-        .map(|response| response.experiences)
-        .or_else(|_| serde_json::from_str::<Vec<ExperienceDraft>>(json));
-
-    let Ok(drafts) = drafts else {
-        return Vec::new();
-    };
-
-    let fallback_impressions = entries
+    let impression_ids = entries
         .iter()
         .filter_map(|entry| match entry {
             TimelineEntry::Impression(impression) => Some(impression.id),
@@ -359,43 +341,26 @@ fn parse_experiences(generated: &str, entries: &[TimelineEntry]) -> Vec<Experien
         .unwrap_or_else(Utc::now);
     let observed_at = Utc::now();
 
-    drafts
-        .into_iter()
-        .filter_map(|draft| {
-            let what = draft.what.trim();
-            if what.is_empty() {
-                return None;
-            }
-
-            let impression_ids = if draft.impression_ids.is_empty() {
-                fallback_impressions.clone()
-            } else {
-                draft.impression_ids
-            };
-
-            Some(Experience::new(
-                impression_ids,
-                occurred_at,
-                observed_at,
-                what.to_owned(),
-            ))
-        })
-        .collect()
+    vec![Experience::new(
+        impression_ids,
+        occurred_at,
+        observed_at,
+        what,
+    )]
 }
 
-fn extract_json(generated: &str) -> Option<&str> {
-    let trimmed = generated.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return Some(trimmed);
-    }
+fn generated_experience_text(generated: &str) -> Option<String> {
+    let text = generated
+        .replace("<start_of_turn>model", "")
+        .replace("<end_of_turn>", "")
+        .replace("<turn|>", "");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = text.trim();
 
-    let object_start = trimmed.find('{');
-    let array_start = trimmed.find('[');
-    match (object_start, array_start) {
-        (Some(o), Some(a)) if o < a => trimmed[o..].rfind('}').map(|end| &trimmed[o..=o + end]),
-        (Some(o), None) => trimmed[o..].rfind('}').map(|end| &trimmed[o..=o + end]),
-        (_, Some(a)) => trimmed[a..].rfind(']').map(|end| &trimmed[a..=a + end]),
-        _ => None,
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_owned())
     }
 }
 
@@ -475,6 +440,29 @@ mod tests {
         assert!(prompt.contains("WHEN\n- "));
         assert!(prompt.contains("HOW\n- ASR Faculty\n"));
         assert!(prompt.contains("\nTimeline:\n"));
+    }
+
+    #[test]
+    fn prompt_instructs_first_person_lived_experience() {
+        let t0 = Utc::now();
+        let sensation = Sensation::new("vision.frame", "camera", t0, t0, json!({}));
+        let impression = Impression::new(
+            vec![sensation.id],
+            t0,
+            t0,
+            "I see a red mug on the desk.",
+        );
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(sensation));
+        frame.push(TimelineEntry::Impression(impression));
+
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
+
+        assert!(prompt.contains("Write as first-person lived experience"));
+        assert!(prompt.contains("what I see, where I am, and what seems present"));
+        assert!(prompt.contains("do not narrate sensors, camera input, GPS registration"));
+        assert!(prompt.contains("or what \"the user\" is doing"));
     }
 
     #[test]
@@ -645,14 +633,12 @@ mod tests {
     }
 
     #[test]
-    fn wit_parses_llm_json_into_experiences() {
+    fn wit_records_plain_text_as_one_experience_for_all_impressions() {
         let t0 = Utc::now();
         let s0 = Sensation::new("audio.utterance", "mic", t0, t0, json!({"text": "hello"}));
         let imp = Impression::new(vec![s0.id], t0, t0, "A familiar voice said hello.");
-        let response = format!(
-            "{{\"experiences\":[{{\"what\":\"Tim may have greeted the system.\",\"impression_ids\":[\"{}\"]}}]}}",
-            imp.id
-        );
+        let response =
+            "Tim may have greeted the system. The moment feels directed toward me.".to_owned();
         let mut frame = TimelineFrame::new();
         frame.push(TimelineEntry::Sensation(s0));
         frame.push(TimelineEntry::Impression(imp.clone()));
@@ -661,7 +647,10 @@ mod tests {
         let experiences = wit.interpret(&frame);
 
         assert_eq!(experiences.len(), 1);
-        assert_eq!(experiences[0].what, "Tim may have greeted the system.");
+        assert_eq!(
+            experiences[0].what,
+            "Tim may have greeted the system. The moment feels directed toward me."
+        );
         assert_eq!(experiences[0].impression_ids, vec![imp.id]);
     }
 
