@@ -51,8 +51,17 @@ window.faceApp = function faceApp() {
     voiceStatus: 'waiting',
     voiceLastError: '',
     voicePlaybackDetail: '',
+    voicePlaybackEvents: {
+      drafts: 0,
+      audio: 0,
+      started: 0,
+      finished: 0,
+      interrupted: 0,
+    },
     voiceAudio: null,
     voiceAudioUrl: null,
+    voiceAudioContext: null,
+    voiceAudioSource: null,
     voiceCurrentDraft: null,
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
@@ -76,9 +85,14 @@ window.faceApp = function faceApp() {
       this.connectRealtimeExperience();
     },
 
+    voicePlaybackEventSummary() {
+      return `draft ${this.voicePlaybackEvents.drafts} / audio ${this.voicePlaybackEvents.audio} / started ${this.voicePlaybackEvents.started} / finished ${this.voicePlaybackEvents.finished} / interrupted ${this.voicePlaybackEvents.interrupted}`;
+    },
+
     async start() {
       this.cameraMessage = 'Requesting camera';
       try {
+        await this.unlockVoicePlayback();
         this.stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: this.targetWidth },
@@ -110,6 +124,7 @@ window.faceApp = function faceApp() {
       this.disconnectVision();
       this.stopLocation();
       this.stopAsr();
+      this.stopVoicePlaybackContext();
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
@@ -118,8 +133,11 @@ window.faceApp = function faceApp() {
     },
 
     stopVoiceMouth(reason) {
-      if (this.voiceCurrentDraft) {
-        this.sendVoiceMouthEvent('voice_speech_interrupted', this.voiceCurrentDraft, { reason });
+      const interruptedDraft = this.voiceCurrentDraft;
+      this.voiceCurrentDraft = null;
+      this.voiceUtteranceStartedAt = null;
+      if (interruptedDraft) {
+        this.sendVoiceMouthEvent('voice_speech_interrupted', interruptedDraft, { reason });
       }
       if (this.voiceAudio) {
         this.voiceAudio.pause();
@@ -130,11 +148,48 @@ window.faceApp = function faceApp() {
         URL.revokeObjectURL(this.voiceAudioUrl);
         this.voiceAudioUrl = null;
       }
-      if (this.voiceCurrentDraft) {
-        this.voiceCurrentDraft = null;
-        this.voiceUtteranceStartedAt = null;
+      if (this.voiceAudioSource) {
+        try {
+          this.voiceAudioSource.stop();
+        } catch (_) {
+          // The source may already have ended.
+        }
+        this.voiceAudioSource.disconnect();
+        this.voiceAudioSource = null;
       }
       this.voiceMouthOpen = false;
+    },
+
+    async unlockVoicePlayback() {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        this.voiceLastError = 'Web Audio unavailable';
+        this.voicePlaybackDetail = this.voiceLastError;
+        return;
+      }
+      if (!this.voiceAudioContext) {
+        this.voiceAudioContext = new AudioContextClass();
+      }
+      if (this.voiceAudioContext.state !== 'running') {
+        await this.voiceAudioContext.resume();
+      }
+      this.voicePlaybackDetail = `Voice audio context ${this.voiceAudioContext.state} at ${Math.round(this.voiceAudioContext.sampleRate)} Hz`;
+    },
+
+    stopVoicePlaybackContext() {
+      if (this.voiceAudioSource) {
+        try {
+          this.voiceAudioSource.stop();
+        } catch (_) {
+          // The source may already have ended.
+        }
+        this.voiceAudioSource.disconnect();
+        this.voiceAudioSource = null;
+      }
+      if (this.voiceAudioContext) {
+        this.voiceAudioContext.close();
+        this.voiceAudioContext = null;
+      }
     },
 
     connectRealtimeExperience() {
@@ -191,27 +246,32 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_speech_draft') {
           this.activeVoiceGenerationId = message.generation_id;
+          this.voicePlaybackEvents.drafts += 1;
           this.prepareVoiceDraft(message);
           return;
         }
         if (message.type === 'voice_speech_audio') {
           this.activeVoiceGenerationId = message.generation_id;
+          this.voicePlaybackEvents.audio += 1;
           this.playVoiceSpeechAudio(message);
           return;
         }
         if (message.type === 'voice_speech_started') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
           this.voiceStatus = 'speaking';
+          this.voicePlaybackEvents.started += 1;
           return;
         }
         if (message.type === 'voice_speech_finished') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
           this.voiceStatus = 'thinking';
+          this.voicePlaybackEvents.finished += 1;
           return;
         }
         if (message.type === 'voice_speech_interrupted') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
           this.voiceStatus = 'thinking';
+          this.voicePlaybackEvents.interrupted += 1;
           if (message.reason) {
             this.voiceLastError = message.reason;
             this.voicePlaybackDetail = message.reason;
@@ -290,58 +350,60 @@ window.faceApp = function faceApp() {
         : audioMessage;
       this.voiceCurrentDraft = draft;
 
-      const blob = this.base64ToBlob(audioMessage.data || '', audioMessage.mime || 'audio/wav');
+      await this.unlockVoicePlayback();
+      if (!this.voiceAudioContext || this.voiceAudioContext.state !== 'running') {
+        const reason = `Voice audio context is ${this.voiceAudioContext?.state || 'unavailable'}`;
+        this.voiceLastError = reason;
+        this.voicePlaybackDetail = reason;
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
+        this.clearFinishedVoiceDraft(draft);
+        return;
+      }
+
+      const encodedAudio = audioMessage.data || '';
+      const audioBytes = this.base64ToArrayBuffer(encodedAudio);
       const durationMs = audioMessage.duration_ms;
       const samples = audioMessage.samples;
-      this.voicePlaybackDetail = `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples, ${blob.size} bytes`;
+      this.voicePlaybackDetail = `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples, ${audioBytes.byteLength} bytes`;
       console.info('Mortar voice WAV ready', {
         utterance_id: draft.utterance_id,
         duration_ms: durationMs,
         samples,
-        bytes: blob.size,
+        bytes: audioBytes.byteLength,
       });
-      const audioUrl = URL.createObjectURL(blob);
-      const audio = new Audio(audioUrl);
-      audio.muted = false;
-      audio.volume = 1;
-      this.voiceAudio = audio;
-      this.voiceAudioUrl = audioUrl;
 
-      let speechStarted = false;
-      let startWatchdog = null;
-      const markSpeechStarted = () => {
-        if (speechStarted || this.voiceCurrentDraft !== draft || audio.currentTime <= 0) return;
-        speechStarted = true;
-        if (startWatchdog) {
-          window.clearTimeout(startWatchdog);
-          startWatchdog = null;
+      let audioBuffer;
+      try {
+        audioBuffer = await this.voiceAudioContext.decodeAudioData(audioBytes.slice(0));
+      } catch (error) {
+        const reason = error.message || 'Server WAV decode failed in browser';
+        this.voiceLastError = reason;
+        this.voicePlaybackDetail = reason;
+        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
+        this.clearFinishedVoiceDraft(draft);
+        return;
+      }
+
+      if (this.voiceCurrentDraft !== draft) return;
+
+      if (this.voiceAudioSource) {
+        try {
+          this.voiceAudioSource.stop();
+        } catch (_) {
+          // The source may already have ended.
         }
-        this.voiceUtteranceStartedAt = performance.now();
-        this.voiceMouthOpen = true;
-        this.voiceStatus = 'speaking';
-        this.voicePlaybackDetail = `Playing at ${audio.currentTime.toFixed(2)}s`;
-        console.info('Mortar voice playback started', {
-          utterance_id: draft.utterance_id,
-          current_time: audio.currentTime,
-        });
-        this.sendVoiceMouthEvent('voice_speech_started', draft);
-      };
-      audio.onplaying = markSpeechStarted;
-      audio.ontimeupdate = markSpeechStarted;
-      audio.onended = () => {
-        if (startWatchdog) {
-          window.clearTimeout(startWatchdog);
-          startWatchdog = null;
+        this.voiceAudioSource.disconnect();
+      }
+
+      const source = this.voiceAudioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.voiceAudioContext.destination);
+      this.voiceAudioSource = source;
+      source.onended = () => {
+        if (this.voiceAudioSource === source) {
+          this.voiceAudioSource = null;
         }
-        if (!speechStarted) {
-          const reason = 'Playback ended before audio progress was observed';
-          this.voiceMouthOpen = false;
-          this.voiceLastError = reason;
-          this.voicePlaybackDetail = reason;
-          this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
-          this.clearFinishedVoiceDraft(draft);
-          return;
-        }
+        if (this.voiceCurrentDraft !== draft) return;
         const playbackDurationMs = this.voiceUtteranceStartedAt
           ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
           : null;
@@ -350,43 +412,22 @@ window.faceApp = function faceApp() {
         this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: playbackDurationMs });
         this.clearFinishedVoiceDraft(draft);
       };
-      audio.onerror = () => {
-        if (startWatchdog) {
-          window.clearTimeout(startWatchdog);
-          startWatchdog = null;
-        }
-        this.voiceMouthOpen = false;
-        this.voiceLastError = 'Piper WAV playback failed';
-        this.voicePlaybackDetail = this.voiceLastError;
-        this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: this.voiceLastError,
-        });
-        this.clearFinishedVoiceDraft(draft);
-      };
 
       try {
-        await audio.play();
-        startWatchdog = window.setTimeout(() => {
-          if (speechStarted || this.voiceCurrentDraft !== draft) return;
-          const reason = `Piper WAV playback did not advance (readyState=${audio.readyState}, paused=${audio.paused}, currentTime=${audio.currentTime.toFixed(3)})`;
-          this.voiceLastError = reason;
-          this.voicePlaybackDetail = reason;
-          console.warn('Mortar voice playback stalled', {
-            utterance_id: draft.utterance_id,
-            ready_state: audio.readyState,
-            paused: audio.paused,
-            current_time: audio.currentTime,
-          });
-          this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
-          this.clearFinishedVoiceDraft(draft);
-        }, 1500);
+        source.start(0);
+        this.voiceUtteranceStartedAt = performance.now();
+        this.voiceMouthOpen = true;
+        this.voiceStatus = 'speaking';
+        this.voicePlaybackDetail = `Playing ${audioBuffer.duration.toFixed(2)}s through Web Audio`;
+        console.info('Mortar voice playback started', {
+          utterance_id: draft.utterance_id,
+          duration: audioBuffer.duration,
+          sample_rate: audioBuffer.sampleRate,
+        });
+        this.sendVoiceMouthEvent('voice_speech_started', draft);
       } catch (error) {
-        if (startWatchdog) {
-          window.clearTimeout(startWatchdog);
-          startWatchdog = null;
-        }
         this.voiceMouthOpen = false;
-        this.voiceLastError = error.message || 'Piper WAV playback was blocked';
+        this.voiceLastError = error.message || 'Web Audio playback failed';
         this.voicePlaybackDetail = this.voiceLastError;
         this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
           reason: this.voiceLastError,
@@ -402,19 +443,13 @@ window.faceApp = function faceApp() {
         && draft.generation_id === message.generation_id;
     },
 
-    base64ToBlob(data, mime) {
+    base64ToArrayBuffer(data) {
       const binary = window.atob(data);
-      const chunkSize = 32768;
-      const chunks = [];
-      for (let offset = 0; offset < binary.length; offset += chunkSize) {
-        const slice = binary.slice(offset, offset + chunkSize);
-        const bytes = new Uint8Array(slice.length);
-        for (let index = 0; index < slice.length; index += 1) {
-          bytes[index] = slice.charCodeAt(index);
-        }
-        chunks.push(bytes);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
       }
-      return new Blob(chunks, { type: mime });
+      return bytes.buffer;
     },
 
     clearFinishedVoiceDraft(draft) {

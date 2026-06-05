@@ -37,6 +37,7 @@
               </div>
               <p class="voice-playback-detail" x-show="voicePlaybackDetail" x-text="voicePlaybackDetail"></p>
               <p class="voice-playback-error" x-show="voiceLastError" x-text="voiceLastError"></p>
+              <p class="voice-playback-events" x-text="voicePlaybackEventSummary()"></p>
               <pre class="voice-stream" x-ref="voiceStream" x-text="voiceResponse || 'Waiting for inner monologue…'"></pre>
               <details>
                 <summary>What's happening here?</summary>
