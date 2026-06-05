@@ -564,8 +564,8 @@ fn voice_system_prompt() -> &'static str {
      Only make observations about known experience, inner feeling, uncertainty, and passing thoughts. \
      Write from the embodied system's own perspective using I, me, and my. \
      Move at about human spoken pace, or only slightly faster, with short plain sentences. \
-     You may end any sentence with one emoji; when you emit an emoji, it becomes your face in the real world. \
-     Emit emoji often to express how the system feels, choosing a face that matches the current inner feeling. \
+     You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
+     Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
      Real-world experience updates will be appended while you are thinking. Let each new observation bend the stream naturally. \
      Treat only those appended real-world experience updates as external facts. \
@@ -1505,8 +1505,11 @@ mod tests {
     fn voice_prompt_explains_emoji_becomes_real_world_face() {
         let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), &VecDeque::new(), "");
 
-        assert!(prompt.contains("when you emit an emoji, it becomes your face in the real world"));
-        assert!(prompt.contains("Emit emoji often to express how the system feels"));
+        assert!(
+            prompt
+                .contains("when you emit an emoji, it becomes your visible face in the real world")
+        );
+        assert!(prompt.contains("Use that face to express your current attitude"));
     }
 
     #[test]

@@ -12,18 +12,29 @@ Variants own linguistic facts:
 - `Orthography` marks the writing system attached to the variant.
 - `VariantImplementationStatus` distinguishes complete variants, GA-derived stubs, and permissive profiles.
 
-The English phonemicizer now follows the data path:
+## Variant rules are executable data
+
+The English phonemicizer follows this data path:
 
 ```text
-text
-  -> tokenize
-  -> resolve language variant code
-  -> CMUdict lookup
-  -> ARPABET phoneme tokens with stress preserved
-  -> IPA phone tokens with variant allophone rules
-  -> syllable/stress/provenance annotations
+CMUdict / G2P
+  -> PhonemeToken sequence
+  -> variant allophone rule engine
+  -> PhoneToken sequence
+  -> backend symbol lowering
 ```
 
+`AllophoneRule` is phoneme-to-phone realization data. The phonemicizer may know how
+to tokenize text, consult CMUdict, guess unknown words, and preserve ARPABET stress
+on phoneme tokens, but English allophony such as intervocalic flapping and nasal
+place assimilation is evaluated from the selected `LinguisticVariant` rule set.
+Changed phones carry rule provenance naming the applied variant rule.
+
 Unknown words are not treated as lexicon truth. CMUdict lookup reports `Exact`, `Normalized`, or `Missing`; fallback grapheme guesses are marked `Guessed` with rule provenance and lower confidence.
+
+eSpeak-ng import should target `Orthography` and G2P rules, not `AllophoneRule`
+directly. eSpeak rules mostly compile grapheme, morphology, and context to
+phonemes. `AllophoneRule` is reserved for phoneme-to-phone realization after a
+phoneme sequence already exists.
 
 Backends consume utterance plans. They do not define linguistic truth. Backend-specific symbol lowering, such as StyleTTS2's ARPABET symbol set, belongs in the backend adapter and maps from speech phoneme or phone IDs.

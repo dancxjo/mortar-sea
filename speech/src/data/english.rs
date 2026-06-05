@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use crate::data::arpabet::{self, ARPABET};
-use crate::feature::FeatureSystem;
-use crate::ids::{LanguageId, PhoneId, VariantId};
+use crate::feature::{FeatureBundle, FeatureSystem, FeatureValue};
+use crate::ids::{FeatureId, LanguageId, PhoneId, VariantId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
+use crate::prosody::Stress;
 use crate::rules::{
-    AllophoneRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics, RuleStatus,
-    SyllableShape,
+    AllophoneRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics,
+    RuleCondition, RuleStatus, SyllableShape,
 };
 use crate::segment::{Environment, SegmentMatcher};
 use crate::spec::Spec;
@@ -234,13 +235,26 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
                 features: Default::default(),
             },
             environment: Environment {
-                before: vec![SegmentMatcher::FeatureBundle(Default::default())],
-                after: vec![SegmentMatcher::FeatureBundle(Default::default())],
+                before: vec![SegmentMatcher::FeatureBundle(feature_bundle(&[(
+                    "major", "vowel",
+                )]))],
+                after: vec![SegmentMatcher::FeatureBundle(feature_bundle(&[(
+                    "major", "vowel",
+                )]))],
                 word_position: Spec::Known(crate::segment::WordPosition::Medial),
-                stress_context: Spec::Known(crate::prosody::Stress::Unstressed),
-                prosodic_context: Spec::Known(crate::prosody::ProsodicContext::CarefulSpeech),
                 ..Default::default()
             },
+            conditions: vec![
+                RuleCondition::PreviousMatches(SegmentMatcher::FeatureBundle(feature_bundle(&[(
+                    "major", "vowel",
+                )]))),
+                RuleCondition::PreviousStressIn(vec![Stress::Primary, Stress::Secondary]),
+                RuleCondition::NextMatches(SegmentMatcher::FeatureBundle(feature_bundle(&[(
+                    "major", "vowel",
+                )]))),
+                RuleCondition::NextStress(Stress::Unstressed),
+                RuleCondition::NotCarefulStyle,
+            ],
             output: PhonePattern {
                 phone: Spec::Known(PhoneId("ipa.phone.ɾ".into())),
                 features: Default::default(),
@@ -256,12 +270,15 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
                 features: Default::default(),
             },
             environment: Environment {
-                after: vec![
-                    SegmentMatcher::Phoneme(arpabet::phoneme_id(variant_id, "K")),
-                    SegmentMatcher::Phoneme(arpabet::phoneme_id(variant_id, "G")),
-                ],
+                after: vec![SegmentMatcher::FeatureBundle(feature_bundle(&[
+                    ("place", "velar"),
+                    ("manner", "stop"),
+                ]))],
                 ..Default::default()
             },
+            conditions: vec![RuleCondition::NextMatches(SegmentMatcher::FeatureBundle(
+                feature_bundle(&[("place", "velar"), ("manner", "stop")]),
+            ))],
             output: PhonePattern {
                 phone: Spec::Known(PhoneId("ipa.phone.ŋ".into())),
                 features: Default::default(),
@@ -270,6 +287,17 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
             status: RuleStatus::Productive,
         },
     ]
+}
+
+fn feature_bundle(values: &[(&str, &str)]) -> FeatureBundle {
+    let mut bundle = FeatureBundle::default();
+    for (name, value) in values {
+        bundle.values.insert(
+            FeatureId(format!("phonology.{name}")),
+            Spec::Known(FeatureValue::Category((*value).into())),
+        );
+    }
+    bundle
 }
 
 fn phonotactics(singing: bool) -> Phonotactics {
@@ -395,11 +423,18 @@ mod tests {
     #[test]
     fn rules_are_variant_data() {
         let ga = variant("en-US-GA");
+        let flapping = ga
+            .allophone_rules
+            .iter()
+            .find(|rule| rule.id == "american_english_intervocalic_flapping")
+            .expect("flapping rule");
+
+        assert_eq!(flapping.status, RuleStatus::StyleDependent);
         assert!(
-            ga.allophone_rules
-                .iter()
-                .any(|rule| rule.id == "american_english_intervocalic_flapping"
-                    && rule.status == RuleStatus::StyleDependent)
+            flapping
+                .conditions
+                .contains(&RuleCondition::NotCarefulStyle)
         );
+        assert_eq!(flapping.environment.prosodic_context, Spec::Unspecified);
     }
 }

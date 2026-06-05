@@ -11,6 +11,7 @@ use crate::ids::{GraphemeId, PhoneId, PhonemeId, VariantId};
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::{Stress, Syllable};
+use crate::realize::{PhoneDecompositionPolicy, RealizationOptions, realize_phonemes};
 use crate::spec::Spec;
 use crate::time::TextSpan;
 
@@ -128,24 +129,36 @@ impl Phonemicizer for EnglishPhonemicizer {
                 .first()
                 .cloned()
                 .unwrap_or_default();
-            let mut word_phones = realize_candidate(
-                &candidate,
-                &canonical_variant.0,
-                pronunciation.status,
-                careful_style,
+            let provenance = pronunciation_provenance(pronunciation.status);
+            let mut word_phonemes: Vec<_> = candidate
+                .iter()
+                .map(|cmu| {
+                    let raw_symbol = cmu.raw_symbol();
+                    PhonemeToken {
+                        phoneme: Spec::Known(arpabet::phoneme_id(
+                            &canonical_variant.0,
+                            &raw_symbol,
+                        )),
+                        span: None,
+                        realized_as: Vec::new(),
+                        confidence: confidence_for_status(pronunciation.status),
+                        provenance: provenance.clone(),
+                    }
+                })
+                .collect();
+            let mut word_phones = realize_phonemes(
+                &variant,
+                &word_phonemes,
+                &RealizationOptions {
+                    careful_style,
+                    phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+                },
             );
 
-            for (cmu, phone) in candidate.iter().zip(word_phones.iter()) {
-                let raw_symbol = cmu.raw_symbol();
-                let provenance = pronunciation_provenance(pronunciation.status);
-                phonemes.push(PhonemeToken {
-                    phoneme: Spec::Known(arpabet::phoneme_id(&canonical_variant.0, &raw_symbol)),
-                    span: None,
-                    realized_as: vec![phone.clone()],
-                    confidence: confidence_for_status(pronunciation.status),
-                    provenance,
-                });
+            for (phoneme, phone) in word_phonemes.iter_mut().zip(word_phones.iter()) {
+                phoneme.realized_as = vec![phone.clone()];
             }
+            phonemes.extend(word_phonemes);
 
             if !word_phones.is_empty() {
                 syllables.push(Syllable {
@@ -295,94 +308,6 @@ fn fallback_symbol_for_char(character: char) -> Option<&'static str> {
         'z' => Some("Z"),
         _ => None,
     }
-}
-
-fn realize_candidate(
-    candidate: &[CmuPhoneme],
-    variant_id: &str,
-    status: PronunciationStatus,
-    careful_style: bool,
-) -> Vec<PhoneToken> {
-    candidate
-        .iter()
-        .enumerate()
-        .map(|(index, phoneme)| {
-            let ipa = realized_ipa(candidate, index, careful_style)
-                .unwrap_or_else(|| default_ipa(&phoneme.base));
-            PhoneToken {
-                phone: Spec::Known(PhoneId(format!("ipa.phone.{ipa}"))),
-                span: None,
-                features: arpabet::entry(&phoneme.base)
-                    .map(arpabet::feature_bundle)
-                    .unwrap_or_default(),
-                acoustic_evidence: Vec::new(),
-                confidence: confidence_for_status(status),
-                provenance: if ipa != default_ipa(&phoneme.base) {
-                    EvidenceProvenance {
-                        source: EvidenceSource::Rule,
-                        method: allophone_method(candidate, index, variant_id),
-                        version: Some("0.1".into()),
-                    }
-                } else {
-                    pronunciation_provenance(status)
-                },
-            }
-        })
-        .collect()
-}
-
-fn realized_ipa(candidate: &[CmuPhoneme], index: usize, careful_style: bool) -> Option<String> {
-    let target = candidate.get(index)?;
-    if target.base == "T"
-        && !careful_style
-        && index > 0
-        && index + 1 < candidate.len()
-        && is_stressed_vowel(&candidate[index - 1])
-        && is_unstressed_vowel(&candidate[index + 1])
-    {
-        return Some("ɾ".into());
-    }
-
-    if target.base == "N"
-        && candidate
-            .get(index + 1)
-            .is_some_and(|next| matches!(next.base.as_str(), "K" | "G"))
-    {
-        return Some("ŋ".into());
-    }
-
-    None
-}
-
-fn default_ipa(base: &str) -> String {
-    arpabet::entry(base)
-        .map(|entry| entry.phone_symbol.to_string())
-        .unwrap_or_else(|| format!("?{base}"))
-}
-
-fn allophone_method(candidate: &[CmuPhoneme], index: usize, variant_id: &str) -> String {
-    match candidate.get(index).map(|phoneme| phoneme.base.as_str()) {
-        Some("T") => {
-            format!("{variant_id} rule american_english_intervocalic_flapping")
-        }
-        Some("N") => {
-            format!("{variant_id} rule alveolar_nasal_velar_assimilation")
-        }
-        _ => format!("{variant_id} allophone rule"),
-    }
-}
-
-fn is_stressed_vowel(phoneme: &CmuPhoneme) -> bool {
-    arpabet::is_vowel(&phoneme.raw_symbol())
-        && matches!(
-            phoneme.stress,
-            Some(CmuStress::Primary | CmuStress::Secondary)
-        )
-}
-
-fn is_unstressed_vowel(phoneme: &CmuPhoneme) -> bool {
-    arpabet::is_vowel(&phoneme.raw_symbol())
-        && matches!(phoneme.stress, Some(CmuStress::Unstressed))
 }
 
 fn stress_for_candidate(candidate: &[CmuPhoneme]) -> Spec<Stress> {

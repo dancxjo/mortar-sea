@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::feature::FeatureBundle;
-use crate::ids::{PhoneId, PhonemeId};
+use crate::feature::{FeatureBundle, FeatureValue};
+use crate::ids::{FeatureId, PhoneId, PhonemeId};
+use crate::prosody::Stress;
 use crate::segment::{Environment, SegmentMatcher};
 use crate::spec::Spec;
 
@@ -11,6 +12,8 @@ pub struct AllophoneRule {
     pub name: String,
     pub input: PhonemePattern,
     pub environment: Environment,
+    #[serde(default)]
+    pub conditions: Vec<RuleCondition>,
     pub output: PhonePattern,
     pub confidence: f32,
     pub status: RuleStatus,
@@ -26,6 +29,20 @@ pub struct PhonemePattern {
 pub struct PhonePattern {
     pub phone: Spec<PhoneId>,
     pub features: FeatureBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleCondition {
+    PreviousMatches(SegmentMatcher),
+    NextMatches(SegmentMatcher),
+    PreviousHasFeature(FeatureId, FeatureValue),
+    NextHasFeature(FeatureId, FeatureValue),
+    PreviousStress(Stress),
+    PreviousStressIn(Vec<Stress>),
+    NextStress(Stress),
+    NextStressIn(Vec<Stress>),
+    NotCarefulStyle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
