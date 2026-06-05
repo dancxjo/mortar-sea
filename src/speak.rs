@@ -14,6 +14,9 @@ use styletts2::{
     styletts2_en_us_symbol_set,
 };
 
+#[cfg(feature = "styletts2-onnx")]
+use styletts2::StyleTts2OnnxBackend;
+
 use crate::models::ensure_styletts2_model_available;
 
 #[derive(Debug, Args)]
@@ -65,17 +68,22 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         .lower(&plan)
         .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
 
-    if command.backend == SpeakBackend::Styletts2 {
-        ensure_styletts2_model_available()?;
-        anyhow::bail!(
-            "native StyleTTS2 inference is not wired yet; assets are registered, use `--backend mock` to exercise the phonemicized pipeline"
-        );
-    }
-
-    let artifact = synthesize_plan_with_mock_to_wav(plan, &command.output, command.sample_rate_hz)?;
+    let backend_label = match command.backend {
+        SpeakBackend::Mock => "mock",
+        SpeakBackend::Styletts2 => "styletts2",
+    };
+    let artifact = match command.backend {
+        SpeakBackend::Mock => {
+            synthesize_plan_with_mock_to_wav(plan, &command.output, command.sample_rate_hz)?
+        }
+        SpeakBackend::Styletts2 => {
+            let primary_model = ensure_styletts2_model_available()?;
+            synthesize_plan_with_styletts2_to_wav(plan, &primary_model, &command.output)?
+        }
+    };
 
     println!("Mortar speech synthesis plan");
-    println!("backend: mock");
+    println!("backend: {backend_label}");
     println!("variant: {}", phonemicized.variant.0);
     println!("text: {}", phonemicized.text);
     println!("phonemes: {}", format_phonemes(&phonemicized));
@@ -139,6 +147,47 @@ pub(crate) fn synthesize_plan_with_mock_to_wav(
         sample_rate_hz: output.sample_rate_hz,
         samples: output.pcm_mono_f32.len(),
     })
+}
+
+#[cfg(feature = "styletts2-onnx")]
+fn synthesize_plan_with_styletts2_to_wav(
+    plan: UtterancePlan,
+    primary_model_path: &Path,
+    output_path: &Path,
+) -> Result<SpeechSynthesisArtifact> {
+    styletts2_en_us_symbol_set()
+        .lower(&plan)
+        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
+
+    let model_dir = primary_model_path
+        .parent()
+        .context("StyleTTS2 primary model path has no parent directory")?;
+    let mut backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
+        .context("failed to load native StyleTTS2 ONNX backend")?;
+    let request = StyleTts2SynthesisRequest::from_plan(plan);
+    let output = backend
+        .synthesize(&request)
+        .context("native StyleTTS2 synthesis failed")?;
+
+    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+        .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
+
+    Ok(SpeechSynthesisArtifact {
+        path: output_path.to_path_buf(),
+        sample_rate_hz: output.sample_rate_hz,
+        samples: output.pcm_mono_f32.len(),
+    })
+}
+
+#[cfg(not(feature = "styletts2-onnx"))]
+fn synthesize_plan_with_styletts2_to_wav(
+    _plan: UtterancePlan,
+    _primary_model_path: &Path,
+    _output_path: &Path,
+) -> Result<SpeechSynthesisArtifact> {
+    anyhow::bail!(
+        "native StyleTTS2 inference requires building mortar-sea with the `styletts2-onnx` feature"
+    )
 }
 
 fn format_phonemes(output: &PhonemicizeOutput) -> String {

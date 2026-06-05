@@ -118,9 +118,10 @@ cargo run speak --backend styletts2 "hello world"
 ```
 
 `styletts2-en-us` registers public StyleTTS2 ONNX assets plus Mortar-Sea's
-built-in en-US phonemicizer and seed lexicon markers. Native StyleTTS2 inference
-is intentionally still behind the backend adapter; missing assets are ensured
-through the same model fetch path as the rest of the runtime.
+built-in en-US phonemicizer and seed lexicon markers. `--backend styletts2`
+loads the native ONNX token encoder and decoder through the backend adapter;
+missing assets are ensured through the same model fetch path as the rest of the
+runtime.
 
 ## Voice To Mouth
 

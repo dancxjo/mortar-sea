@@ -141,12 +141,12 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         filename: "14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
         relative_path: "models/styletts2/en-us/14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
         url: "https://huggingface.co/hexgrad/styletts2/resolve/main/14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
-        sha256: None,
+        sha256: Some("14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc"),
         size_bytes: Some(102_000_000),
         license: Some("MIT"),
         source: Some("https://huggingface.co/hexgrad/styletts2"),
         notes: Some(
-            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference uses the token encoder and decoder path.",
         ),
     },
     ModelAsset {
@@ -154,12 +154,12 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         filename: "4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
         relative_path: "models/styletts2/en-us/4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
         url: "https://huggingface.co/hexgrad/styletts2/resolve/main/4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
-        sha256: None,
+        sha256: Some("4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d"),
         size_bytes: Some(238_000_000),
         license: Some("MIT"),
         source: Some("https://huggingface.co/hexgrad/styletts2"),
         notes: Some(
-            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+            "Public ONNX conversion of StyleTTS2-LibriTTS; reserved for style/diffusion wiring.",
         ),
     },
     ModelAsset {
@@ -167,26 +167,22 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         filename: "91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
         relative_path: "models/styletts2/en-us/91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
         url: "https://huggingface.co/hexgrad/styletts2/resolve/main/91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
-        sha256: None,
+        sha256: Some("91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6"),
         size_bytes: Some(23_100_000),
         license: Some("MIT"),
         source: Some("https://huggingface.co/hexgrad/styletts2"),
-        notes: Some(
-            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
-        ),
+        notes: Some("Public ONNX conversion of StyleTTS2-LibriTTS token encoder."),
     },
     ModelAsset {
         id: "styletts2-en-us-onnx-99e40b",
         filename: "99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
         relative_path: "models/styletts2/en-us/99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
         url: "https://huggingface.co/hexgrad/styletts2/resolve/main/99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
-        sha256: None,
+        sha256: Some("99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457"),
         size_bytes: Some(307_000_000),
         license: Some("MIT"),
         source: Some("https://huggingface.co/hexgrad/styletts2"),
-        notes: Some(
-            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
-        ),
+        notes: Some("Public ONNX conversion of StyleTTS2-LibriTTS waveform decoder."),
     },
 ];
 

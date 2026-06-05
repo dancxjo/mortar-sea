@@ -38,10 +38,7 @@ pub use symbols::{
 };
 
 #[cfg(feature = "styletts2-onnx")]
-pub mod onnx {
-    //! Placeholder for the real StyleTTS2 ONNX adapter.
-    //!
-    //! Keeping this module behind the feature gate makes the intended boundary
-    //! explicit while avoiding heavyweight runtime dependencies in the default
-    //! build.
-}
+pub mod onnx;
+
+#[cfg(feature = "styletts2-onnx")]
+pub use onnx::{StyleTts2OnnxBackend, StyleTts2OnnxPaths};

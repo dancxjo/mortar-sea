@@ -12,8 +12,10 @@ resolver = "2"
 llama-cpp-sys-4 = { path = "target/patched-crates/llama-cpp-sys-4" }
 
 [features]
-default = ["llama-cuda"]
-llama-cuda = ["psyche/llama-cuda"]
+default = ["llm-test", "llama-cuda", "styletts2-onnx"]
+llm-test = ["dep:psyche"]
+llama-cuda = ["llm-test", "psyche/llama-cuda"]
+styletts2-onnx = ["styletts2/styletts2-onnx"]
 
 [dependencies]
 anyhow = "1"
@@ -21,7 +23,7 @@ clap = { version = "4.5", features = ["derive"] }
 dirs = "6"
 inquire = "0.9.4"
 owo-colors = "4"
-psyche = { path = "psyche", default-features = false }
+psyche = { path = "psyche", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
