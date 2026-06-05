@@ -152,12 +152,13 @@ fn field_vision_system_prompt() -> &'static str {
 You receive my live field of vision, not a detached image.\n\
 Infer only from the attached visual input. Name concrete visible objects, people, layout, text, or activity when present.\n\
 Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
+Prefer direct perception phrasing such as \"I see ...\". Do not write \"My field of vision shows ...\".\n\
 If people are visible, do not assume any visible person is me unless the field of vision is clearly a mirror or reflection.\n\
 Do not mention screenshots, photos, frames, cameras, metadata, data URLs, computed facts, or analysis. Return only the impression sentence."
 }
 
 fn build_field_vision_prompt() -> &'static str {
-    "My current field of vision is attached as image input.\n\
+    "The attached visual input is what I am seeing now.\n\
 Write one short first-person present-tense impression from the visual content. \
 Prefer concrete scene details over lighting or color summaries."
 }
@@ -496,8 +497,12 @@ mod tests {
         assert!(system.contains("my live field of vision"));
         assert!(system.contains("not a detached image"));
         assert!(system.contains("Infer only from the attached visual input"));
+        assert!(system.contains("Prefer direct perception phrasing"));
+        assert!(system.contains("Do not write \"My field of vision shows"));
         assert!(system.contains("unless the field of vision is clearly a mirror or reflection"));
         assert!(prompt.contains("concrete scene details"));
+        assert!(prompt.contains("what I am seeing now"));
+        assert!(!prompt.contains("My current field of vision"));
         assert!(!prompt.contains("facts="));
         assert!(!prompt.contains("source="));
         assert!(!prompt.contains("mime="));
