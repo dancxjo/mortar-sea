@@ -343,8 +343,8 @@ fn build_timeline_frame_from_records(
                     sensation.observed_at,
                     fallback_impression_for_record(record),
                 );
-                impression.kind = "vision".to_string();
-                impression.faculty = "vision".to_string();
+                impression.kind = fallback_impression_kind(record).to_string();
+                impression.faculty = fallback_impression_faculty(record).to_string();
                 // Fallback impressions are synthetic placeholders, so keep
                 // confidence below the normal vision baseline.
                 impression.confidence = FALLBACK_IMPRESSION_CONFIDENCE;
@@ -875,7 +875,30 @@ fn fallback_impression_for_record(record: &SensationRecord) -> String {
         "vision.face_crop" => fallback_face_impression_for_record(record),
         "vision.frame" => format!("I'm looking with my eye ({}).", record.source.sensor_id),
         "location.fix" => fallback_location_impression_for_record(record),
+        "audio.utterance" => fallback_audio_utterance_impression_for_record(record),
+        "audio.voice_clip" => fallback_voice_clip_impression_for_record(record),
+        "memory.voice_match" => fallback_voice_match_impression_for_record(record),
+        "memory.face_match" => fallback_face_match_impression_for_record(record),
         _ => format!("I sense {} from {}.", record.kind, record.source.sensor_id),
+    }
+}
+
+fn fallback_impression_kind(record: &SensationRecord) -> &str {
+    match record.kind.as_str() {
+        kind if kind.starts_with("audio.") => "audio",
+        kind if kind.starts_with("memory.") => "memory",
+        kind if kind.starts_with("location.") => "location",
+        _ => "vision",
+    }
+}
+
+fn fallback_impression_faculty(record: &SensationRecord) -> &str {
+    match record.kind.as_str() {
+        "audio.voice_clip" => "voice.id",
+        kind if kind.starts_with("audio.") => "hearing",
+        kind if kind.starts_with("memory.") => "memory",
+        kind if kind.starts_with("location.") => "location",
+        _ => "vision",
     }
 }
 
@@ -890,6 +913,85 @@ fn fallback_location_impression_for_record(record: &SensationRecord) -> String {
             "My geolocation source ({}) reported a location fix.",
             record.source.sensor_id
         ),
+    }
+}
+
+fn fallback_audio_utterance_impression_for_record(record: &SensationRecord) -> String {
+    let text = record
+        .detail
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match text {
+        Some(text) => format!("I hear a voice say: {text}"),
+        None => "I hear a voice speaking.".to_string(),
+    }
+}
+
+fn fallback_voice_clip_impression_for_record(record: &SensationRecord) -> String {
+    let confidence = record
+        .detail
+        .get("voice_confidence")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.5);
+    let prefix = if confidence >= 0.7 {
+        "I hear a clear voice"
+    } else if confidence >= 0.4 {
+        "I hear a voice"
+    } else {
+        "I may be hearing a voice"
+    };
+    let transcript = record
+        .detail
+        .get("transcript")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match transcript {
+        Some(text) => format!("{prefix} in the utterance: {text}"),
+        None => format!("{prefix} in the utterance."),
+    }
+}
+
+fn fallback_voice_match_impression_for_record(record: &SensationRecord) -> String {
+    let score = record
+        .detail
+        .get("score")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let prefix = if score >= 0.9 {
+        "That voice sounds very familiar"
+    } else if score >= 0.8 {
+        "That voice sounds familiar"
+    } else {
+        "That voice faintly reminds me of one I heard before"
+    };
+    let transcript = record
+        .detail
+        .get("transcript")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match transcript {
+        Some(text) => format!("{prefix}; I remember hearing it around: {text}"),
+        None => format!("{prefix}."),
+    }
+}
+
+fn fallback_face_match_impression_for_record(record: &SensationRecord) -> String {
+    let score = record
+        .detail
+        .get("score")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    if score >= 0.9 {
+        "That face looks very familiar from earlier sight.".to_string()
+    } else {
+        "That face reminds me of one I saw before.".to_string()
     }
 }
 

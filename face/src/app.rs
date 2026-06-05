@@ -111,13 +111,14 @@ pub async fn run() -> anyhow::Result<()> {
     let face_memory_config = FaceMemoryConfig::from_env()?;
     let face_memory = FaceMemory::from_config(&face_memory_config)?;
     match face_memory_config.backend {
-        MemoryBackend::Disabled => info!("face memory backend disabled"),
-        MemoryBackend::Mock => info!("face memory backend using in-process mock"),
+        MemoryBackend::Disabled => info!("memory backend disabled"),
+        MemoryBackend::Mock => info!("memory backend using in-process mock"),
         MemoryBackend::QdrantNeo4j => info!(
             qdrant_url = %face_memory_config.qdrant_url,
-            qdrant_collection = %face_memory_config.qdrant_collection_faces,
+            face_collection = %face_memory_config.qdrant_collection_faces,
+            voice_collection = %face_memory_config.qdrant_collection_voices,
             neo4j_uri = %face_memory_config.neo4j_uri,
-            "face memory backend using Qdrant and Neo4j"
+            "memory backend using Qdrant and Neo4j"
         ),
     }
 

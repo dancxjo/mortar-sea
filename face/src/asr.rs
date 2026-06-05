@@ -21,10 +21,12 @@ use crate::app::{
     ASR_CHANNEL, AppState, MAX_RECORDED_AUDIO_SENTENCE_CLIPS, MAX_RECORDED_VISION_IMPRESSIONS,
 };
 use crate::ingestion::{record_sensation, sequence_from_raw_json};
+use crate::memory::{VoiceMemoryMatch, VoiceVectorRecord};
 use crate::messages::{
     AckMessage, AudioClipMessage, AudioSentenceClipRecord, ErrorMessage, MediaRecord,
     RealTimeExperienceEvent, SensationRecord, SensationSource, VisionImpressionRecord,
 };
+use crate::voice_identity::{VoiceVectorObservation, voice_vector_from_mono_samples};
 
 const WHISPER_SAMPLE_RATE_HZ: u32 = 16_000;
 const MONO_CHANNELS: u16 = 1;
@@ -35,6 +37,7 @@ const CLOSE_AFTER_SILENCE_FRAMES: usize = 70;
 const MAX_GROUP_MS: u64 = 20_000;
 const SPECULATIVE_AFTER_MS: u64 = 600;
 const ASR_CONFIDENCE: f32 = 0.72;
+const VOICE_ID_CONFIDENCE_FLOOR: f32 = 0.35;
 
 use anyhow::Context;
 
@@ -669,6 +672,29 @@ fn record_transcript(state: &AppState, result: TranscriptResult) {
                 data: audio_data,
             },
         );
+        if let Some(voice) = voice_vector_from_mono_samples(&clip_samples, WHISPER_SAMPLE_RATE_HZ) {
+            let voice_sensation = voice_clip_sensation(
+                &sensation,
+                &voice,
+                &sentence_text,
+                result.sequence_start,
+                result.sequence_end,
+                sentence.start_ms,
+                sentence.end_ms,
+            );
+            record_sensation(&state.sensations, voice_sensation.clone());
+            spawn_voice_memory_write(
+                state.clone(),
+                &sensation,
+                &voice_sensation,
+                voice,
+                sentence_text.clone(),
+                result.sequence_start,
+                result.sequence_end,
+                sentence.start_ms,
+                sentence.end_ms,
+            );
+        }
 
         let impression = VisionImpressionRecord {
             id: Uuid::new_v4(),
@@ -677,7 +703,7 @@ fn record_transcript(state: &AppState, result: TranscriptResult) {
             observed_at: sensation.observed_at,
             source: sensation.source.clone(),
             sequence: sensation.sequence,
-            text: format!("I hear someone say: {}", sentence_text),
+            text: format!("I hear a voice say: {}", sentence_text),
             kind: "audio.utterance".to_string(),
             faculty: "ASR Faculty".to_string(),
             confidence: ASR_CONFIDENCE,
@@ -716,6 +742,161 @@ fn record_transcript(state: &AppState, result: TranscriptResult) {
     }
 
     crate::realtime_experience::spawn_trace(state.clone());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn voice_clip_sensation(
+    utterance: &SensationRecord,
+    voice: &VoiceVectorObservation,
+    transcript: &str,
+    sequence_start: u64,
+    sequence_end: u64,
+    start_ms: u64,
+    end_ms: u64,
+) -> SensationRecord {
+    let detail = json!({
+        "utterance_sensation_id": utterance.id,
+        "voice_id": voice.voice_id.0,
+        "voice_signature_id": voice.signature_id.0,
+        "voice_node_id": voice.voice_node_id,
+        "transcript": transcript,
+        "sequence_start": sequence_start,
+        "sequence_end": sequence_end,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "duration_ms": end_ms.saturating_sub(start_ms),
+        "sample_rate_hz": WHISPER_SAMPLE_RATE_HZ,
+        "embedding_dimensions": voice.vector.len(),
+        "voice_confidence": voice.confidence,
+    });
+    let detail_str = detail.to_string();
+    SensationRecord {
+        id: Uuid::new_v4(),
+        kind: "audio.voice_clip".to_string(),
+        occurred_at: utterance.occurred_at,
+        observed_at: Utc::now(),
+        source: SensationSource {
+            client_id: utterance.source.client_id.clone(),
+            sensor_id: utterance.source.sensor_id.clone(),
+            faculty: "voice.id".to_string(),
+        },
+        sequence: utterance.sequence,
+        media: MediaRecord {
+            mime: "application/json".to_string(),
+            width: 0,
+            height: 0,
+            encoding: "json".to_string(),
+        },
+        provenance: Provenance::derived_from_sensation(utterance.id).with_faculty("voice.id"),
+        data_sha256: sha256_hex(detail_str.as_bytes()),
+        data_bytes: detail_str.len(),
+        detail,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_voice_memory_write(
+    state: AppState,
+    utterance_sensation: &SensationRecord,
+    voice_sensation: &SensationRecord,
+    voice: VoiceVectorObservation,
+    transcript: String,
+    sequence_start: u64,
+    sequence_end: u64,
+    start_ms: u64,
+    end_ms: u64,
+) {
+    let Some(memory) = state.face_memory.clone() else {
+        return;
+    };
+    let source = format!(
+        "{}/{}/{}",
+        utterance_sensation.source.client_id,
+        utterance_sensation.source.sensor_id,
+        voice_sensation.source.faculty
+    );
+    let record = VoiceVectorRecord::new(
+        voice_sensation.id,
+        utterance_sensation.id,
+        voice.signature_id.0,
+        voice.voice_node_id,
+        voice.vector,
+        voice_sensation.observed_at,
+        source,
+        Some(transcript),
+        sequence_start,
+        sequence_end,
+        start_ms,
+        end_ms,
+        WHISPER_SAMPLE_RATE_HZ,
+        voice.confidence.max(VOICE_ID_CONFIDENCE_FLOOR),
+    );
+    let voice_sensation_id = voice_sensation.id;
+
+    tokio::spawn(async move {
+        match memory.remember_voice_observation(record).await {
+            Ok(matches) if !matches.is_empty() => {
+                info!(
+                    voice_sensation_id = %voice_sensation_id,
+                    matches = matches.len(),
+                    "voice memory found familiar prior voices"
+                );
+                for m in &matches {
+                    record_sensation(
+                        &state.sensations,
+                        build_voice_match_sensation(voice_sensation_id, m),
+                    );
+                }
+                crate::realtime_experience::spawn_trace(state.clone());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(%err, "voice memory write failed");
+            }
+        }
+    });
+}
+
+fn build_voice_match_sensation(
+    voice_sensation_id: Uuid,
+    memory_match: &VoiceMemoryMatch,
+) -> SensationRecord {
+    let now = Utc::now();
+    let detail = json!({
+        "voice_observation_id": memory_match.voice_observation_id,
+        "voice_candidate_id": memory_match.voice_candidate_id,
+        "voice_signature_id": memory_match.voice_signature_id,
+        "voice_node_id": memory_match.voice_node_id,
+        "score": memory_match.score,
+        "qdrant_point_id": memory_match.qdrant_point_id,
+        "original_observed_at": memory_match.observed_at,
+        "source": memory_match.source,
+        "transcript": memory_match.transcript,
+    });
+    let detail_str = detail.to_string();
+    SensationRecord {
+        id: Uuid::new_v4(),
+        kind: "memory.voice_match".to_string(),
+        occurred_at: now,
+        observed_at: now,
+        source: SensationSource {
+            client_id: "memory".to_string(),
+            sensor_id: "voice.memory".to_string(),
+            faculty: "voice.memory".to_string(),
+        },
+        sequence: 0,
+        media: MediaRecord {
+            mime: "application/json".to_string(),
+            width: 0,
+            height: 0,
+            encoding: "json".to_string(),
+        },
+        provenance: Provenance::derived_from_sensation(voice_sensation_id)
+            .with_faculty("voice.memory"),
+        data_sha256: sha256_hex(detail_str.as_bytes()),
+        data_bytes: detail_str.len(),
+        detail,
+    }
 }
 
 fn record_speculative_transcript(state: &AppState, result: TranscriptResult) {

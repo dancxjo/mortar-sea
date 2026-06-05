@@ -16,10 +16,13 @@ use uuid::Uuid;
 
 const DEFAULT_QDRANT_URL: &str = "http://localhost:6333";
 const DEFAULT_QDRANT_COLLECTION_FACES: &str = "faces";
+const DEFAULT_QDRANT_COLLECTION_VOICES: &str = "voices";
 const DEFAULT_NEO4J_URI: &str = "bolt://localhost:7687";
 const DEFAULT_NEO4J_USER: &str = "neo4j";
 const DEFAULT_FACE_MATCH_THRESHOLD: f32 = 0.86;
+const DEFAULT_VOICE_MATCH_THRESHOLD: f32 = 0.80;
 const FACE_EMBEDDING_MODEL: &str = "face_id/0.4.1";
+const VOICE_EMBEDDING_MODEL: &str = "listenbury/voice_vector/16d";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +48,12 @@ pub(crate) struct FaceMemoryConfig {
     pub(crate) backend: MemoryBackend,
     pub(crate) qdrant_url: String,
     pub(crate) qdrant_collection_faces: String,
+    pub(crate) qdrant_collection_voices: String,
     pub(crate) neo4j_uri: String,
     pub(crate) neo4j_user: String,
     pub(crate) neo4j_password: Option<String>,
     pub(crate) face_match_threshold: f32,
+    pub(crate) voice_match_threshold: f32,
 }
 
 impl FaceMemoryConfig {
@@ -70,6 +75,8 @@ impl FaceMemoryConfig {
                 .unwrap_or_else(|_| DEFAULT_QDRANT_URL.to_string()),
             qdrant_collection_faces: std::env::var("QDRANT_COLLECTION_FACES")
                 .unwrap_or_else(|_| DEFAULT_QDRANT_COLLECTION_FACES.to_string()),
+            qdrant_collection_voices: std::env::var("QDRANT_COLLECTION_VOICES")
+                .unwrap_or_else(|_| DEFAULT_QDRANT_COLLECTION_VOICES.to_string()),
             neo4j_uri: std::env::var("NEO4J_URI").unwrap_or_else(|_| DEFAULT_NEO4J_URI.to_string()),
             neo4j_user: std::env::var("NEO4J_USER")
                 .unwrap_or_else(|_| DEFAULT_NEO4J_USER.to_string()),
@@ -78,6 +85,10 @@ impl FaceMemoryConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(DEFAULT_FACE_MATCH_THRESHOLD),
+            voice_match_threshold: std::env::var("VOICE_MEMORY_MATCH_THRESHOLD")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_VOICE_MATCH_THRESHOLD),
         })
     }
 }
@@ -173,6 +184,110 @@ impl FaceVectorRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct VoiceMemoryMatch {
+    pub(crate) voice_candidate_id: Option<String>,
+    pub(crate) qdrant_point_id: String,
+    pub(crate) voice_observation_id: String,
+    pub(crate) voice_signature_id: String,
+    pub(crate) voice_node_id: String,
+    pub(crate) score: f32,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) source: String,
+    pub(crate) transcript: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct VoiceVectorPayload {
+    pub(crate) observation_id: String,
+    pub(crate) utterance_sensation_id: String,
+    pub(crate) voice_signature_id: String,
+    pub(crate) voice_node_id: String,
+    pub(crate) source_sensation_id: String,
+    pub(crate) impression_id: Option<String>,
+    pub(crate) observed_at: DateTime<Utc>,
+    pub(crate) source: String,
+    pub(crate) transcript: Option<String>,
+    pub(crate) sequence_start: u64,
+    pub(crate) sequence_end: u64,
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
+    pub(crate) sample_rate_hz: u32,
+    pub(crate) embedding_model: String,
+    pub(crate) embedding_dim: usize,
+    pub(crate) quality: f32,
+    pub(crate) voice_candidate_id: Option<String>,
+}
+
+impl VoiceVectorPayload {
+    fn to_qdrant_payload(&self) -> Value {
+        serde_json::to_value(self).expect("voice vector payload is serializable")
+    }
+
+    fn from_qdrant_payload(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct VoiceVectorRecord {
+    pub(crate) point_id: String,
+    pub(crate) vector: Vec<f32>,
+    pub(crate) payload: VoiceVectorPayload,
+}
+
+impl VoiceVectorRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        observation_id: Uuid,
+        utterance_sensation_id: Uuid,
+        signature_id: Uuid,
+        voice_node_id: String,
+        vector: Vec<f32>,
+        observed_at: DateTime<Utc>,
+        source: String,
+        transcript: Option<String>,
+        sequence_start: u64,
+        sequence_end: u64,
+        start_ms: u64,
+        end_ms: u64,
+        sample_rate_hz: u32,
+        quality: f32,
+    ) -> Self {
+        let point_id = deterministic_voice_point_id(
+            observation_id,
+            utterance_sensation_id,
+            signature_id,
+            VOICE_EMBEDDING_MODEL,
+        );
+        let embedding_dim = vector.len();
+        Self {
+            point_id,
+            vector,
+            payload: VoiceVectorPayload {
+                observation_id: observation_id.to_string(),
+                utterance_sensation_id: utterance_sensation_id.to_string(),
+                voice_signature_id: signature_id.to_string(),
+                voice_node_id,
+                source_sensation_id: utterance_sensation_id.to_string(),
+                impression_id: None,
+                observed_at,
+                source,
+                transcript,
+                sequence_start,
+                sequence_end,
+                start_ms,
+                end_ms,
+                sample_rate_hz,
+                embedding_model: VOICE_EMBEDDING_MODEL.to_string(),
+                embedding_dim,
+                quality,
+                voice_candidate_id: None,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VectorSearchHit {
     pub(crate) point_id: String,
@@ -188,7 +303,19 @@ pub(crate) trait VectorMemory: Send + Sync {
         collection: &str,
         record: &FaceVectorRecord,
     ) -> Result<()>;
+    async fn upsert_voice_embedding(
+        &self,
+        collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()>;
     async fn search_nearest_faces(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        limit: usize,
+        score_threshold: Option<f32>,
+    ) -> Result<Vec<VectorSearchHit>>;
+    async fn search_nearest_voices(
         &self,
         collection: &str,
         vector: &[f32],
@@ -205,6 +332,11 @@ pub(crate) trait GraphMemory: Send + Sync {
         collection: &str,
         record: &FaceVectorRecord,
     ) -> Result<()>;
+    async fn upsert_voice_observation(
+        &self,
+        collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()>;
     async fn link_person_candidate(
         &self,
         observation_id: &str,
@@ -212,17 +344,33 @@ pub(crate) trait GraphMemory: Send + Sync {
         matched_observation_id: &str,
         confidence: f32,
     ) -> Result<()>;
+    async fn link_voice_candidate(
+        &self,
+        observation_id: &str,
+        voice_candidate_id: &str,
+        matched_observation_id: &str,
+        confidence: f32,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct MockVectorMemory {
-    records: Mutex<HashMap<String, FaceVectorRecord>>,
+    face_records: Mutex<HashMap<String, FaceVectorRecord>>,
+    voice_records: Mutex<HashMap<String, VoiceVectorRecord>>,
 }
 
 impl MockVectorMemory {
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.records.lock().expect("mock vector memory lock").len()
+        self.face_records
+            .lock()
+            .expect("mock vector memory lock")
+            .len()
+            + self
+                .voice_records
+                .lock()
+                .expect("mock vector memory lock")
+                .len()
     }
 }
 
@@ -237,7 +385,19 @@ impl VectorMemory for MockVectorMemory {
         _collection: &str,
         record: &FaceVectorRecord,
     ) -> Result<()> {
-        self.records
+        self.face_records
+            .lock()
+            .expect("mock vector memory lock")
+            .insert(record.point_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn upsert_voice_embedding(
+        &self,
+        _collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()> {
+        self.voice_records
             .lock()
             .expect("mock vector memory lock")
             .insert(record.point_id.clone(), record.clone());
@@ -252,7 +412,41 @@ impl VectorMemory for MockVectorMemory {
         score_threshold: Option<f32>,
     ) -> Result<Vec<VectorSearchHit>> {
         let mut hits: Vec<_> = self
-            .records
+            .face_records
+            .lock()
+            .expect("mock vector memory lock")
+            .values()
+            .filter_map(|record| {
+                let score = cosine_similarity(vector, &record.vector)?;
+                if score_threshold.is_some_and(|threshold| score < threshold) {
+                    return None;
+                }
+                Some(VectorSearchHit {
+                    point_id: record.point_id.clone(),
+                    score,
+                    payload: record.payload.to_qdrant_payload(),
+                })
+            })
+            .collect();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    async fn search_nearest_voices(
+        &self,
+        _collection: &str,
+        vector: &[f32],
+        limit: usize,
+        score_threshold: Option<f32>,
+    ) -> Result<Vec<VectorSearchHit>> {
+        let mut hits: Vec<_> = self
+            .voice_records
             .lock()
             .expect("mock vector memory lock")
             .values()
@@ -282,7 +476,9 @@ impl VectorMemory for MockVectorMemory {
 #[derive(Debug, Default)]
 pub(crate) struct MockGraphMemory {
     observations: Mutex<Vec<String>>,
+    voice_observations: Mutex<Vec<String>>,
     candidate_links: Mutex<Vec<(String, String, String, f32)>>,
+    voice_candidate_links: Mutex<Vec<(String, String, String, f32)>>,
 }
 
 #[async_trait]
@@ -303,6 +499,18 @@ impl GraphMemory for MockGraphMemory {
         Ok(())
     }
 
+    async fn upsert_voice_observation(
+        &self,
+        _collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()> {
+        self.voice_observations
+            .lock()
+            .expect("mock graph memory lock")
+            .push(record.payload.observation_id.clone());
+        Ok(())
+    }
+
     async fn link_person_candidate(
         &self,
         observation_id: &str,
@@ -316,6 +524,25 @@ impl GraphMemory for MockGraphMemory {
             .push((
                 observation_id.to_string(),
                 person_candidate_id.to_string(),
+                matched_observation_id.to_string(),
+                confidence,
+            ));
+        Ok(())
+    }
+
+    async fn link_voice_candidate(
+        &self,
+        observation_id: &str,
+        voice_candidate_id: &str,
+        matched_observation_id: &str,
+        confidence: f32,
+    ) -> Result<()> {
+        self.voice_candidate_links
+            .lock()
+            .expect("mock graph memory lock")
+            .push((
+                observation_id.to_string(),
+                voice_candidate_id.to_string(),
                 matched_observation_id.to_string(),
                 confidence,
             ));
@@ -446,6 +673,32 @@ impl VectorMemory for QdrantVectorMemory {
         }
     }
 
+    async fn upsert_voice_embedding(
+        &self,
+        collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()> {
+        let response = self
+            .client
+            .put(self.endpoint(&format!("collections/{collection}/points?wait=true"))?)
+            .json(&json!({
+                "points": [{
+                    "id": record.point_id,
+                    "vector": record.vector,
+                    "payload": record.payload.to_qdrant_payload(),
+                }]
+            }))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("failed to upsert voice vector in {collection}"))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(unexpected_response(response, "upserting voice vector").await)
+        }
+    }
+
     async fn search_nearest_faces(
         &self,
         collection: &str,
@@ -479,6 +732,42 @@ impl VectorMemory for QdrantVectorMemory {
             .json()
             .await
             .context("failed to decode Qdrant search response")?;
+        qdrant_search_hits(&body)
+    }
+
+    async fn search_nearest_voices(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        limit: usize,
+        score_threshold: Option<f32>,
+    ) -> Result<Vec<VectorSearchHit>> {
+        if vector.is_empty() {
+            bail!("refusing to search empty voice vector");
+        }
+        let mut body = Map::new();
+        body.insert("vector".to_string(), json!(vector));
+        body.insert("limit".to_string(), json!(limit.max(1)));
+        body.insert("with_payload".to_string(), json!(true));
+        if let Some(threshold) = score_threshold {
+            body.insert("score_threshold".to_string(), json!(threshold));
+        }
+
+        let response = self
+            .client
+            .post(self.endpoint(&format!("collections/{collection}/points/search"))?)
+            .json(&Value::Object(body))
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("failed to search voice vectors in {collection}"))?;
+        if !response.status().is_success() {
+            return Err(unexpected_response(response, "searching voice vectors").await);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .context("failed to decode Qdrant voice search response")?;
         qdrant_search_hits(&body)
     }
 }
@@ -581,13 +870,16 @@ impl GraphMemory for Neo4jGraphMemory {
                 cypher("CREATE CONSTRAINT frame_id IF NOT EXISTS FOR (n:Frame) REQUIRE n.id IS UNIQUE", json!({})),
                 cypher("CREATE CONSTRAINT sensation_id IF NOT EXISTS FOR (n:Sensation) REQUIRE n.id IS UNIQUE", json!({})),
                 cypher("CREATE CONSTRAINT face_observation_id IF NOT EXISTS FOR (n:FaceObservation) REQUIRE n.id IS UNIQUE", json!({})),
+                cypher("CREATE CONSTRAINT voice_observation_id IF NOT EXISTS FOR (n:VoiceObservation) REQUIRE n.id IS UNIQUE", json!({})),
                 cypher("CREATE CONSTRAINT vector_point_id IF NOT EXISTS FOR (n:VectorPoint) REQUIRE n.id IS UNIQUE", json!({})),
                 cypher("CREATE CONSTRAINT person_candidate_id IF NOT EXISTS FOR (n:PersonCandidate) REQUIRE n.id IS UNIQUE", json!({})),
+                cypher("CREATE CONSTRAINT voice_candidate_id IF NOT EXISTS FOR (n:VoiceCandidate) REQUIRE n.id IS UNIQUE", json!({})),
                 cypher("CREATE INDEX frame_observed_at IF NOT EXISTS FOR (n:Frame) ON (n.observed_at)", json!({})),
                 cypher("CREATE INDEX sensation_source IF NOT EXISTS FOR (n:Sensation) ON (n.source)", json!({})),
                 cypher("CREATE INDEX face_observed_at IF NOT EXISTS FOR (n:FaceObservation) ON (n.observed_at)", json!({})),
+                cypher("CREATE INDEX voice_observed_at IF NOT EXISTS FOR (n:VoiceObservation) ON (n.observed_at)", json!({})),
             ],
-            "ensuring Neo4j face memory constraints",
+            "ensuring Neo4j memory constraints",
         )
         .await
     }
@@ -600,6 +892,18 @@ impl GraphMemory for Neo4jGraphMemory {
         self.run_statements(
             vec![face_observation_cypher(collection, record)],
             "upserting face observation graph",
+        )
+        .await
+    }
+
+    async fn upsert_voice_observation(
+        &self,
+        collection: &str,
+        record: &VoiceVectorRecord,
+    ) -> Result<()> {
+        self.run_statements(
+            vec![voice_observation_cypher(collection, record)],
+            "upserting voice observation graph",
         )
         .await
     }
@@ -634,6 +938,40 @@ impl GraphMemory for Neo4jGraphMemory {
                 }),
             )],
             "linking face observation to person candidate",
+        )
+        .await
+    }
+
+    async fn link_voice_candidate(
+        &self,
+        observation_id: &str,
+        voice_candidate_id: &str,
+        matched_observation_id: &str,
+        confidence: f32,
+    ) -> Result<()> {
+        self.run_statements(
+            vec![cypher(
+                r#"
+                MERGE (candidate:VoiceCandidate {id: $voice_candidate_id})
+                  ON CREATE SET candidate.created_at = datetime(), candidate.status = 'possible'
+                WITH candidate
+                MATCH (obs:VoiceObservation {id: $observation_id})
+                MATCH (matched:VoiceObservation {id: $matched_observation_id})
+                MERGE (obs)-[r:SOUNDS_LIKE]->(candidate)
+                  ON CREATE SET r.first_heard_at = datetime()
+                SET r.confidence = $confidence,
+                    r.matched_observation_id = $matched_observation_id,
+                    r.updated_at = datetime()
+                MERGE (matched)-[:SOUNDS_LIKE]->(candidate)
+                "#,
+                json!({
+                    "observation_id": observation_id,
+                    "voice_candidate_id": voice_candidate_id,
+                    "matched_observation_id": matched_observation_id,
+                    "confidence": confidence,
+                }),
+            )],
+            "linking voice observation to voice candidate",
         )
         .await
     }
@@ -698,10 +1036,64 @@ fn face_observation_cypher(collection: &str, record: &FaceVectorRecord) -> Cyphe
     )
 }
 
+fn voice_observation_cypher(collection: &str, record: &VoiceVectorRecord) -> CypherStatement {
+    let payload = &record.payload;
+    cypher(
+        r#"
+        MERGE (utterance:Sensation {id: $utterance_sensation_id})
+          ON CREATE SET utterance.kind = 'audio.utterance',
+                        utterance.source = $source,
+                        utterance.observed_at = $observed_at
+        MERGE (voice:VoiceObservation {id: $observation_id})
+        SET voice.observed_at = $observed_at,
+            voice.voice_signature_id = $voice_signature_id,
+            voice.voice_node_id = $voice_node_id,
+            voice.transcript = $transcript,
+            voice.sequence_start = $sequence_start,
+            voice.sequence_end = $sequence_end,
+            voice.start_ms = $start_ms,
+            voice.end_ms = $end_ms,
+            voice.sample_rate_hz = $sample_rate_hz,
+            voice.confidence = $confidence,
+            voice.qdrant_point_id = $qdrant_point_id,
+            voice.embedding_model = $embedding_model,
+            voice.embedding_dim = $embedding_dim,
+            voice.source = $source
+        MERGE (point:VectorPoint {id: $qdrant_point_id})
+        SET point.collection = $collection,
+            point.embedding_model = $embedding_model,
+            point.embedding_dim = $embedding_dim
+        MERGE (voice)-[:HEARD_IN]->(utterance)
+        MERGE (voice)-[:VECTOR_STORED_AS]->(point)
+        "#,
+        json!({
+            "utterance_sensation_id": payload.utterance_sensation_id,
+            "observation_id": payload.observation_id,
+            "observed_at": payload.observed_at.to_rfc3339(),
+            "source": payload.source,
+            "voice_signature_id": payload.voice_signature_id,
+            "voice_node_id": payload.voice_node_id,
+            "transcript": payload.transcript,
+            "sequence_start": i64::try_from(payload.sequence_start).unwrap_or(i64::MAX),
+            "sequence_end": i64::try_from(payload.sequence_end).unwrap_or(i64::MAX),
+            "start_ms": i64::try_from(payload.start_ms).unwrap_or(i64::MAX),
+            "end_ms": i64::try_from(payload.end_ms).unwrap_or(i64::MAX),
+            "sample_rate_hz": i64::from(payload.sample_rate_hz),
+            "confidence": payload.quality,
+            "qdrant_point_id": record.point_id,
+            "collection": collection,
+            "embedding_model": payload.embedding_model,
+            "embedding_dim": i64::try_from(payload.embedding_dim).unwrap_or(i64::MAX),
+        }),
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct FaceMemory {
-    collection: String,
-    threshold: f32,
+    face_collection: String,
+    voice_collection: String,
+    face_threshold: f32,
+    voice_threshold: f32,
     vector: Arc<dyn VectorMemory>,
     graph: Arc<dyn GraphMemory>,
 }
@@ -711,14 +1103,18 @@ impl FaceMemory {
         match config.backend {
             MemoryBackend::Disabled => Ok(None),
             MemoryBackend::Mock => Ok(Some(Arc::new(Self {
-                collection: config.qdrant_collection_faces.clone(),
-                threshold: config.face_match_threshold,
+                face_collection: config.qdrant_collection_faces.clone(),
+                voice_collection: config.qdrant_collection_voices.clone(),
+                face_threshold: config.face_match_threshold,
+                voice_threshold: config.voice_match_threshold,
                 vector: Arc::new(MockVectorMemory::default()),
                 graph: Arc::new(MockGraphMemory::default()),
             }))),
             MemoryBackend::QdrantNeo4j => Ok(Some(Arc::new(Self {
-                collection: config.qdrant_collection_faces.clone(),
-                threshold: config.face_match_threshold,
+                face_collection: config.qdrant_collection_faces.clone(),
+                voice_collection: config.qdrant_collection_voices.clone(),
+                face_threshold: config.face_match_threshold,
+                voice_threshold: config.voice_match_threshold,
                 vector: Arc::new(QdrantVectorMemory::new(config.qdrant_url.clone())),
                 graph: Arc::new(Neo4jGraphMemory::new(
                     config.neo4j_uri.clone(),
@@ -740,8 +1136,29 @@ impl FaceMemory {
         graph: Arc<dyn GraphMemory>,
     ) -> Self {
         Self {
-            collection: collection.into(),
-            threshold,
+            face_collection: collection.into(),
+            voice_collection: "voices".to_string(),
+            face_threshold: threshold,
+            voice_threshold: threshold,
+            vector,
+            graph,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_voice_collection(
+        face_collection: impl Into<String>,
+        voice_collection: impl Into<String>,
+        face_threshold: f32,
+        voice_threshold: f32,
+        vector: Arc<dyn VectorMemory>,
+        graph: Arc<dyn GraphMemory>,
+    ) -> Self {
+        Self {
+            face_collection: face_collection.into(),
+            voice_collection: voice_collection.into(),
+            face_threshold,
+            voice_threshold,
             vector,
             graph,
         }
@@ -752,24 +1169,24 @@ impl FaceMemory {
         mut record: FaceVectorRecord,
     ) -> Result<Vec<FaceMemoryMatch>> {
         self.vector
-            .ensure_collection(&self.collection, record.vector.len())
+            .ensure_collection(&self.face_collection, record.vector.len())
             .await?;
         self.graph.ensure_constraints().await?;
 
         let matches = self.seen_face_before(&record.vector, 5).await?;
         let candidate_link = matches
             .iter()
-            .find(|hit| hit.qdrant_point_id != record.point_id && hit.score >= self.threshold)
+            .find(|hit| hit.qdrant_point_id != record.point_id && hit.score >= self.face_threshold)
             .cloned();
         if let Some(candidate) = &candidate_link {
             record.payload.person_candidate_id = Some(person_candidate_id_for(candidate));
         }
 
         self.vector
-            .upsert_face_embedding(&self.collection, &record)
+            .upsert_face_embedding(&self.face_collection, &record)
             .await?;
         self.graph
-            .upsert_face_observation(&self.collection, &record)
+            .upsert_face_observation(&self.face_collection, &record)
             .await?;
 
         if let Some(candidate) = candidate_link
@@ -801,11 +1218,83 @@ impl FaceMemory {
     ) -> Result<Vec<FaceMemoryMatch>> {
         let hits = self
             .vector
-            .search_nearest_faces(&self.collection, vector, limit, Some(self.threshold))
+            .search_nearest_faces(
+                &self.face_collection,
+                vector,
+                limit,
+                Some(self.face_threshold),
+            )
             .await?;
         Ok(hits
             .into_iter()
             .filter_map(face_match_from_hit)
+            .collect::<Vec<_>>())
+    }
+
+    pub(crate) async fn remember_voice_observation(
+        &self,
+        mut record: VoiceVectorRecord,
+    ) -> Result<Vec<VoiceMemoryMatch>> {
+        self.vector
+            .ensure_collection(&self.voice_collection, record.vector.len())
+            .await?;
+        self.graph.ensure_constraints().await?;
+
+        let matches = self.heard_voice_before(&record.vector, 5).await?;
+        let candidate_link = matches
+            .iter()
+            .find(|hit| hit.qdrant_point_id != record.point_id && hit.score >= self.voice_threshold)
+            .cloned();
+        if let Some(candidate) = &candidate_link {
+            record.payload.voice_candidate_id = Some(voice_candidate_id_for(candidate));
+        }
+
+        self.vector
+            .upsert_voice_embedding(&self.voice_collection, &record)
+            .await?;
+        self.graph
+            .upsert_voice_observation(&self.voice_collection, &record)
+            .await?;
+
+        if let Some(candidate) = candidate_link
+            && let Some(voice_candidate_id) = &record.payload.voice_candidate_id
+        {
+            self.graph
+                .link_voice_candidate(
+                    &record.payload.observation_id,
+                    voice_candidate_id,
+                    &candidate.voice_observation_id,
+                    candidate.score,
+                )
+                .await?;
+        }
+
+        debug!(
+            observation_id = %record.payload.observation_id,
+            point_id = %record.point_id,
+            matches = matches.len(),
+            "remembered heard voice"
+        );
+        Ok(matches)
+    }
+
+    pub(crate) async fn heard_voice_before(
+        &self,
+        vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VoiceMemoryMatch>> {
+        let hits = self
+            .vector
+            .search_nearest_voices(
+                &self.voice_collection,
+                vector,
+                limit,
+                Some(self.voice_threshold),
+            )
+            .await?;
+        Ok(hits
+            .into_iter()
+            .filter_map(voice_match_from_hit)
             .collect::<Vec<_>>())
     }
 }
@@ -868,11 +1357,33 @@ fn face_match_from_hit(hit: VectorSearchHit) -> Option<FaceMemoryMatch> {
     })
 }
 
+fn voice_match_from_hit(hit: VectorSearchHit) -> Option<VoiceMemoryMatch> {
+    let payload = VoiceVectorPayload::from_qdrant_payload(&hit.payload)?;
+    Some(VoiceMemoryMatch {
+        voice_candidate_id: payload.voice_candidate_id,
+        qdrant_point_id: hit.point_id,
+        voice_observation_id: payload.observation_id,
+        voice_signature_id: payload.voice_signature_id,
+        voice_node_id: payload.voice_node_id,
+        score: hit.score,
+        observed_at: payload.observed_at,
+        source: payload.source,
+        transcript: payload.transcript,
+    })
+}
+
 fn person_candidate_id_for(face_match: &FaceMemoryMatch) -> String {
     face_match
         .person_candidate_id
         .clone()
         .unwrap_or_else(|| format!("person_candidate:{}", face_match.face_observation_id))
+}
+
+fn voice_candidate_id_for(voice_match: &VoiceMemoryMatch) -> String {
+    voice_match
+        .voice_candidate_id
+        .clone()
+        .unwrap_or_else(|| format!("voice_candidate:{}", voice_match.voice_observation_id))
 }
 
 pub(crate) fn deterministic_face_point_id(
@@ -885,6 +1396,25 @@ pub(crate) fn deterministic_face_point_id(
     hasher.update(observation_id.as_bytes());
     hasher.update(frame_id.as_bytes());
     hasher.update(face_index.to_le_bytes());
+    hasher.update(embedding_model.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes).to_string()
+}
+
+pub(crate) fn deterministic_voice_point_id(
+    observation_id: Uuid,
+    utterance_sensation_id: Uuid,
+    signature_id: Uuid,
+    embedding_model: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(observation_id.as_bytes());
+    hasher.update(utterance_sensation_id.as_bytes());
+    hasher.update(signature_id.as_bytes());
     hasher.update(embedding_model.as_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 16];
@@ -994,6 +1524,28 @@ mod tests {
         )
     }
 
+    fn sample_voice_record(vector: Vec<f32>) -> VoiceVectorRecord {
+        let observation_id = Uuid::new_v4();
+        let utterance_id = Uuid::new_v4();
+        let signature_id = Uuid::new_v4();
+        VoiceVectorRecord::new(
+            observation_id,
+            utterance_id,
+            signature_id,
+            format!("voice:{signature_id}"),
+            vector,
+            Utc::now(),
+            "microphone.default/voice.id".to_string(),
+            Some("hello there".to_string()),
+            1,
+            2,
+            0,
+            700,
+            16_000,
+            0.8,
+        )
+    }
+
     #[test]
     fn deterministic_point_id_is_stable() {
         let observation_id = Uuid::new_v4();
@@ -1026,6 +1578,23 @@ mod tests {
         assert_eq!(
             statement.parameters["qdrant_point_id"],
             json!(record.point_id)
+        );
+    }
+
+    #[test]
+    fn graph_mapping_uses_voice_observation_and_vector_point() {
+        let record = sample_voice_record(vec![1.0, 0.0, 0.0]);
+        let statement = voice_observation_cypher("voices", &record);
+        assert!(statement.statement.contains("VoiceObservation"));
+        assert!(statement.statement.contains("VectorPoint"));
+        assert_eq!(statement.parameters["collection"], json!("voices"));
+        assert_eq!(
+            statement.parameters["qdrant_point_id"],
+            json!(record.point_id)
+        );
+        assert_eq!(
+            statement.parameters["voice_signature_id"],
+            json!(record.payload.voice_signature_id)
         );
     }
 
@@ -1086,6 +1655,31 @@ mod tests {
         assert!(matches[0].score > 0.9);
     }
 
+    #[tokio::test]
+    async fn vector_search_results_convert_to_voice_memory_matches() {
+        let vector = Arc::new(MockVectorMemory::default());
+        let graph = Arc::new(MockGraphMemory::default());
+        let memory = FaceMemory::new_for_test_with_voice_collection(
+            "faces", "voices", 0.5, 0.5, vector, graph,
+        );
+        let first = sample_voice_record(vec![1.0, 0.0, 0.0]);
+        let first_observation_id = first.payload.observation_id.clone();
+        memory
+            .remember_voice_observation(first)
+            .await
+            .expect("remember first voice");
+
+        let matches = memory
+            .heard_voice_before(&[0.99, 0.01, 0.0], 5)
+            .await
+            .expect("voice matches");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].voice_observation_id, first_observation_id);
+        assert!(matches[0].voice_node_id.starts_with("voice:"));
+        assert!(matches[0].score > 0.9);
+    }
+
     #[derive(Debug, Default)]
     struct FailingVectorMemory {
         graph_called: Arc<AtomicBool>,
@@ -1105,7 +1699,25 @@ mod tests {
             bail!("qdrant down")
         }
 
+        async fn upsert_voice_embedding(
+            &self,
+            _collection: &str,
+            _record: &VoiceVectorRecord,
+        ) -> Result<()> {
+            bail!("qdrant down")
+        }
+
         async fn search_nearest_faces(
+            &self,
+            _collection: &str,
+            _vector: &[f32],
+            _limit: usize,
+            _score_threshold: Option<f32>,
+        ) -> Result<Vec<VectorSearchHit>> {
+            Ok(vec![])
+        }
+
+        async fn search_nearest_voices(
             &self,
             _collection: &str,
             _vector: &[f32],
@@ -1131,10 +1743,29 @@ mod tests {
             Ok(())
         }
 
+        async fn upsert_voice_observation(
+            &self,
+            _collection: &str,
+            _record: &VoiceVectorRecord,
+        ) -> Result<()> {
+            self.graph_called.store(true, Ordering::Release);
+            Ok(())
+        }
+
         async fn link_person_candidate(
             &self,
             _observation_id: &str,
             _person_candidate_id: &str,
+            _matched_observation_id: &str,
+            _confidence: f32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn link_voice_candidate(
+            &self,
+            _observation_id: &str,
+            _voice_candidate_id: &str,
             _matched_observation_id: &str,
             _confidence: f32,
         ) -> Result<()> {

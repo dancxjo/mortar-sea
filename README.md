@@ -65,6 +65,13 @@ candidate. Qdrant answers "what nearby face vectors have I seen?" while Neo4j
 stores the frame/sensation/face-observation relationships and possible
 candidate evidence.
 
+Voice memory runs in parallel for finalized ASR utterances. Each heard sentence
+derives an `audio.voice_clip` sensation with a Listenbury-style voice vector and
+stable voice signature id. Qdrant answers "have I heard a voice like this
+before?" while Neo4j stores the utterance/sensation/voice-observation
+relationships and possible voice candidate evidence. This is voice familiarity,
+not person identification.
+
 When a newly stored face embedding is sufficiently similar to a prior one
 (cosine similarity ≥ `FACE_MEMORY_MATCH_THRESHOLD`, default 0.86), the pipeline
 emits a `memory.face_match` sensation for each match. This re-enters the
@@ -82,6 +89,12 @@ payload contains:
 | `source` | Sensor path of the prior observation |
 | `bbox` | Bounding box of the prior face, if available |
 
+When a newly stored voice vector is sufficiently similar to a prior one (cosine
+similarity ≥ `VOICE_MEMORY_MATCH_THRESHOLD`, default 0.80), the pipeline emits a
+`memory.voice_match` sensation. The embodied impression should read naturally,
+for example "That voice sounds familiar," while the vector score remains in
+structured detail as evidence.
+
 To run the persistent path locally:
 
 ```sh
@@ -94,8 +107,10 @@ cargo run -p face
 ```
 
 The default face vector collection is `faces`; override it with
-`QDRANT_COLLECTION_FACES`. Similarity links are evidence, not identity claims,
-and memory write failures are logged without stopping live sensing.
+`QDRANT_COLLECTION_FACES`. The default voice vector collection is `voices`;
+override it with `QDRANT_COLLECTION_VOICES`. Similarity links are evidence, not
+identity claims, and memory write failures are logged without stopping live
+sensing.
 
 There is also an ignored live-backend test for this path:
 

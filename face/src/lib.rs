@@ -9,5 +9,6 @@ mod messages;
 mod realtime_experience;
 mod vision;
 mod voice;
+mod voice_identity;
 
 pub use app::run;
