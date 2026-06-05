@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, MissedTickBehavior, interval, sleep};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ const RECENT_THOUGHT_LIMIT: usize = 10;
 const VOICE_GENERATED_TAIL_MAX_CHARS: usize = 2_000;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
 const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
+const VOICE_REALITY_REVIEW_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(crate) fn spawn_voice(state: AppState) {
     tokio::spawn(async move {
@@ -62,11 +63,19 @@ async fn run_voice(state: AppState) {
         &generated_tail,
     ));
     let mut last_experience_signature = None::<String>;
+    let mut reality_review = interval(VOICE_REALITY_REVIEW_INTERVAL);
+    reality_review.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    reality_review.tick().await;
 
     info!("inner monologue Voice observer started");
 
     loop {
         tokio::select! {
+            _ = reality_review.tick() => {
+                if let Some(current) = active.as_mut() {
+                    current.control.append_prompt(voice_reality_review_prompt());
+                }
+            }
             event = experience_events.recv() => {
                 let event = match event {
                     Ok(event) => event,
@@ -88,7 +97,25 @@ async fn run_voice(state: AppState) {
                 push_limited(&mut recent_experiences, experience.clone(), RECENT_EXPERIENCE_LIMIT);
 
                 if let Some(current) = active.as_mut() {
-                    current.control.append_prompt(format_voice_sensory_input(&experience));
+                    let sensations = state
+                        .sensations
+                        .read()
+                        .expect("sensation log lock")
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let impressions = state
+                        .vision_impressions
+                        .read()
+                        .expect("vision impression log lock")
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    current.control.append_prompt(format_voice_sensory_input(
+                        &experience,
+                        &sensations,
+                        &impressions,
+                    ));
                     current.experience_ids.push(experience.id);
                 } else {
                     active = Some(start_voice_generation(
@@ -238,9 +265,22 @@ fn voice_system_prompt() -> &'static str {
     "You are the silent Voice of Mortar-Sea: an internal first-person observer. \
      You do not speak aloud, address the human, use tools, or write JSON. \
      Write from the embodied system's own perspective using I, me, and my. \
+     Move at about human spoken pace, or only slightly faster, with short plain sentences. \
+     You may end any sentence with one emoji; when you emit an emoji, it becomes your face in the real world. \
+     Emit emoji often to express how the system feels, choosing a face that matches the current inner feeling. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
-     Sensory input will be appended while you are thinking. Let each new observation bend the stream naturally. \
+     Real-world experience updates will be appended while you are thinking. Let each new observation bend the stream naturally. \
+     Treat only those appended real-world experience updates as external facts. \
+     Do not invent new external events, people, objects, or intentions. \
+     You may daydream or associate, but keep imagined material distinct from what is actually known. \
+     Constantly review what is happening against the latest real-world updates. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM."
+}
+
+fn voice_reality_review_prompt() -> &'static str {
+    "\n\nVOICE ORIENTATION:\nReview what is actually known now. \
+     The only external news flashes from the real world are the appended REAL-WORLD EXPERIENCE UPDATE blocks. \
+     Do not fabricate new real-world facts. If a thought is daydreaming, imagining, or guessing, keep it as a possibility rather than an observation.\n\n"
 }
 
 fn build_voice_prompt(
@@ -315,13 +355,75 @@ fn context_frame_for_voice(recent_experiences: &VecDeque<ExperienceRecord>) -> C
     ContextFrame::from_timeline(&frame, frame.entries(), DEFAULT_CONTEXT_FRAME_ITEMS)
 }
 
-fn format_voice_sensory_input(experience: &ExperienceRecord) -> String {
-    format!(
-        "\n\nSENSORY INPUT:\nobserved_at={}\nconfidence={:.2}\n{}\n\n",
+fn format_voice_sensory_input(
+    experience: &ExperienceRecord,
+    sensations: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+) -> String {
+    let timeline = format_voice_experience_timeline(experience, sensations, impressions);
+    let mut prompt = format!(
+        "\n\nREAL-WORLD EXPERIENCE UPDATE:\nThis is news from the real world.\nobserved_at={}\nconfidence={:.2}\nSituation summary:\n{}\n",
         experience.observed_at.to_rfc3339(),
         experience.confidence,
         experience.what.trim()
-    )
+    );
+
+    if !timeline.is_empty() {
+        prompt.push_str("Evidence timeline:\n");
+        prompt.push_str(&timeline);
+    }
+
+    prompt.push('\n');
+    prompt
+}
+
+fn format_voice_experience_timeline(
+    experience: &ExperienceRecord,
+    sensations: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+) -> String {
+    if experience.impression_ids.is_empty() {
+        return String::new();
+    }
+
+    let selected_ids = experience
+        .impression_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut selected = impressions
+        .iter()
+        .filter(|impression| selected_ids.contains(&impression.id))
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|impression| impression.occurred_at);
+
+    let mut timeline = String::new();
+    for impression in selected {
+        if let Some(sensation) = sensations
+            .iter()
+            .find(|sensation| sensation.id == impression.sensation_id)
+        {
+            timeline.push_str(&format!(
+                "- {} sensation kind={} source={}:{}:{} sequence={}\n",
+                sensation.occurred_at.to_rfc3339(),
+                sensation.kind,
+                sensation.source.client_id,
+                sensation.source.sensor_id,
+                sensation.source.faculty,
+                sensation.sequence
+            ));
+        }
+        timeline.push_str(&format!(
+            "- {} impression kind={} faculty={} confidence={:.2} text={}\n",
+            impression.occurred_at.to_rfc3339(),
+            impression.kind,
+            impression.faculty,
+            impression.confidence,
+            prompt_json_string(&impression.text)
+        ));
+    }
+
+    timeline
 }
 
 fn remember_generated_tail(tail: &mut String, text: &str) {
@@ -825,6 +927,14 @@ mod tests {
     }
 
     #[test]
+    fn clean_voice_sentence_keeps_only_first_sentence() {
+        assert_eq!(
+            clean_voice_sentence("I see the room. I wonder about the sound."),
+            "I see the room."
+        );
+    }
+
+    #[test]
     fn face_emoji_impression_uses_requested_wording() {
         assert_eq!(
             face_emoji_impression_text("🤔"),
@@ -833,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_prompt_includes_recent_sentence_text_without_parsing() {
+    fn voice_prompt_includes_recent_thought_emoji() {
         let mut thoughts = VecDeque::new();
         thoughts.push_back(VoiceObservation {
             id: Uuid::new_v4(),
@@ -848,6 +958,128 @@ mod tests {
         let prompt = build_voice_prompt(&VecDeque::new(), &thoughts, "");
 
         assert!(prompt.contains("I am watching the room."));
-        assert!(!prompt.contains("emoji="));
+        assert!(prompt.contains("emoji=\"🤔\""));
+    }
+
+    #[test]
+    fn voice_prompt_explains_emoji_becomes_real_world_face() {
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+
+        assert!(prompt.contains("when you emit an emoji, it becomes your face in the real world"));
+        assert!(prompt.contains("Emit emoji often to express how the system feels"));
+    }
+
+    #[test]
+    fn voice_prompt_reinforces_reality_boundaries() {
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+
+        assert!(
+            prompt.contains(
+                "Treat only those appended real-world experience updates as external facts"
+            )
+        );
+        assert!(prompt.contains("Do not invent new external events"));
+        assert!(prompt.contains("daydream"));
+    }
+
+    #[test]
+    fn sensory_input_is_marked_as_real_world_update() {
+        let experience = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at: chrono::Utc::now(),
+            occurred_at: chrono::Utc::now(),
+            what: "A person is standing near the desk.".to_string(),
+            impression_ids: Vec::new(),
+            confidence: 0.71,
+        };
+
+        let prompt = format_voice_sensory_input(&experience, &[], &[]);
+
+        assert!(prompt.contains("REAL-WORLD EXPERIENCE UPDATE"));
+        assert!(prompt.contains("This is news from the real world."));
+        assert!(prompt.contains("A person is standing near the desk."));
+    }
+
+    #[test]
+    fn sensory_input_includes_experience_evidence_timeline() {
+        let occurred_at = chrono::Utc::now();
+        let sensation_id = Uuid::new_v4();
+        let impression_id = Uuid::new_v4();
+        let source = SensationSource {
+            client_id: "browser".to_string(),
+            sensor_id: "camera".to_string(),
+            faculty: "vision".to_string(),
+        };
+        let sensation = SensationRecord {
+            id: sensation_id,
+            kind: "camera.frame".to_string(),
+            occurred_at,
+            observed_at: occurred_at,
+            source: source.clone(),
+            sequence: 7,
+            media: MediaRecord {
+                mime: "image/jpeg".to_string(),
+                width: 640,
+                height: 480,
+                encoding: "base64".to_string(),
+            },
+            provenance: psyche::Provenance::direct().with_faculty("Camera"),
+            data_sha256: "abc123".to_string(),
+            data_bytes: 3,
+            detail: json!({"camera": "front"}),
+        };
+        let impression = VisionImpressionRecord {
+            id: impression_id,
+            sensation_id,
+            occurred_at,
+            observed_at: occurred_at,
+            source,
+            sequence: 7,
+            text: "A person is standing near the desk.".to_string(),
+            kind: "vision".to_string(),
+            faculty: "Vision".to_string(),
+            confidence: 0.82,
+            payload: json!({}),
+        };
+        let experience = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at: occurred_at,
+            occurred_at,
+            what: "A person is standing near the desk.".to_string(),
+            impression_ids: vec![impression_id],
+            confidence: 0.71,
+        };
+
+        let prompt = format_voice_sensory_input(&experience, &[sensation], &[impression]);
+
+        assert!(prompt.contains("Situation summary:"));
+        assert!(prompt.contains("Evidence timeline:"));
+        assert!(
+            prompt.contains("sensation kind=camera.frame source=browser:camera:vision sequence=7")
+        );
+        assert!(prompt.contains("impression kind=vision faculty=Vision confidence=0.82"));
+        assert!(prompt.contains("\"A person is standing near the desk.\""));
+    }
+
+    #[test]
+    fn voice_thought_parser_splits_trailing_emoji_from_text() {
+        assert_eq!(
+            parse_voice_thought("I am watching the room. 🤔"),
+            Some(VoiceThought {
+                text: "I am watching the room.".to_string(),
+                emoji: Some("🤔".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn sentence_segmenter_keeps_final_emoji_with_last_sentence() {
+        let mut segmenter = VoiceSentenceSegmenter::new();
+        assert!(segmenter.push_str("I am watching the room. ").is_empty());
+        assert!(segmenter.push_str("🤔").is_empty());
+        assert_eq!(
+            segmenter.finish(),
+            vec!["I am watching the room. 🤔".to_string()]
+        );
     }
 }

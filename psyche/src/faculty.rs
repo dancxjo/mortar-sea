@@ -3,7 +3,7 @@ use crate::{impression::Impression, sensation::Sensation};
 /// A Faculty notices things.
 ///
 /// Faculties operate at the boundary between the world and cognition. A Faculty
-/// may consume raw [`Sensation`]s (e.g. a vision faculty consuming camera
+/// may consume raw [`Sensation`]s (e.g. vision consuming camera
 /// frames) and emit new `Sensation`s or [`Impression`]s back into the pipeline.
 ///
 /// No concrete implementations are provided here; this trait defines the

@@ -457,18 +457,12 @@ impl LlamaGenerationWorker {
                     generated_tokens += 1;
                     continue;
                 }
-                if self.request.max_tokens.is_some() {
-                    debug!(
-                        generation_id = %self.id.0,
-                        generated_tokens,
-                        "llama.cpp generation completed at end-of-generation token"
-                    );
-                    return Ok(GenerationOutcome::Completed);
-                }
-                commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
-                logit_slot = 0;
-                generated_tokens += 1;
-                continue;
+                debug!(
+                    generation_id = %self.id.0,
+                    generated_tokens,
+                    "llama.cpp generation completed at end-of-generation token"
+                );
+                return Ok(GenerationOutcome::Completed);
             }
 
             let token_bytes = self

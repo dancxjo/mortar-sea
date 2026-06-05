@@ -14,7 +14,6 @@ use crate::app::AppState;
 use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{RawVisionFrame, VisionImpressionRecord};
 
-const MAX_VISION_TOKENS: usize = 96;
 const VISION_BASE_CONFIDENCE: f32 = 0.65;
 const MAX_VISION_DATA_CHARS: usize = 2_000_000;
 const MAX_IMAGE_SUMMARY_SAMPLES: u32 = 6_400;
@@ -63,7 +62,7 @@ pub(crate) fn spawn_vision(state: AppState) {
                     tokio::task::yield_now().await;
                 }
                 Err(err) => {
-                    warn!(%err, "vision faculty failed to describe frame");
+                    warn!(%err, "vision failed to describe frame");
                 }
             }
         }
@@ -121,7 +120,7 @@ async fn describe_vision(
                     frame.sensation.media.mime.clone(),
                     image_bytes,
                 )],
-                max_tokens: Some(MAX_VISION_TOKENS),
+                max_tokens: None,
                 stop: llm_stop_markers(),
             },
         )
@@ -149,7 +148,7 @@ fn llm_stop_markers() -> Vec<String> {
 }
 
 fn vision_system_prompt() -> &'static str {
-    "You are the vision faculty between the eye and the Wit. \
+    "You are vision between the eye and the Wit. \
 You receive my vision, not a detached image.\n\
 Infer only from the attached visual input. Name concrete visible objects, people, layout, text, or activity when present.\n\
 Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
@@ -433,7 +432,7 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, description: Visio
         sequence: frame.sensation.sequence,
         text: description.text,
         kind: "vision".to_string(),
-        faculty: "Vision Faculty".to_string(),
+        faculty: "vision".to_string(),
         confidence: VISION_BASE_CONFIDENCE,
         payload: description.payload,
     };
@@ -443,7 +442,7 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, description: Visio
         impression_id = %impression.id,
         sequence = impression.sequence,
         impression = %compact_log_text(&impression.text, MAX_VISION_LOG_CHARS),
-        "vision faculty produced impression"
+        "vision produced impression"
     );
 
     let mut impressions = state

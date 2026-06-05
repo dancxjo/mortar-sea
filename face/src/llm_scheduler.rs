@@ -82,6 +82,9 @@ impl LlmJobKind {
 
 type TokenSink = Box<dyn FnMut(String) + Send + 'static>;
 const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
+const DEFAULT_VOICE_WORDS_PER_MINUTE: f64 = 190.0;
+const AVERAGE_SPOKEN_WORD_CHARS: f64 = 5.2;
+const VOICE_PUNCTUATION_PAUSE: Duration = Duration::from_millis(90);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LlmStreamControl {
@@ -265,11 +268,80 @@ fn request_prompt_preview(request: &GenerationRequest, max_chars: usize) -> Stri
             .join("\n\n")
     };
 
-    let mut preview = source.chars().take(max_chars).collect::<String>();
-    if source.chars().count() > max_chars {
-        preview.push_str("...");
+    if source.chars().count() <= max_chars {
+        return source;
     }
+
+    if source.contains("Timeline:\n") || source.contains("Evidence timeline:\n") {
+        return line_bounded_prompt_preview(&source, max_chars);
+    }
+
+    let mut preview = source.chars().take(max_chars).collect::<String>();
+    preview.push_str("...");
     preview
+}
+
+fn line_bounded_prompt_preview(source: &str, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut chars = 0;
+    let mut in_timeline = false;
+
+    for line in source.split_inclusive('\n') {
+        let line_chars = line.chars().count();
+        if chars + line_chars > max_chars {
+            if in_timeline {
+                break;
+            }
+
+            let remaining = max_chars.saturating_sub(chars);
+            preview.extend(line.chars().take(remaining));
+            preview.push_str("...");
+            break;
+        }
+
+        preview.push_str(line);
+        chars += line_chars;
+
+        if matches!(line.trim_end(), "Timeline:" | "Evidence timeline:") {
+            in_timeline = true;
+        }
+    }
+
+    preview
+}
+
+#[cfg(test)]
+mod tests {
+    use psyche::GenerationRequest;
+
+    use super::request_prompt_preview;
+
+    #[test]
+    fn prompt_preview_does_not_abbreviate_timeline_entries_with_ellipses() {
+        let request = GenerationRequest {
+            prompt: "Context:\nshort\nTimeline:\nT+000.000 occurred_at=2026-06-04T12:00:00-07:00\n  IMPRESSION id=one text=\"complete first entry\"\nT+001.000 occurred_at=2026-06-04T12:00:01-07:00\n  IMPRESSION id=two text=\"second entry should be omitted\"\n".to_owned(),
+            ..GenerationRequest::default()
+        };
+
+        let preview = request_prompt_preview(&request, 128);
+
+        assert!(preview.contains("Timeline:\n"));
+        assert!(preview.contains("complete first entry"));
+        assert!(!preview.contains("..."));
+        assert!(!preview.contains("second entry"));
+    }
+
+    #[test]
+    fn prompt_preview_keeps_ellipsis_for_non_timeline_prompts() {
+        let request = GenerationRequest {
+            prompt: "plain prompt that is longer than the requested preview length".to_owned(),
+            ..GenerationRequest::default()
+        };
+
+        let preview = request_prompt_preview(&request, 12);
+
+        assert_eq!(preview, "plain prompt...");
+    }
 }
 
 fn run_scheduler(
@@ -503,7 +575,10 @@ fn run_generation(
                     token_events += 1;
                     generated.push_str(&text);
                     if let Some(token_sink) = token_sink.as_mut() {
-                        token_sink(text);
+                        token_sink(text.clone());
+                    }
+                    if matches!(kind, LlmJobKind::Voice) {
+                        thread::sleep(voice_token_delay(&text));
                     }
                 }
                 LlmEvent::Completed => {
@@ -576,6 +651,22 @@ fn run_generation(
             "LLM job made progress"
         );
     }
+}
+
+fn voice_token_delay(text: &str) -> Duration {
+    let visible_chars = text.chars().filter(|ch| !ch.is_control()).count();
+    if visible_chars == 0 {
+        return Duration::ZERO;
+    }
+
+    let chars_per_second =
+        DEFAULT_VOICE_WORDS_PER_MINUTE * (AVERAGE_SPOKEN_WORD_CHARS + 1.0) / 60.0;
+    let seconds = visible_chars as f64 / chars_per_second;
+    let mut delay = Duration::from_secs_f64(seconds);
+    if text.ends_with(['.', '!', '?', ',', ';', ':']) {
+        delay += VOICE_PUNCTUATION_PAUSE;
+    }
+    delay
 }
 
 fn duration_millis(duration: Duration) -> u64 {

@@ -344,7 +344,7 @@ fn build_timeline_frame_from_records(
                     fallback_impression_for_record(record),
                 );
                 impression.kind = "vision".to_string();
-                impression.faculty = "Vision Faculty".to_string();
+                impression.faculty = "vision".to_string();
                 // Fallback impressions are synthetic placeholders, so keep
                 // confidence below the normal vision baseline.
                 impression.confidence = FALLBACK_IMPRESSION_CONFIDENCE;
@@ -622,8 +622,8 @@ fn infer_who_from_what(what: &[String]) -> Vec<String> {
 }
 
 fn compact_how_items(items: Vec<String>) -> Vec<String> {
-    if items.iter().any(|item| item == "Vision Faculty") {
-        return vec!["Vision Faculty".to_owned()];
+    if items.iter().any(|item| item == "vision") {
+        return vec!["vision".to_owned()];
     }
 
     truncate_context_items(
@@ -1055,7 +1055,7 @@ mod tests {
             sequence: 0,
             text: text.to_string(),
             kind: "vision".to_string(),
-            faculty: "Vision Faculty".to_string(),
+            faculty: "vision".to_string(),
             confidence: 0.65,
             payload: json!({"source": "test"}),
         }
@@ -1181,7 +1181,7 @@ mod tests {
             where_: Vec::new(),
             when: "now".to_owned(),
             why: Vec::new(),
-            how: vec!["Vision Faculty".to_owned()],
+            how: vec!["vision".to_owned()],
         };
 
         let system = context_frame_system_prompt();
@@ -1205,7 +1205,7 @@ mod tests {
             where_: vec!["room with shelves".to_owned()],
             when: "now".to_owned(),
             why: vec!["Understand what appears to be happening right now.".to_owned()],
-            how: vec!["Vision Faculty".to_owned()],
+            how: vec!["vision".to_owned()],
         };
         let generated = r#"{
             "context_frame": {
@@ -1214,7 +1214,7 @@ mod tests {
                 "where": ["his early 40s", "a room with shelves"],
                 "when": "now",
                 "why": [],
-                "how": ["Vision Faculty"]
+                "how": ["vision"]
             }
         }"#;
 
@@ -1247,7 +1247,7 @@ mod tests {
             when: "now".to_owned(),
             why: vec!["Understand what appears to be happening right now.".to_owned()],
             how: vec![
-                "Vision Faculty".to_owned(),
+                "vision".to_owned(),
                 "face-browser:camera.default:vision".to_owned(),
                 "face".to_owned(),
                 "face-browser:camera.default:face".to_owned(),
@@ -1261,6 +1261,6 @@ mod tests {
             "A man with light brown or reddish hair and a beard is sitting and looking ahead near a bed, cans, and wires."
         );
         assert!(context.where_.is_empty());
-        assert_eq!(context.how, vec!["Vision Faculty".to_owned()]);
+        assert_eq!(context.how, vec!["vision".to_owned()]);
     }
 }
