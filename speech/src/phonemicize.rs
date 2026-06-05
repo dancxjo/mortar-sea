@@ -203,32 +203,88 @@ fn tokenize_words(text: &str) -> Vec<WordToken> {
     let mut words = Vec::new();
     let mut start = None;
     for (byte_index, character) in text.char_indices() {
-        if character.is_alphabetic() || character == '\'' || character == '-' {
+        if is_word_chunk_character(character) {
             start.get_or_insert(byte_index);
             continue;
         }
 
         if let Some(start_byte) = start.take() {
-            push_word(text, start_byte, byte_index, &mut words);
+            push_word_chunk(text, start_byte, byte_index, &mut words);
         }
     }
 
     if let Some(start_byte) = start {
-        push_word(text, start_byte, text.len(), &mut words);
+        push_word_chunk(text, start_byte, text.len(), &mut words);
     }
 
     words
+}
+
+fn is_word_chunk_character(character: char) -> bool {
+    character.is_alphabetic() || is_apostrophe(character) || character == '-'
+}
+
+fn is_apostrophe(character: char) -> bool {
+    matches!(character, '\'' | '’' | '‘' | 'ʼ')
+}
+
+fn push_word_chunk(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<WordToken>) {
+    let mut part_start = None;
+    for (offset, character) in text[start_byte..end_byte].char_indices() {
+        let byte_index = start_byte + offset;
+        if character == '-' {
+            if let Some(part_start_byte) = part_start.take() {
+                push_camelcase_word_parts(text, part_start_byte, byte_index, words);
+            }
+            continue;
+        }
+
+        part_start.get_or_insert(byte_index);
+    }
+
+    if let Some(part_start_byte) = part_start {
+        push_camelcase_word_parts(text, part_start_byte, end_byte, words);
+    }
+}
+
+fn push_camelcase_word_parts(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    words: &mut Vec<WordToken>,
+) {
+    let mut part_start = start_byte;
+    let mut previous = None;
+    let mut iterator = text[start_byte..end_byte].char_indices().peekable();
+    while let Some((offset, character)) = iterator.next() {
+        let byte_index = start_byte + offset;
+        if let Some(previous_character) = previous
+            && should_split_camelcase_part(previous_character, character, iterator.peek())
+        {
+            push_word(text, part_start, byte_index, words);
+            part_start = byte_index;
+        }
+        previous = Some(character);
+    }
+
+    push_word(text, part_start, end_byte, words);
+}
+
+fn should_split_camelcase_part(
+    previous: char,
+    current: char,
+    next: Option<&(usize, char)>,
+) -> bool {
+    previous.is_lowercase()
+        && current.is_uppercase()
+        && next.is_some_and(|(_, next)| next.is_uppercase())
 }
 
 fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<WordToken>) {
     let surface = &text[start_byte..end_byte];
     let start_char = text[..start_byte].chars().count();
     let end_char = start_char + surface.chars().count();
-    let normalized = surface
-        .trim_matches(|character: char| !character.is_alphabetic())
-        .chars()
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
+    let normalized = normalize_surface_word(surface);
     if normalized.is_empty() {
         return;
     }
@@ -241,6 +297,20 @@ fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<Wor
             end_char,
         },
     });
+}
+
+fn normalize_surface_word(surface: &str) -> String {
+    surface
+        .trim_matches(|character: char| !character.is_alphabetic())
+        .chars()
+        .flat_map(|character| {
+            if is_apostrophe(character) {
+                "'".chars().collect::<Vec<_>>()
+            } else {
+                character.to_lowercase().collect()
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +526,43 @@ mod tests {
                 .expect("word should phonemicize");
             assert_eq!(phoneme_symbols(&output), expected, "{word}");
         }
+    }
+
+    #[test]
+    fn curly_apostrophe_contractions_use_cmudict_entry() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("I’ll", "en-US"))
+            .expect("contraction should phonemicize");
+
+        assert_eq!(phoneme_symbols(&output), ["AY1", "L"]);
+        assert!(
+            output
+                .phonemes
+                .iter()
+                .all(|token| token.provenance.source == EvidenceSource::Lexicon)
+        );
+    }
+
+    #[test]
+    fn hyphenated_mixed_tokens_split_before_fallback() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("speech-to-StyleTTS2", "en-US"))
+            .expect("mixed token should phonemicize");
+
+        assert_eq!(
+            phoneme_symbols(&output),
+            [
+                "S", "P", "IY1", "CH", "T", "UW1", "S", "T", "AY1", "L", "T", "T", "S"
+            ]
+        );
+        assert_eq!(
+            output
+                .graphemes
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<Vec<_>>(),
+            ["speech", "to", "Style", "TTS"]
+        );
     }
 
     #[test]
