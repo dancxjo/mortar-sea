@@ -14,12 +14,15 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{
-    ExperienceRecord, RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord,
+    ExperienceRecord, RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord,
 };
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
 const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
 const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 12;
+const CONTEXT_FRAME_MAX_TOKENS: usize = 220;
+const MAX_CONTEXT_FRAME_TEXT_CHARS: usize = 140;
+const COMPACT_CONTEXT_ITEM_LIMIT: usize = 2;
 
 pub(crate) fn spawn_trace(state: AppState) {
     if state
@@ -43,9 +46,9 @@ pub(crate) fn spawn_trace(state: AppState) {
         .cloned()
         .collect::<Vec<_>>();
     let impressions = state
-        .vision_field_impressions
+        .vision_impressions
         .read()
-        .expect("field vision impression log lock")
+        .expect("vision impression log lock")
         .iter()
         .cloned()
         .collect::<Vec<_>>();
@@ -64,12 +67,13 @@ pub(crate) fn spawn_trace(state: AppState) {
     }
 
     let generation_id = Uuid::new_v4();
-    let prompt = build_prompt_from_records(&records, &impressions);
     let events = state.realtime_experience_events.clone();
     let active = state.realtime_experience_active.clone();
     let pending = state.realtime_experience_pending.clone();
 
     tokio::spawn(async move {
+        let prompt =
+            build_prompt_from_records_opportunistically(&state, &records, &impressions).await;
         let _ = events.send(RealTimeExperienceEvent::Prompt {
             generation_id,
             observed_at: chrono::Utc::now(),
@@ -163,9 +167,9 @@ fn record_generated_experiences(
     events: &broadcast::Sender<RealTimeExperienceEvent>,
 ) {
     let impressions = state
-        .vision_field_impressions
+        .vision_impressions
         .read()
-        .expect("field vision impression log lock")
+        .expect("vision impression log lock")
         .iter()
         .cloned()
         .collect::<Vec<_>>();
@@ -194,7 +198,7 @@ fn record_generated_experiences(
 
 fn parse_experience_records(
     generated: &str,
-    impressions: &[VisionFieldImpressionRecord],
+    impressions: &[VisionImpressionRecord],
 ) -> Vec<ExperienceRecord> {
     let Some(json) = extract_json(generated) else {
         return Vec::new();
@@ -276,10 +280,42 @@ fn llm_stop_markers() -> Vec<String> {
     vec!["<turn|>".to_string()]
 }
 
+#[cfg(test)]
 fn build_prompt_from_records(
     records: &[SensationRecord],
-    impressions: &[VisionFieldImpressionRecord],
+    impressions: &[VisionImpressionRecord],
 ) -> String {
+    let frame = build_timeline_frame_from_records(records, impressions);
+    let context_frame = compact_context_frame(ContextFrame::from_timeline(
+        &frame,
+        frame.entries(),
+        DEFAULT_CONTEXT_FRAME_ITEMS,
+    ));
+    format_realtime_experience_prompt(&context_frame, frame.entries())
+}
+
+async fn build_prompt_from_records_opportunistically(
+    state: &AppState,
+    records: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+) -> String {
+    let frame = build_timeline_frame_from_records(records, impressions);
+    let fallback_context = compact_context_frame(ContextFrame::from_timeline(
+        &frame,
+        frame.entries(),
+        DEFAULT_CONTEXT_FRAME_ITEMS,
+    ));
+    let context_frame = generate_context_frame(state, &fallback_context, frame.entries())
+        .await
+        .unwrap_or(fallback_context);
+
+    format_realtime_experience_prompt(&context_frame, frame.entries())
+}
+
+fn build_timeline_frame_from_records(
+    records: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+) -> TimelineFrame {
     let mut frame = TimelineFrame::new();
 
     let selected_records = select_records_for_experience_prompt(records, impressions);
@@ -326,10 +362,10 @@ fn build_prompt_from_records(
                     sensation.observed_at,
                     fallback_impression_for_record(record),
                 );
-                impression.kind = "vision.field".to_string();
-                impression.faculty = "Field Vision Faculty".to_string();
+                impression.kind = "vision".to_string();
+                impression.faculty = "Vision Faculty".to_string();
                 // Fallback impressions are synthetic placeholders, so keep
-                // confidence below the normal field-vision baseline.
+                // confidence below the normal vision baseline.
                 impression.confidence = FALLBACK_IMPRESSION_CONFIDENCE;
                 impression
             });
@@ -338,14 +374,465 @@ fn build_prompt_from_records(
         frame.push(TimelineEntry::Impression(impression));
     }
 
-    let context_frame =
-        ContextFrame::from_timeline(&frame, frame.entries(), DEFAULT_CONTEXT_FRAME_ITEMS);
-    format_realtime_experience_prompt(&context_frame, frame.entries())
+    frame
+}
+
+async fn generate_context_frame(
+    state: &AppState,
+    fallback_context: &ContextFrame,
+    entries: &[TimelineEntry],
+) -> Option<ContextFrame> {
+    let prompt = format_context_frame_prompt(fallback_context, entries);
+    let generated = state
+        .llm_scheduler
+        .generate(
+            LlmJobKind::ContextFrame,
+            GenerationRequest {
+                prompt: String::new(),
+                messages: vec![
+                    ChatMessage::new("system", context_frame_system_prompt()),
+                    ChatMessage::new("user", prompt),
+                ],
+                images: Vec::new(),
+                max_tokens: Some(CONTEXT_FRAME_MAX_TOKENS),
+                stop: llm_stop_markers(),
+            },
+        )
+        .await
+        .ok()?;
+
+    parse_generated_context_frame(&generated, fallback_context)
+}
+
+fn context_frame_system_prompt() -> &'static str {
+    "You fill a compact ContextFrame for the real-time Experience generator. \
+     Return only the requested JSON. Use evidence conservatively. \
+     Merge repeated observations into non-redundant fields. \
+     Do not list pronouns, age phrases, camera names, or body parts as people or places."
+}
+
+fn format_context_frame_prompt(context_frame: &ContextFrame, entries: &[TimelineEntry]) -> String {
+    let mut prompt = String::from(
+        "Revise the draft ContextFrame using the evidence timeline.\n\
+         Return only JSON with this exact shape: \
+         {\"who\":[\"...\"],\"what\":[\"...\"],\"where\":[\"...\"],\"when\":\"...\",\"why\":[\"...\"],\"how\":[\"...\"]}.\n\
+         Keep each list to at most two concise items; one item is better when the evidence is repetitive.\n\
+         WHO is concrete people or participants only.\n\
+         WHERE is physical place or setting only; exclude age bands, cameras, eyes, and body parts.\n\
+         WHAT should combine all repeated frame-level descriptions into one current situation, not repeated sensor status.\n\
+         Do not list near-duplicates such as multiple versions of the same visible person; merge stable details.\n\
+         WHEN should preserve the supplied time span unless the evidence gives a clearer phrase.\n\n\
+         Draft ContextFrame:\n",
+    );
+    prompt.push_str(&context_frame.render());
+    prompt.push_str("Evidence timeline:\n");
+
+    for entry in entries {
+        prompt.push_str(&format_context_frame_evidence_entry(entry));
+    }
+
+    prompt
+}
+
+fn format_context_frame_evidence_entry(entry: &TimelineEntry) -> String {
+    match entry {
+        TimelineEntry::Sensation(sensation) => format!(
+            "- SENSATION kind={} source={} occurred_at={} detail={}\n",
+            sensation.kind,
+            sensation.source,
+            sensation.occurred_at.to_rfc3339(),
+            prompt_json_string(&sensation.payload.to_string())
+        ),
+        TimelineEntry::Impression(impression) => format!(
+            "- IMPRESSION id={} kind={} faculty={} confidence={:.3} occurred_at={} text={}\n",
+            impression.id,
+            impression.kind,
+            impression.faculty,
+            impression.confidence,
+            impression.occurred_at.to_rfc3339(),
+            prompt_json_string(&impression.text)
+        ),
+        TimelineEntry::Experience(experience) => format!(
+            "- EXPERIENCE id={} occurred_at={} what={}\n",
+            experience.id,
+            experience.occurred_at.to_rfc3339(),
+            prompt_json_string(&experience.what)
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedContextFrameEnvelope {
+    context_frame: GeneratedContextFrame,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedContextFrame {
+    #[serde(default)]
+    who: Vec<String>,
+    #[serde(default)]
+    what: Vec<String>,
+    #[serde(default, rename = "where", alias = "where_")]
+    where_: Vec<String>,
+    #[serde(default)]
+    when: Option<String>,
+    #[serde(default)]
+    why: Vec<String>,
+    #[serde(default)]
+    how: Vec<String>,
+}
+
+fn parse_generated_context_frame(
+    generated: &str,
+    fallback_context: &ContextFrame,
+) -> Option<ContextFrame> {
+    let json = extract_json(generated)?;
+    let draft = serde_json::from_str::<GeneratedContextFrameEnvelope>(json)
+        .map(|envelope| envelope.context_frame)
+        .or_else(|_| serde_json::from_str::<GeneratedContextFrame>(json))
+        .ok()?;
+
+    let who = sanitize_context_items(draft.who, ContextSection::Who);
+    let what = sanitize_context_items(draft.what, ContextSection::What);
+    let where_ = sanitize_context_items(draft.where_, ContextSection::Where);
+    let why = sanitize_context_items(draft.why, ContextSection::Why);
+    let how = sanitize_context_items(draft.how, ContextSection::How);
+    let when = draft
+        .when
+        .and_then(|text| compact_context_text(&text, MAX_CONTEXT_FRAME_TEXT_CHARS))
+        .unwrap_or_else(|| fallback_context.when.clone());
+
+    if who.is_empty()
+        && what.is_empty()
+        && where_.is_empty()
+        && why.is_empty()
+        && how.is_empty()
+        && when == fallback_context.when
+    {
+        return None;
+    }
+
+    Some(compact_context_frame(ContextFrame {
+        who,
+        what: if what.is_empty() {
+            fallback_context.what.clone()
+        } else {
+            what
+        },
+        where_,
+        when,
+        why: if why.is_empty() {
+            fallback_context.why.clone()
+        } else {
+            why
+        },
+        how: if how.is_empty() {
+            fallback_context.how.clone()
+        } else {
+            how
+        },
+    }))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContextSection {
+    Who,
+    What,
+    Where,
+    Why,
+    How,
+}
+
+fn sanitize_context_items(items: Vec<String>, section: ContextSection) -> Vec<String> {
+    sanitize_context_items_with_limit(items, section, context_section_item_limit(section))
+}
+
+fn sanitize_context_items_with_limit(
+    items: Vec<String>,
+    section: ContextSection,
+    max_items: usize,
+) -> Vec<String> {
+    let mut sanitized = Vec::new();
+
+    for item in items {
+        let Some(item) = compact_context_text(&item, MAX_CONTEXT_FRAME_TEXT_CHARS) else {
+            continue;
+        };
+        if is_bad_context_item(&item, section) {
+            continue;
+        }
+        if sanitized.iter().any(|existing| existing == &item) {
+            continue;
+        }
+        sanitized.push(item);
+        if sanitized.len() == max_items {
+            break;
+        }
+    }
+
+    sanitized
+}
+
+fn compact_context_frame(context: ContextFrame) -> ContextFrame {
+    let mut what = sanitize_context_items_with_limit(
+        context.what,
+        ContextSection::What,
+        DEFAULT_CONTEXT_FRAME_ITEMS,
+    );
+    what = compact_what_items(what);
+
+    let mut who = sanitize_context_items(context.who, ContextSection::Who);
+    if who.is_empty() {
+        who = infer_who_from_what(&what);
+    }
+
+    ContextFrame {
+        who,
+        what,
+        where_: sanitize_context_items(context.where_, ContextSection::Where),
+        when: context.when,
+        why: sanitize_context_items(context.why, ContextSection::Why),
+        how: compact_how_items(sanitize_context_items(context.how, ContextSection::How)),
+    }
+}
+
+fn context_section_item_limit(section: ContextSection) -> usize {
+    match section {
+        ContextSection::Who
+        | ContextSection::What
+        | ContextSection::Where
+        | ContextSection::How => COMPACT_CONTEXT_ITEM_LIMIT,
+        ContextSection::Why => 1,
+    }
+}
+
+fn compact_what_items(items: Vec<String>) -> Vec<String> {
+    let mut filtered = items
+        .iter()
+        .filter(|item| !is_sensor_status_context_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        filtered = items;
+    }
+
+    if let Some(summary) = summarize_visual_person_items(&filtered) {
+        return vec![summary];
+    }
+
+    truncate_context_items(filtered, COMPACT_CONTEXT_ITEM_LIMIT)
+}
+
+fn infer_who_from_what(what: &[String]) -> Vec<String> {
+    let combined = what.join(" ").to_ascii_lowercase();
+    if mentions_word(&combined, "man") {
+        vec!["a man".to_owned()]
+    } else if mentions_word(&combined, "woman") {
+        vec!["a woman".to_owned()]
+    } else if mentions_word(&combined, "person") {
+        vec!["a person".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn compact_how_items(items: Vec<String>) -> Vec<String> {
+    if items.iter().any(|item| item == "Vision Faculty") {
+        return vec!["Vision Faculty".to_owned()];
+    }
+
+    truncate_context_items(
+        items
+            .into_iter()
+            .filter(|item| !item.contains(':') && item != "face")
+            .collect(),
+        COMPACT_CONTEXT_ITEM_LIMIT,
+    )
+}
+
+fn truncate_context_items(items: Vec<String>, max_items: usize) -> Vec<String> {
+    items.into_iter().take(max_items).collect()
+}
+
+fn summarize_visual_person_items(items: &[String]) -> Option<String> {
+    if items.len() < 2 {
+        return None;
+    }
+
+    let combined = items.join(" ").to_ascii_lowercase();
+    let person = if mentions_word(&combined, "man") {
+        "man"
+    } else if mentions_word(&combined, "woman") {
+        "woman"
+    } else if mentions_word(&combined, "person") {
+        "person"
+    } else {
+        return None;
+    };
+
+    let mut descriptors = Vec::new();
+    match (
+        combined.contains("light brown hair"),
+        combined.contains("reddish hair") || combined.contains("red hair"),
+        combined.contains("short hair"),
+    ) {
+        (true, true, _) => descriptors.push("light brown or reddish hair"),
+        (true, false, _) => descriptors.push("light brown hair"),
+        (false, true, _) => descriptors.push("reddish hair"),
+        (false, false, true) => descriptors.push("short hair"),
+        (false, false, false) => {}
+    }
+    if combined.contains("beard") || combined.contains("facial hair") {
+        descriptors.push("a beard");
+    }
+
+    let mut actions = Vec::new();
+    if combined.contains("sitting") {
+        actions.push("sitting");
+    }
+    if combined.contains("looking directly")
+        || combined.contains("looking ahead")
+        || combined.contains("looking toward")
+    {
+        actions.push("looking ahead");
+    }
+
+    let mut setting = Vec::new();
+    for (needle, label) in [
+        ("bed", "a bed"),
+        ("shelf", "a shelf"),
+        ("jar", "jars"),
+        ("can", "cans"),
+        ("wire", "wires"),
+    ] {
+        if combined.contains(needle) {
+            setting.push(label);
+        }
+    }
+
+    let mut summary = format!("A {person}");
+    if !descriptors.is_empty() {
+        summary.push_str(" with ");
+        summary.push_str(&join_context_phrases(&descriptors));
+    }
+    if actions.is_empty() {
+        summary.push_str(" appears to be present");
+    } else {
+        summary.push_str(" is ");
+        summary.push_str(&join_context_phrases(&actions));
+    }
+    if !setting.is_empty() {
+        summary.push_str(" near ");
+        summary.push_str(&join_context_phrases(&setting));
+    }
+    summary.push('.');
+
+    compact_context_text(&summary, MAX_CONTEXT_FRAME_TEXT_CHARS)
+}
+
+fn join_context_phrases(phrases: &[&str]) -> String {
+    match phrases {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let mut joined = phrases[..phrases.len() - 1].join(", ");
+            joined.push_str(", and ");
+            joined.push_str(phrases[phrases.len() - 1]);
+            joined
+        }
+    }
+}
+
+fn is_sensor_status_context_item(item: &str) -> bool {
+    let lowered = item.to_ascii_lowercase();
+    lowered.starts_with("i'm looking with my eye")
+        || lowered.starts_with("i am looking with my eye")
+        || lowered.starts_with("i'm looking with my camera")
+        || lowered.starts_with("i am looking with my camera")
+}
+
+fn compact_context_text(text: &str, max_chars: usize) -> Option<String> {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        return None;
+    }
+
+    let mut shortened = String::new();
+    for (index, ch) in compact.chars().enumerate() {
+        if index >= max_chars {
+            shortened.push('…');
+            return Some(shortened);
+        }
+        shortened.push(ch);
+    }
+
+    Some(shortened)
+}
+
+fn is_bad_context_item(item: &str, section: ContextSection) -> bool {
+    let lowered = item.to_ascii_lowercase();
+    let lowered = lowered.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\'');
+
+    if matches!(lowered, "i" | "i'm" | "me" | "my" | "unknown") {
+        return true;
+    }
+
+    match section {
+        ContextSection::Who => {
+            lowered.contains("camera") || lowered.contains("eye") || is_possessive_age_band(lowered)
+        }
+        ContextSection::Where => {
+            lowered.contains("camera")
+                || lowered.contains("eye")
+                || is_possessive_age_band(lowered)
+                || is_generic_visual_place(lowered)
+        }
+        ContextSection::What | ContextSection::Why | ContextSection::How => false,
+    }
+}
+
+fn is_generic_visual_place(text: &str) -> bool {
+    matches!(
+        text,
+        "visual content"
+            | "the visual content"
+            | "background"
+            | "the background"
+            | "foreground"
+            | "the foreground"
+    )
+}
+
+fn mentions_word(text: &str, word: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| token == word)
+}
+
+fn is_possessive_age_band(text: &str) -> bool {
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.len() < 3 {
+        return false;
+    }
+
+    matches!(words[0], "his" | "her" | "their")
+        && matches!(words[1], "early" | "mid" | "late")
+        && words[2]
+            .strip_suffix('s')
+            .is_some_and(|decade| decade.parse::<u8>().is_ok())
+}
+
+fn prompt_json_string(text: &str) -> String {
+    serde_json::to_string(text)
+        .expect("prompt string fragment is serializable")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
 }
 
 fn select_records_for_experience_prompt<'a>(
     records: &'a [SensationRecord],
-    impressions: &[VisionFieldImpressionRecord],
+    impressions: &[VisionImpressionRecord],
 ) -> Vec<&'a SensationRecord> {
     let mut selected_ids = HashSet::new();
     let mut selected = Vec::new();
@@ -550,12 +1037,12 @@ mod tests {
         }
     }
 
-    fn field_impression(
+    fn vision_impression(
         sensation_id: Uuid,
         occurred_at: chrono::DateTime<chrono::Utc>,
         text: &str,
-    ) -> VisionFieldImpressionRecord {
-        VisionFieldImpressionRecord {
+    ) -> VisionImpressionRecord {
+        VisionImpressionRecord {
             id: Uuid::new_v4(),
             sensation_id,
             occurred_at,
@@ -567,8 +1054,8 @@ mod tests {
             },
             sequence: 0,
             text: text.to_string(),
-            kind: "vision.field".to_string(),
-            faculty: "Field Vision Faculty".to_string(),
+            kind: "vision".to_string(),
+            faculty: "Vision Faculty".to_string(),
             confidence: 0.65,
             payload: json!({"source": "test"}),
         }
@@ -604,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_includes_field_vision_impression_for_original_sensation_outside_recent_window() {
+    fn prompt_includes_vision_impression_for_original_sensation_outside_recent_window() {
         let t0 = chrono::Utc::now();
         let original_id = Uuid::new_v4();
         let original = sensation_record(original_id, 0, t0);
@@ -618,7 +1105,7 @@ mod tests {
         }
 
         let impression_text = "I see a red mug on the desk.";
-        let impressions = vec![field_impression(original_id, t0, impression_text)];
+        let impressions = vec![vision_impression(original_id, t0, impression_text)];
 
         let selected = select_records_for_experience_prompt(&records, &impressions);
         assert!(selected.iter().any(|record| record.id == original_id));
@@ -653,5 +1140,72 @@ mod tests {
         assert!(prompt.contains("I think it's a woman in her late 20s."));
         assert!(!prompt.contains("attribute model"));
         assert!(!prompt.contains("detection confidence"));
+    }
+
+    #[test]
+    fn generated_context_frame_parser_accepts_envelope_and_sanitizes_bad_items() {
+        let fallback = ContextFrame {
+            who: Vec::new(),
+            what: vec!["I see a person near a shelf.".to_owned()],
+            where_: vec!["room with shelves".to_owned()],
+            when: "now".to_owned(),
+            why: vec!["Understand what appears to be happening right now.".to_owned()],
+            how: vec!["Vision Faculty".to_owned()],
+        };
+        let generated = r#"{
+            "context_frame": {
+                "who": ["I'm", "a bearded man"],
+                "what": ["A man appears to be looking toward me."],
+                "where": ["his early 40s", "a room with shelves"],
+                "when": "now",
+                "why": [],
+                "how": ["Vision Faculty"]
+            }
+        }"#;
+
+        let context =
+            parse_generated_context_frame(generated, &fallback).expect("generated context frame");
+
+        assert_eq!(context.who, vec!["a bearded man".to_owned()]);
+        assert_eq!(
+            context.what,
+            vec!["A man appears to be looking toward me.".to_owned()]
+        );
+        assert_eq!(context.where_, vec!["a room with shelves".to_owned()]);
+        assert_eq!(context.why, fallback.why);
+    }
+
+    #[test]
+    fn compact_context_frame_combines_redundant_visual_context() {
+        let context = compact_context_frame(ContextFrame {
+            who: Vec::new(),
+            what: vec![
+                "I'm looking with my eye (camera.default).".to_owned(),
+                "I see a face (in my eye \"camera.default\"). I think it's a man in his mid 30s."
+                    .to_owned(),
+                "I see a man with light brown hair and a beard looking directly ahead in the visual content."
+                    .to_owned(),
+                "I see a man with reddish hair sitting on what appears to be a bed, with some cans and wires visible in the background."
+                    .to_owned(),
+            ],
+            where_: vec!["the visual content".to_owned(), "the background".to_owned()],
+            when: "now".to_owned(),
+            why: vec!["Understand what appears to be happening right now.".to_owned()],
+            how: vec![
+                "Vision Faculty".to_owned(),
+                "face-browser:camera.default:vision".to_owned(),
+                "face".to_owned(),
+                "face-browser:camera.default:face".to_owned(),
+            ],
+        });
+
+        assert_eq!(context.who, vec!["a man".to_owned()]);
+        assert_eq!(context.what.len(), 1);
+        assert_eq!(
+            context.what[0],
+            "A man with light brown or reddish hair and a beard is sitting and looking ahead near a bed, cans, and wires."
+        );
+        assert!(context.where_.is_empty());
+        assert_eq!(context.how, vec!["Vision Faculty".to_owned()]);
     }
 }

@@ -8,10 +8,9 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
     response::{Html, IntoResponse},
     routing::get,
 };
@@ -23,22 +22,21 @@ use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::face_detection::{self, FaceDetector};
-use crate::field_vision;
 use crate::ingestion::{accept_frame, sequence_from_raw_json};
 use crate::llm_scheduler::LlmScheduler;
 use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
     AckMessage, ErrorMessage, ExperienceRecord, RawFaceCrop, RawVisionFrame,
-    RealTimeExperienceEvent, SensationRecord, VisionFieldImpressionRecord, VoiceObservation,
+    RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord, VoiceObservation,
 };
-use crate::realtime_experience;
+use crate::vision;
 use crate::voice;
 
-pub(crate) const FACULTIES: &[&str] = &["vision-frame", "face", "motion", "scene"];
+pub(crate) const VISION_CHANNEL: &str = "vision";
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
 pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
 pub(crate) const MAX_RECORDED_FACE_CROPS: usize = 24;
-pub(crate) const MAX_RECORDED_VISION_FIELD_IMPRESSIONS: usize = 80;
+pub(crate) const MAX_RECORDED_VISION_IMPRESSIONS: usize = 80;
 pub(crate) const MAX_RECORDED_EXPERIENCES: usize = 80;
 pub(crate) const MAX_RECORDED_VOICE_OBSERVATIONS: usize = 80;
 const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 256;
@@ -48,18 +46,19 @@ pub(crate) struct AppState {
     pub(crate) sensations: Arc<RwLock<VecDeque<SensationRecord>>>,
     pub(crate) raw_vision_frames: Arc<RwLock<VecDeque<RawVisionFrame>>>,
     pub(crate) raw_face_crops: Arc<RwLock<VecDeque<RawFaceCrop>>>,
-    pub(crate) vision_field_impressions: Arc<RwLock<VecDeque<VisionFieldImpressionRecord>>>,
+    pub(crate) vision_impressions: Arc<RwLock<VecDeque<VisionImpressionRecord>>>,
     pub(crate) experiences: Arc<RwLock<VecDeque<ExperienceRecord>>>,
     pub(crate) voice_observations: Arc<RwLock<VecDeque<VoiceObservation>>>,
     pub(crate) voice_impression_ids: Arc<RwLock<HashSet<Uuid>>>,
     pub(crate) llm_scheduler: LlmScheduler,
+    pub(crate) voice_llm_scheduler: LlmScheduler,
     pub(crate) face_detector: Arc<FaceDetector>,
     pub(crate) face_detection_active: Arc<AtomicBool>,
     pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) face_detection_last_embedding: Arc<RwLock<Option<Vec<f32>>>>,
     pub(crate) face_memory: Option<Arc<FaceMemory>>,
-    pub(crate) field_vision_active: Arc<AtomicBool>,
-    pub(crate) field_vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
+    pub(crate) vision_active: Arc<AtomicBool>,
+    pub(crate) vision_last_sampled: Arc<RwLock<Option<Uuid>>>,
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
     pub(crate) realtime_experience_active: Arc<AtomicBool>,
     pub(crate) realtime_experience_pending: Arc<AtomicBool>,
@@ -83,6 +82,12 @@ pub async fn run() -> anyhow::Result<()> {
         models.llm_projector.clone(),
         realtime_experience_events.clone(),
     )?;
+    let voice_llm_scheduler = LlmScheduler::start_named(
+        "face-voice-llm-scheduler",
+        models.llm.clone(),
+        None,
+        realtime_experience_events.clone(),
+    )?;
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
@@ -103,18 +108,19 @@ pub async fn run() -> anyhow::Result<()> {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
         raw_vision_frames: Arc::new(RwLock::new(VecDeque::new())),
         raw_face_crops: Arc::new(RwLock::new(VecDeque::new())),
-        vision_field_impressions: Arc::new(RwLock::new(VecDeque::new())),
+        vision_impressions: Arc::new(RwLock::new(VecDeque::new())),
         experiences: Arc::new(RwLock::new(VecDeque::new())),
         voice_observations: Arc::new(RwLock::new(VecDeque::new())),
         voice_impression_ids: Arc::new(RwLock::new(HashSet::new())),
         llm_scheduler,
+        voice_llm_scheduler,
         face_detector,
         face_detection_active: Arc::new(AtomicBool::new(false)),
         face_detection_last_sampled: Arc::new(RwLock::new(None)),
         face_detection_last_embedding: Arc::new(RwLock::new(None)),
         face_memory,
-        field_vision_active: Arc::new(AtomicBool::new(false)),
-        field_vision_last_sampled: Arc::new(RwLock::new(None)),
+        vision_active: Arc::new(AtomicBool::new(false)),
+        vision_last_sampled: Arc::new(RwLock::new(None)),
         realtime_experience_events,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
         realtime_experience_pending: Arc::new(AtomicBool::new(false)),
@@ -124,9 +130,8 @@ pub async fn run() -> anyhow::Result<()> {
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let app = Router::new()
         .route("/", get(index))
-        .route("/api/faculties", get(faculties))
         .route("/api/sensations", get(recent_sensations))
-        .route("/ws/faculties/:faculty", get(faculty_ws))
+        .route("/ws/vision", get(vision_ws))
         .route("/ws/realtime-experience", get(realtime_experience_ws))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
@@ -156,10 +161,6 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
 
-async fn faculties() -> Json<&'static [&'static str]> {
-    Json(FACULTIES)
-}
-
 async fn recent_sensations(State(state): State<AppState>) -> Json<Vec<SensationRecord>> {
     let records = state
         .sensations
@@ -171,32 +172,20 @@ async fn recent_sensations(State(state): State<AppState>) -> Json<Vec<SensationR
     Json(records)
 }
 
-async fn faculty_ws(
-    ws: WebSocketUpgrade,
-    Path(faculty): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    if !FACULTIES.contains(&faculty.as_str()) {
-        return (
-            StatusCode::NOT_FOUND,
-            format!("unknown faculty '{faculty}'"),
-        )
-            .into_response();
-    }
-
-    ws.on_upgrade(move |socket| handle_faculty_socket(socket, faculty, state))
+async fn vision_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_vision_socket(socket, state))
         .into_response()
 }
 
-async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state: AppState) {
+async fn handle_vision_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    info!(faculty = %socket_faculty, "faculty socket connected");
+    info!(channel = VISION_CHANNEL, "vision socket connected");
 
     while let Some(message) = receiver.next().await {
         let message = match message {
             Ok(message) => message,
             Err(err) => {
-                warn!(faculty = %socket_faculty, %err, "websocket receive error");
+                warn!(channel = VISION_CHANNEL, %err, "websocket receive error");
                 break;
             }
         };
@@ -210,7 +199,7 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
 
         let sequence = sequence_from_raw_json(&text);
         match accept_frame(
-            &socket_faculty,
+            VISION_CHANNEL,
             &text,
             &state.sensations,
             &state.raw_vision_frames,
@@ -218,13 +207,13 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
             Ok(record) => {
                 let ack = AckMessage {
                     r#type: "ack",
-                    faculty: socket_faculty.clone(),
+                    faculty: VISION_CHANNEL.to_string(),
                     sequence: record.sequence,
                     observed_at: record.observed_at,
                 };
 
                 trace!(
-                    faculty = %socket_faculty,
+                    channel = VISION_CHANNEL,
                     sequence = record.sequence,
                     width = record.media.width,
                     height = record.media.height,
@@ -234,34 +223,30 @@ async fn handle_faculty_socket(socket: WebSocket, socket_faculty: String, state:
                 );
 
                 if let Err(err) = send_json(&mut sender, &ack).await {
-                    warn!(faculty = %socket_faculty, %err, "failed to send acknowledgement");
+                    warn!(channel = VISION_CHANNEL, %err, "failed to send acknowledgement");
                     break;
                 }
 
-                if socket_faculty == "vision-frame" {
-                    field_vision::spawn_field_vision(state.clone());
-                    face_detection::spawn_face_detection(state.clone());
-                } else {
-                    realtime_experience::spawn_trace(state.clone());
-                }
+                vision::spawn_vision(state.clone());
+                face_detection::spawn_face_detection(state.clone());
             }
             Err(error) => {
                 let error = ErrorMessage {
                     r#type: "error",
-                    faculty: socket_faculty.clone(),
+                    faculty: VISION_CHANNEL.to_string(),
                     sequence,
                     error,
                 };
 
                 if let Err(err) = send_json(&mut sender, &error).await {
-                    warn!(faculty = %socket_faculty, %err, "failed to send validation error");
+                    warn!(channel = VISION_CHANNEL, %err, "failed to send validation error");
                     break;
                 }
             }
         }
     }
 
-    info!(faculty = %socket_faculty, "faculty socket disconnected");
+    info!(channel = VISION_CHANNEL, "vision socket disconnected");
 }
 
 async fn realtime_experience_ws(

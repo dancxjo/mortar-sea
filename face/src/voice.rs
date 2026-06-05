@@ -4,6 +4,7 @@ use psyche::{ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationR
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -12,14 +13,13 @@ use crate::ingestion::record_sensation;
 use crate::llm_scheduler::{LlmJobKind, LlmStreamControl};
 use crate::messages::{
     ExperienceRecord, MediaRecord, RealTimeExperienceEvent, SensationRecord, SensationSource,
-    VisionFieldImpressionRecord, VoiceObservation,
+    VisionImpressionRecord, VoiceObservation,
 };
 
 const RECENT_EXPERIENCE_LIMIT: usize = 12;
 const RECENT_THOUGHT_LIMIT: usize = 10;
-const VOICE_MAX_TOKENS: usize = 96;
-const MIN_INTERRUPTED_FRAGMENT_CHARS: usize = 24;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
+const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 
 pub(crate) fn spawn_voice(state: AppState) {
     tokio::spawn(async move {
@@ -33,7 +33,6 @@ struct ActiveVoiceGeneration {
     control: LlmStreamControl,
     segmenter: VoiceSentenceSegmenter,
     experience_ids: Vec<Uuid>,
-    interrupted_generation_id: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -53,12 +52,15 @@ async fn run_voice(state: AppState) {
     let (generation_tx, mut generation_rx) = mpsc::unbounded_channel();
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
-    let mut active = None::<ActiveVoiceGeneration>;
+    let mut active = Some(start_voice_generation(
+        &state,
+        &generation_tx,
+        &recent_experiences,
+        &recent_thoughts,
+    ));
     let mut last_experience_signature = None::<String>;
-    let mut interrupted_generation_id = None::<Uuid>;
-    let mut interrupted_fragment = None::<String>;
 
-    info!("silent Voice observer started");
+    info!("continuous silent Voice stream started");
 
     loop {
         tokio::select! {
@@ -82,40 +84,17 @@ async fn run_voice(state: AppState) {
 
                 push_limited(&mut recent_experiences, experience.clone(), RECENT_EXPERIENCE_LIMIT);
 
-                if let Some(mut current) = active.take() {
+                if let Some(current) = active.as_mut() {
                     current.control.append_prompt(format_live_experience_append(&experience));
-                    current.control.cancel();
-                    let _ = state
-                        .realtime_experience_events
-                        .send(RealTimeExperienceEvent::VoiceResponseDone {
-                            generation_id: current.generation_id,
-                        });
-                    for sentence in current.segmenter.drain_committed() {
-                        emit_voice_sentence(
-                            &state,
-                            current.generation_id,
-                            sentence,
-                            &current.experience_ids,
-                            current.interrupted_generation_id,
-                            &mut recent_thoughts,
-                        );
-                    }
-                    let fragment = current.segmenter.fragment();
-                    if fragment.chars().count() >= MIN_INTERRUPTED_FRAGMENT_CHARS {
-                        interrupted_fragment = Some(fragment);
-                    }
-                    interrupted_generation_id = Some(current.generation_id);
+                    current.experience_ids.push(experience.id);
+                } else {
+                    active = Some(start_voice_generation(
+                        &state,
+                        &generation_tx,
+                        &recent_experiences,
+                        &recent_thoughts,
+                    ));
                 }
-
-                active = Some(start_voice_generation(
-                    &state,
-                    &generation_tx,
-                    &recent_experiences,
-                    &recent_thoughts,
-                    interrupted_generation_id,
-                    interrupted_fragment.as_deref(),
-                ));
-                interrupted_fragment = None;
             }
             generation_event = generation_rx.recv() => {
                 let Some(generation_event) = generation_event else {
@@ -143,13 +122,13 @@ async fn run_voice(state: AppState) {
                                 current.generation_id,
                                 sentence,
                                 &current.experience_ids,
-                                current.interrupted_generation_id,
+                                None,
                                 &mut recent_thoughts,
                             );
                         }
                     }
                     VoiceGenerationEvent::Done { generation_id, result } => {
-                        let Some(mut current) = active.take() else {
+                        let Some(current) = active.take() else {
                             continue;
                         };
                         if current.generation_id != generation_id {
@@ -165,7 +144,7 @@ async fn run_voice(state: AppState) {
                                         current.generation_id,
                                         sentence,
                                         &current.experience_ids,
-                                        current.interrupted_generation_id,
+                                        None,
                                         &mut recent_thoughts,
                                     );
                                 }
@@ -178,6 +157,14 @@ async fn run_voice(state: AppState) {
                             .send(RealTimeExperienceEvent::VoiceResponseDone {
                                 generation_id,
                             });
+
+                        sleep(VOICE_RESTART_DELAY).await;
+                        active = Some(start_voice_generation(
+                            &state,
+                            &generation_tx,
+                            &recent_experiences,
+                            &recent_thoughts,
+                        ));
                     }
                 }
             }
@@ -190,8 +177,6 @@ fn start_voice_generation(
     generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
     recent_experiences: &VecDeque<ExperienceRecord>,
     recent_thoughts: &VecDeque<VoiceObservation>,
-    interrupted_generation_id: Option<Uuid>,
-    interrupted_fragment: Option<&str>,
 ) -> ActiveVoiceGeneration {
     let generation_id = Uuid::new_v4();
     let experience_ids = recent_experiences
@@ -205,15 +190,15 @@ fn start_voice_generation(
             ChatMessage::new("system", voice_system_prompt()),
             ChatMessage::new(
                 "user",
-                build_voice_prompt(recent_experiences, recent_thoughts, interrupted_fragment),
+                build_voice_prompt(recent_experiences, recent_thoughts),
             ),
         ],
         images: Vec::new(),
-        max_tokens: Some(VOICE_MAX_TOKENS),
-        stop: voice_stop_markers(),
+        max_tokens: None,
+        stop: Vec::new(),
     };
 
-    let scheduler = state.llm_scheduler.clone();
+    let scheduler = state.voice_llm_scheduler.clone();
     let events = state.realtime_experience_events.clone();
     let control_for_task = control.clone();
     let tx = generation_tx.clone();
@@ -240,22 +225,23 @@ fn start_voice_generation(
         control,
         segmenter: VoiceSentenceSegmenter::new(),
         experience_ids,
-        interrupted_generation_id,
     }
 }
 
 fn voice_system_prompt() -> &'static str {
     "You are the silent Voice of Mortar-Sea: an internal first-person observer. \
      You do not speak aloud, address the human, use tools, or write JSON. \
-     Notice what is happening from my own perspective using I, me, and my. \
-     Preserve uncertainty and keep each thought short. \
-     Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM."
+     Write from the embodied system's own perspective using I, me, and my. \
+     Preserve uncertainty and keep thoughts short. \
+     Keep generating a continuous stream of brief present-tense inner speech. \
+     Prefer complete sentences, but continue naturally when new live context arrives. \
+     Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM. \
+     Do not end the stream or write stop markers."
 }
 
 fn build_voice_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
     recent_thoughts: &VecDeque<VoiceObservation>,
-    interrupted_fragment: Option<&str>,
 ) -> String {
     let context_frame = context_frame_for_voice(recent_experiences);
     let mut prompt = String::new();
@@ -293,15 +279,11 @@ fn build_voice_prompt(
             ));
         }
     }
-    if let Some(fragment) = interrupted_fragment {
-        prompt.push_str("\nInterrupted partial thought worth preserving:\n");
-        prompt.push_str("- ");
-        prompt.push_str(&prompt_json_string(fragment));
-        prompt.push('\n');
-    }
     prompt.push_str(
-        "\nContinue thinking silently. Write one or two concise first-person present-tense observations. \
-         If the situation is unclear, say what I am uncertain about.",
+        "\nBegin or continue my silent Voice stream now. \
+         Generate brief first-person present-tense inner speech continuously. \
+         Let each thought be short enough to stay interruptible. \
+         When live Experiences are appended later, integrate them as new immediate context without restarting or addressing the prompt.",
     );
     prompt
 }
@@ -320,17 +302,9 @@ fn context_frame_for_voice(recent_experiences: &VecDeque<ExperienceRecord>) -> C
     ContextFrame::from_timeline(&frame, frame.entries(), DEFAULT_CONTEXT_FRAME_ITEMS)
 }
 
-fn voice_stop_markers() -> Vec<String> {
-    vec![
-        "<turn|>".to_string(),
-        "<end_of_turn>".to_string(),
-        "<|im_end|>".to_string(),
-    ]
-}
-
 fn format_live_experience_append(experience: &ExperienceRecord) -> String {
     format!(
-        "\n\n[New Experience while I was thinking at {}]\n{}\n[Interrupt this thought and continue from the updated situation.]\n",
+        "\n\n[Live Experience at {}]\n{}\n[Integrate this now. Keep the silent first-person Voice stream going.]\n",
         experience.observed_at.to_rfc3339(),
         experience.what
     )
@@ -418,7 +392,7 @@ fn record_voice_sensation_and_impression(
     };
     record_sensation(&state.sensations, sensation.clone());
 
-    let impression = VisionFieldImpressionRecord {
+    let impression = VisionImpressionRecord {
         id: Uuid::new_v4(),
         sensation_id: sensation.id,
         occurred_at: sensation.occurred_at,
@@ -442,10 +416,10 @@ fn record_voice_sensation_and_impression(
         .insert(impression.id);
 
     let mut impressions = state
-        .vision_field_impressions
+        .vision_impressions
         .write()
-        .expect("field vision impression log lock");
-    if impressions.len() == crate::app::MAX_RECORDED_VISION_FIELD_IMPRESSIONS {
+        .expect("vision impression log lock");
+    if impressions.len() == crate::app::MAX_RECORDED_VISION_IMPRESSIONS {
         impressions.pop_front();
     }
     impressions.push_back(impression);
@@ -487,12 +461,17 @@ fn is_only_voice_feedback(state: &AppState, experience: &ExperienceRecord) -> bo
 }
 
 fn clean_voice_sentence(sentence: &str) -> String {
-    sentence
+    let text = sentence
         .trim()
         .trim_matches('"')
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    first_sentence(&text).unwrap_or(text)
+}
+
+fn first_sentence(text: &str) -> Option<String> {
+    find_sentence_end(text).map(|end| text[..end].trim().to_string())
 }
 
 fn normalized_signature(text: &str) -> String {
@@ -562,19 +541,11 @@ impl VoiceSentenceSegmenter {
         out
     }
 
-    fn drain_committed(&mut self) -> Vec<String> {
-        self.pending.drain(..).collect()
-    }
-
     fn finish(mut self) -> Vec<String> {
         if !self.buffer.trim().is_empty() {
             self.pending.push_back(self.buffer.trim().to_string());
         }
         self.pending.into_iter().collect()
-    }
-
-    fn fragment(&self) -> String {
-        self.buffer.trim().to_string()
     }
 }
 
@@ -651,6 +622,14 @@ mod tests {
         assert_eq!(
             normalized_signature("The camera is active!"),
             normalized_signature("the camera is active")
+        );
+    }
+
+    #[test]
+    fn clean_voice_sentence_keeps_only_first_sentence() {
+        assert_eq!(
+            clean_voice_sentence("I see the room. I wonder about the sound."),
+            "I see the room."
         );
     }
 }

@@ -3,7 +3,15 @@ window.faceApp = function faceApp() {
     cameraMessage: 'Camera idle',
     clientId: 'face-browser',
     sensorId: 'camera.default',
-    faculties: [],
+    vision: {
+      socket: null,
+      status: 'disconnected',
+      pending: false,
+      sent: 0,
+      acked: 0,
+      dropped: 0,
+      lastError: '',
+    },
     fps: 3,
     experiencePrompt: '',
     experienceResponse: '',
@@ -12,8 +20,10 @@ window.faceApp = function faceApp() {
     activeExperienceGenerationId: null,
     activeVoiceGenerationId: null,
     voiceResponse: '',
+    voiceHasTokens: false,
     voiceStatus: 'waiting',
     llmJobs: [],
+    selectedLlmJobId: null,
     mime: 'image/jpeg',
     quality: 0.45,
     running: false,
@@ -23,19 +33,6 @@ window.faceApp = function faceApp() {
     timer: null,
 
     async init() {
-      const response = await fetch('/api/faculties');
-      const names = await response.json();
-      this.faculties = names.map((name) => ({
-        name,
-        enabled: true,
-        socket: null,
-        status: 'disconnected',
-        pending: false,
-        sent: 0,
-        acked: 0,
-        dropped: 0,
-        lastError: '',
-      }));
       this.connectRealtimeExperience();
     },
 
@@ -53,7 +50,7 @@ window.faceApp = function faceApp() {
         await this.$refs.video.play();
         this.running = true;
         this.cameraMessage = 'Camera running';
-        this.faculties.forEach((faculty) => this.syncFaculty(faculty));
+        this.syncVision();
         this.scheduleCapture();
       } catch (error) {
         this.cameraMessage = error.message || 'Camera permission failed';
@@ -63,7 +60,7 @@ window.faceApp = function faceApp() {
     stop() {
       this.running = false;
       window.clearTimeout(this.timer);
-      this.faculties.forEach((faculty) => this.disconnect(faculty));
+      this.disconnectVision();
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
@@ -91,17 +88,28 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_response_start') {
           this.activeVoiceGenerationId = message.generation_id;
-          this.voiceResponse = '';
+          this.voiceHasTokens = false;
           this.voiceStatus = 'thinking';
           return;
         }
         if (message.type === 'voice_response_token') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
+          if (!this.voiceHasTokens) {
+            this.voiceResponse = '';
+            this.voiceHasTokens = true;
+          }
           this.voiceResponse += message.text;
           return;
         }
         if (message.type === 'voice_response_done') {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
+          this.voiceStatus = 'waiting';
+          return;
+        }
+        if (message.type === 'voice_observation') {
+          this.activeVoiceGenerationId = message.generation_id;
+          this.voiceResponse = message.observation?.text || this.voiceResponse;
+          this.voiceHasTokens = Boolean(this.voiceResponse);
           this.voiceStatus = 'waiting';
           return;
         }
@@ -163,12 +171,19 @@ window.faceApp = function faceApp() {
       };
 
       if (message.type === 'llm_job_queued') {
+        next.queuedAt = message.observed_at;
+        next.priority = message.priority;
+        next.messageCount = message.message_count;
+        next.imageCount = message.image_count;
         next.promptChars = message.prompt_chars;
         next.maxTokens = message.max_tokens;
+        next.stopCount = message.stop_count;
+        next.promptPreview = message.prompt_preview;
       } else if (message.type === 'llm_job_started') {
         next.queueWaitMs = message.queue_wait_ms;
       } else if (message.type === 'llm_job_completed') {
         next.responseChars = message.response_chars;
+        next.response = message.response;
         next.tokenEvents = message.token_events;
         next.elapsedMs = message.elapsed_ms;
       } else if (message.type === 'llm_job_failed') {
@@ -180,10 +195,21 @@ window.faceApp = function faceApp() {
       }
       this.llmJobs.unshift(next);
       this.llmJobs = this.llmJobs.slice(0, 24);
+      if (!this.selectedLlmJobId || !this.llmJobs.some((job) => job.id === this.selectedLlmJobId)) {
+        this.selectedLlmJobId = next.id;
+      }
     },
 
     visibleLlmJobs() {
-      return this.llmJobs.slice(0, 8);
+      return this.llmJobs.slice(0, 14);
+    },
+
+    selectLlmJob(jobId) {
+      this.selectedLlmJobId = jobId;
+    },
+
+    selectedLlmJob() {
+      return this.llmJobs.find((job) => job.id === this.selectedLlmJobId) || this.llmJobs[0] || null;
     },
 
     llmActivityLabel() {
@@ -226,9 +252,24 @@ window.faceApp = function faceApp() {
     },
 
     formatDuration(milliseconds) {
+      if (milliseconds === undefined || milliseconds === null) return '-';
       if (milliseconds < 1000) return `${milliseconds}ms`;
       if (milliseconds < 10000) return `${(milliseconds / 1000).toFixed(1)}s`;
       return `${Math.round(milliseconds / 1000)}s`;
+    },
+
+    formatTimestamp(value) {
+      if (!value) return '-';
+      return new Intl.DateTimeFormat([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(new Date(value));
+    },
+
+    formatCount(value, unit) {
+      if (value === undefined || value === null) return '-';
+      return `${value} ${unit}`;
     },
 
     scheduleCapture() {
@@ -241,61 +282,61 @@ window.faceApp = function faceApp() {
       }, delay);
     },
 
-    syncFaculty(faculty) {
-      if (!this.running || !faculty.enabled) {
-        this.disconnect(faculty);
+    syncVision() {
+      if (!this.running) {
+        this.disconnectVision();
         return;
       }
-      if (faculty.socket && faculty.socket.readyState <= WebSocket.OPEN) return;
-      this.connect(faculty);
+      if (this.vision.socket && this.vision.socket.readyState <= WebSocket.OPEN) return;
+      this.connectVision();
     },
 
-    connect(faculty) {
+    connectVision() {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const socket = new WebSocket(`${protocol}://${window.location.host}/ws/faculties/${faculty.name}`);
-      faculty.socket = socket;
-      faculty.status = 'connecting';
-      faculty.lastError = '';
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws/vision`);
+      this.vision.socket = socket;
+      this.vision.status = 'connecting';
+      this.vision.lastError = '';
 
       socket.addEventListener('open', () => {
-        faculty.status = 'connected';
+        this.vision.status = 'connected';
       });
 
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(event.data);
         if (message.type === 'ack') {
-          faculty.pending = false;
-          faculty.acked += 1;
-          faculty.lastError = '';
+          this.vision.pending = false;
+          this.vision.acked += 1;
+          this.vision.lastError = '';
           return;
         }
         if (message.type === 'error') {
-          faculty.pending = false;
-          faculty.lastError = message.error;
+          this.vision.pending = false;
+          this.vision.lastError = message.error;
         }
       });
 
       socket.addEventListener('close', () => {
-        faculty.status = 'disconnected';
-        faculty.pending = false;
-        if (this.running && faculty.enabled) {
-          window.setTimeout(() => this.connect(faculty), 1000);
+        this.vision.status = 'disconnected';
+        this.vision.pending = false;
+        if (this.running) {
+          window.setTimeout(() => this.connectVision(), 1000);
         }
       });
 
       socket.addEventListener('error', () => {
-        faculty.status = 'error';
-        faculty.lastError = 'socket error';
+        this.vision.status = 'error';
+        this.vision.lastError = 'socket error';
       });
     },
 
-    disconnect(faculty) {
-      faculty.pending = false;
-      if (faculty.socket) {
-        faculty.socket.close();
-        faculty.socket = null;
+    disconnectVision() {
+      this.vision.pending = false;
+      if (this.vision.socket) {
+        this.vision.socket.close();
+        this.vision.socket = null;
       }
-      faculty.status = 'disconnected';
+      this.vision.status = 'disconnected';
     },
 
     async captureFrame() {
@@ -313,34 +354,31 @@ window.faceApp = function faceApp() {
       const sequence = ++this.sequence;
       const occurredAt = new Date().toISOString();
 
-      this.faculties.forEach((faculty) => {
-        if (!faculty.enabled) return;
-        if (!faculty.socket || faculty.socket.readyState !== WebSocket.OPEN) {
-          faculty.dropped += 1;
-          return;
-        }
-        if (faculty.pending) {
-          faculty.dropped += 1;
-          return;
-        }
+      if (!this.vision.socket || this.vision.socket.readyState !== WebSocket.OPEN) {
+        this.vision.dropped += 1;
+        return;
+      }
+      if (this.vision.pending) {
+        this.vision.dropped += 1;
+        return;
+      }
 
-        const frame = {
-          kind: 'vision.frame',
-          client_id: this.clientId,
-          sensor_id: this.sensorId,
-          faculty: faculty.name,
-          sequence,
-          occurred_at: occurredAt,
-          mime: this.mime,
-          width,
-          height,
-          data,
-        };
+      const frame = {
+        kind: 'vision.frame',
+        client_id: this.clientId,
+        sensor_id: this.sensorId,
+        faculty: 'vision',
+        sequence,
+        occurred_at: occurredAt,
+        mime: this.mime,
+        width,
+        height,
+        data,
+      };
 
-        faculty.socket.send(JSON.stringify(frame));
-        faculty.pending = true;
-        faculty.sent += 1;
-      });
+      this.vision.socket.send(JSON.stringify(frame));
+      this.vision.pending = true;
+      this.vision.sent += 1;
     },
   };
 };

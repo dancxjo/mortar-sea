@@ -379,6 +379,10 @@ fn looks_like_person_name(token: &str) -> bool {
         token,
         "A" | "An"
             | "The"
+            | "I"
+            | "I'm"
+            | "Me"
+            | "My"
             | "Someone"
             | "Something"
             | "Unknown"
@@ -427,11 +431,39 @@ fn extract_location_from_text(text: &str) -> Option<String> {
         if phrase.is_empty() {
             continue;
         }
+        if looks_like_age_or_body_phrase(phrase) {
+            continue;
+        }
 
         return Some(phrase.to_owned());
     }
 
     None
+}
+
+fn looks_like_age_or_body_phrase(phrase: &str) -> bool {
+    let lowered = phrase.to_ascii_lowercase();
+    matches!(
+        lowered.as_str(),
+        "my eye" | "my camera" | "the eye" | "the camera"
+    ) || lowered.starts_with("my eye ")
+        || lowered.starts_with("my camera ")
+        || lowered.starts_with("the eye ")
+        || lowered.starts_with("the camera ")
+        || is_possessive_age_band(&lowered)
+}
+
+fn is_possessive_age_band(phrase: &str) -> bool {
+    let words = phrase.split_whitespace().collect::<Vec<_>>();
+    if words.len() < 3 {
+        return false;
+    }
+
+    matches!(words[0], "his" | "her" | "their")
+        && matches!(words[1], "early" | "mid" | "late")
+        && words[2]
+            .strip_suffix('s')
+            .is_some_and(|decade| decade.parse::<u8>().is_ok())
 }
 
 fn format_when(window: &[TimelineEntry]) -> String {
@@ -615,5 +647,32 @@ mod tests {
         assert!(context.how.len() <= 3);
         assert!(rendered.matches("- ").count() <= 16);
         assert!(rendered.contains("WHEN\n- "));
+    }
+
+    #[test]
+    fn context_frame_does_not_treat_pronouns_or_age_bands_as_context() {
+        let t0 = now();
+        let face = Sensation::new("vision.face_crop", "camera.default", t0, t0, json!({}));
+        let impression = Impression::new(
+            vec![face.id],
+            t0,
+            t0,
+            "I see a face (in my eye \"camera.default\"). I'm not sure, but I think it's a man in his early 40s.",
+        );
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(face));
+        frame.push(TimelineEntry::Impression(impression));
+
+        let context = ContextFrame::from_timeline(&frame, frame.entries(), 4);
+
+        assert!(!context.who.contains(&"I'm".to_owned()));
+        assert!(!context.where_.iter().any(|item| item.contains("early 40s")));
+        assert!(
+            !context
+                .where_
+                .iter()
+                .any(|item| item.contains("camera.default"))
+        );
     }
 }

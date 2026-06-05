@@ -51,7 +51,7 @@ pub(crate) struct RawFaceCrop {
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct VisionFieldImpressionRecord {
+pub(crate) struct VisionImpressionRecord {
     pub(crate) id: Uuid,
     pub(crate) sensation_id: Uuid,
     pub(crate) occurred_at: DateTime<Utc>,
@@ -156,8 +156,13 @@ pub(crate) enum RealTimeExperienceEvent {
         job_id: Uuid,
         job_kind: String,
         observed_at: DateTime<Utc>,
+        priority: u8,
+        message_count: usize,
+        image_count: usize,
         prompt_chars: usize,
         max_tokens: Option<usize>,
+        stop_count: usize,
+        prompt_preview: String,
     },
     LlmJobStarted {
         job_id: Uuid,
@@ -170,6 +175,7 @@ pub(crate) enum RealTimeExperienceEvent {
         job_kind: String,
         observed_at: DateTime<Utc>,
         response_chars: usize,
+        response: String,
         token_events: usize,
         elapsed_ms: u64,
     },

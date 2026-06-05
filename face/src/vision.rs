@@ -12,18 +12,18 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::llm_scheduler::LlmJobKind;
-use crate::messages::{RawVisionFrame, VisionFieldImpressionRecord};
+use crate::messages::{RawVisionFrame, VisionImpressionRecord};
 
-const MAX_FIELD_VISION_TOKENS: usize = 96;
-const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
-const MAX_FIELD_VISION_DATA_CHARS: usize = 2_000_000;
+const MAX_VISION_TOKENS: usize = 96;
+const VISION_BASE_CONFIDENCE: f32 = 0.65;
+const MAX_VISION_DATA_CHARS: usize = 2_000_000;
 const MAX_IMAGE_SUMMARY_SAMPLES: u32 = 6_400;
-const MAX_FIELD_VISION_LOG_CHARS: usize = 220;
-const FIELD_VISION_FALLBACK_IMPRESSION: &str =
-    "I have a live visual field, but I cannot make out a grounded visual impression from it.";
+const MAX_VISION_LOG_CHARS: usize = 220;
+const VISION_FALLBACK_IMPRESSION: &str =
+    "I have live vision, but I cannot make out a grounded visual impression from it.";
 
 #[derive(Debug, Clone)]
-struct VisionFieldDescription {
+struct VisionDescription {
     text: String,
     payload: Value,
 }
@@ -44,25 +44,26 @@ struct FrameVisualSummary {
     edge_energy: f32,
 }
 
-pub(crate) fn spawn_field_vision(state: AppState) {
-    if state.field_vision_active.swap(true, Ordering::AcqRel) {
+pub(crate) fn spawn_vision(state: AppState) {
+    if state.vision_active.swap(true, Ordering::AcqRel) {
         return;
     }
 
     tokio::spawn(async move {
         loop {
             let Some(frame) = latest_unsampled_frame(&state) else {
-                state.field_vision_active.store(false, Ordering::Release);
+                state.vision_active.store(false, Ordering::Release);
                 return;
             };
 
-            match describe_field_of_vision(&state, frame.clone()).await {
+            match describe_vision(&state, frame.clone()).await {
                 Ok(how) => {
                     record_impression(&state, frame, how);
                     crate::realtime_experience::spawn_trace(state.clone());
+                    tokio::task::yield_now().await;
                 }
                 Err(err) => {
-                    warn!(%err, "field vision faculty failed to describe frame");
+                    warn!(%err, "vision faculty failed to describe frame");
                 }
             }
         }
@@ -78,9 +79,9 @@ fn latest_unsampled_frame(state: &AppState) -> Option<RawVisionFrame> {
         .cloned()?;
 
     let mut last_sampled = state
-        .field_vision_last_sampled
+        .vision_last_sampled
         .write()
-        .expect("field vision sampled lock");
+        .expect("vision sampled lock");
     if *last_sampled == Some(latest.sensation.id) {
         return None;
     }
@@ -89,13 +90,13 @@ fn latest_unsampled_frame(state: &AppState) -> Option<RawVisionFrame> {
     Some(latest)
 }
 
-async fn describe_field_of_vision(
+async fn describe_vision(
     state: &AppState,
     frame: RawVisionFrame,
-) -> anyhow::Result<VisionFieldDescription> {
-    if frame.data.len() > MAX_FIELD_VISION_DATA_CHARS {
-        return Ok(VisionFieldDescription {
-            text: oversized_field_impression(&frame),
+) -> anyhow::Result<VisionDescription> {
+    if frame.data.len() > MAX_VISION_DATA_CHARS {
+        return Ok(VisionDescription {
+            text: oversized_vision_impression(&frame),
             payload: serde_json::json!({
                 "reason": "payload_too_large",
                 "data_chars": frame.data.len(),
@@ -105,36 +106,36 @@ async fn describe_field_of_vision(
 
     let summary = summarize_frame(&frame)?;
     let image_bytes = decode_frame_image_bytes(&frame)?;
-    let prompt = build_field_vision_prompt();
+    let prompt = build_vision_prompt();
     let generated = state
         .llm_scheduler
         .generate(
-            LlmJobKind::FieldVision,
+            LlmJobKind::Vision,
             GenerationRequest {
                 prompt: String::new(),
                 messages: vec![
-                    ChatMessage::new("system", field_vision_system_prompt()),
+                    ChatMessage::new("system", vision_system_prompt()),
                     ChatMessage::new("user", prompt),
                 ],
                 images: vec![GenerationImage::new(
                     frame.sensation.media.mime.clone(),
                     image_bytes,
                 )],
-                max_tokens: Some(MAX_FIELD_VISION_TOKENS),
+                max_tokens: Some(MAX_VISION_TOKENS),
                 stop: llm_stop_markers(),
             },
         )
         .await?;
 
-    Ok(VisionFieldDescription {
-        text: clean_impression(&generated, FIELD_VISION_FALLBACK_IMPRESSION),
+    Ok(VisionDescription {
+        text: clean_impression(&generated, VISION_FALLBACK_IMPRESSION),
         payload: serde_json::to_value(summary).expect("frame visual summary is serializable"),
     })
 }
 
-fn oversized_field_impression(frame: &RawVisionFrame) -> String {
+fn oversized_vision_impression(frame: &RawVisionFrame) -> String {
     format!(
-        "I am receiving a live visual field from my camera, but the {}x{} payload is too large to inspect directly.",
+        "I am receiving live vision from my camera, but the {}x{} payload is too large to inspect directly.",
         frame.sensation.media.width, frame.sensation.media.height
     )
 }
@@ -147,17 +148,17 @@ fn llm_stop_markers() -> Vec<String> {
     ]
 }
 
-fn field_vision_system_prompt() -> &'static str {
-    "You are the field-vision faculty between the eye and the Wit. \
-You receive my live field of vision, not a detached image.\n\
+fn vision_system_prompt() -> &'static str {
+    "You are the vision faculty between the eye and the Wit. \
+You receive my vision, not a detached image.\n\
 Infer only from the attached visual input. Name concrete visible objects, people, layout, text, or activity when present.\n\
 Write one short first-person present-tense impression. Use \"I\" and \"my\" naturally.\n\
-Prefer direct perception phrasing such as \"I see ...\". Do not write \"My field of vision shows ...\".\n\
-If people are visible, do not assume any visible person is me unless the field of vision is clearly a mirror or reflection.\n\
+Prefer direct perception phrasing such as \"I see ...\". Do not write \"My vision shows ...\".\n\
+If people are visible, do not assume any visible person is me unless the vision is clearly a mirror or reflection.\n\
 Do not mention screenshots, photos, frames, cameras, metadata, data URLs, computed facts, or analysis. Return only the impression sentence."
 }
 
-fn build_field_vision_prompt() -> &'static str {
+fn build_vision_prompt() -> &'static str {
     "The attached visual input is what I am seeing now.\n\
 Write one short first-person present-tense impression from the visual content. \
 Prefer concrete scene details over lighting or color summaries."
@@ -422,8 +423,8 @@ fn compact_log_text(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn record_impression(state: &AppState, frame: RawVisionFrame, description: VisionFieldDescription) {
-    let impression = VisionFieldImpressionRecord {
+fn record_impression(state: &AppState, frame: RawVisionFrame, description: VisionDescription) {
+    let impression = VisionImpressionRecord {
         id: Uuid::new_v4(),
         sensation_id: frame.sensation.id,
         occurred_at: frame.sensation.occurred_at,
@@ -431,9 +432,9 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, description: Visio
         source: frame.sensation.source.clone(),
         sequence: frame.sensation.sequence,
         text: description.text,
-        kind: "vision.field".to_string(),
-        faculty: "Field Vision Faculty".to_string(),
-        confidence: FIELD_VISION_BASE_CONFIDENCE,
+        kind: "vision".to_string(),
+        faculty: "Vision Faculty".to_string(),
+        confidence: VISION_BASE_CONFIDENCE,
         payload: description.payload,
     };
 
@@ -441,15 +442,15 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, description: Visio
         sensation_id = %impression.sensation_id,
         impression_id = %impression.id,
         sequence = impression.sequence,
-        impression = %compact_log_text(&impression.text, MAX_FIELD_VISION_LOG_CHARS),
-        "field vision faculty produced impression"
+        impression = %compact_log_text(&impression.text, MAX_VISION_LOG_CHARS),
+        "vision faculty produced impression"
     );
 
     let mut impressions = state
-        .vision_field_impressions
+        .vision_impressions
         .write()
-        .expect("field vision impression log lock");
-    if impressions.len() == crate::app::MAX_RECORDED_VISION_FIELD_IMPRESSIONS {
+        .expect("vision impression log lock");
+    if impressions.len() == crate::app::MAX_RECORDED_VISION_IMPRESSIONS {
         impressions.pop_front();
     }
     impressions.push_back(impression);
@@ -490,19 +491,19 @@ mod tests {
     }
 
     #[test]
-    fn field_vision_prompt_names_live_field_of_vision() {
-        let prompt = build_field_vision_prompt();
-        let system = field_vision_system_prompt();
+    fn vision_prompt_names_live_vision() {
+        let prompt = build_vision_prompt();
+        let system = vision_system_prompt();
 
-        assert!(system.contains("my live field of vision"));
+        assert!(system.contains("my vision"));
         assert!(system.contains("not a detached image"));
         assert!(system.contains("Infer only from the attached visual input"));
         assert!(system.contains("Prefer direct perception phrasing"));
-        assert!(system.contains("Do not write \"My field of vision shows"));
-        assert!(system.contains("unless the field of vision is clearly a mirror or reflection"));
+        assert!(system.contains("Do not write \"My vision shows"));
+        assert!(system.contains("unless the vision is clearly a mirror or reflection"));
         assert!(prompt.contains("concrete scene details"));
         assert!(prompt.contains("what I am seeing now"));
-        assert!(!prompt.contains("My current field of vision"));
+        assert!(!prompt.contains("My current vision"));
         assert!(!prompt.contains("facts="));
         assert!(!prompt.contains("source="));
         assert!(!prompt.contains("mime="));
@@ -521,9 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn oversized_field_impression_does_not_embed_payload() {
-        let frame = raw_frame(&"x".repeat(MAX_FIELD_VISION_DATA_CHARS + 1));
-        let impression = oversized_field_impression(&frame);
+    fn oversized_vision_impression_does_not_embed_payload() {
+        let frame = raw_frame(&"x".repeat(MAX_VISION_DATA_CHARS + 1));
+        let impression = oversized_vision_impression(&frame);
 
         assert!(impression.contains("too large to inspect directly"));
         assert!(!impression.contains(&"x".repeat(128)));

@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +20,8 @@ pub(crate) struct LlmScheduler {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LlmJobKind {
-    FieldVision,
+    Vision,
+    ContextFrame,
     RealtimeExperience,
     Voice,
 }
@@ -29,9 +29,19 @@ pub(crate) enum LlmJobKind {
 impl LlmJobKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::FieldVision => "vision",
+            Self::Vision => "vision",
+            Self::ContextFrame => "context_frame",
             Self::RealtimeExperience => "realtime_experience",
             Self::Voice => "voice",
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            Self::Voice => 0,
+            Self::ContextFrame => 1,
+            Self::RealtimeExperience => 1,
+            Self::Vision => 2,
         }
     }
 }
@@ -41,20 +51,14 @@ const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LlmStreamControl {
-    cancel: Arc<AtomicBool>,
     appends: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl LlmStreamControl {
     pub(crate) fn new() -> Self {
         Self {
-            cancel: Arc::new(AtomicBool::new(false)),
             appends: Arc::new(Mutex::new(VecDeque::new())),
         }
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release);
     }
 
     pub(crate) fn append_prompt(&self, text: impl Into<String>) {
@@ -81,18 +85,44 @@ enum SchedulerCommand {
     },
 }
 
+impl SchedulerCommand {
+    fn kind(&self) -> LlmJobKind {
+        match self {
+            Self::Generate { kind, .. } => *kind,
+        }
+    }
+}
+
 impl LlmScheduler {
     pub(crate) fn start(
         model_path: PathBuf,
         projector_path: Option<PathBuf>,
         events: broadcast::Sender<RealTimeExperienceEvent>,
     ) -> Result<Self> {
+        Self::start_named("face-llm-scheduler", model_path, projector_path, events)
+    }
+
+    pub(crate) fn start_named(
+        thread_name: impl Into<String>,
+        model_path: PathBuf,
+        projector_path: Option<PathBuf>,
+        events: broadcast::Sender<RealTimeExperienceEvent>,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::channel();
         let scheduler_events = events.clone();
+        let thread_name = thread_name.into();
 
         thread::Builder::new()
-            .name("face-llm-scheduler".to_string())
-            .spawn(move || run_scheduler(model_path, projector_path, receiver, scheduler_events))
+            .name(thread_name.clone())
+            .spawn(move || {
+                run_scheduler(
+                    thread_name,
+                    model_path,
+                    projector_path,
+                    receiver,
+                    scheduler_events,
+                )
+            })
             .context("failed to spawn LLM scheduler thread")?;
 
         Ok(Self { sender, events })
@@ -144,6 +174,7 @@ impl LlmScheduler {
         let queued_at = Instant::now();
         let (response, result) = oneshot::channel();
         let prompt_chars = request_prompt_chars(&request);
+        let prompt_preview = request_prompt_preview(&request, 720);
         info!(
             job_id = %id,
             job_kind = kind.as_str(),
@@ -156,8 +187,13 @@ impl LlmScheduler {
             job_id: id,
             job_kind: kind.as_str().to_string(),
             observed_at: chrono::Utc::now(),
+            priority: kind.priority(),
+            message_count: request.messages.len(),
+            image_count: request.images.len(),
             prompt_chars,
             max_tokens: request.max_tokens,
+            stop_count: request.stop.len(),
+            prompt_preview,
         });
 
         self.sender
@@ -188,16 +224,40 @@ fn request_prompt_chars(request: &GenerationRequest) -> usize {
         .sum()
 }
 
+fn request_prompt_preview(request: &GenerationRequest, max_chars: usize) -> String {
+    let source = if request.messages.is_empty() {
+        request.prompt.clone()
+    } else {
+        request
+            .messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+
+    let mut preview = source.chars().take(max_chars).collect::<String>();
+    if source.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    preview
+}
+
 fn run_scheduler(
+    worker_name: String,
     model_path: PathBuf,
     projector_path: Option<PathBuf>,
     receiver: mpsc::Receiver<SchedulerCommand>,
     events: broadcast::Sender<RealTimeExperienceEvent>,
 ) {
     if let Some(projector_path) = &projector_path {
-        info!(projector = %projector_path.display(), "LLM scheduler loading multimodal projector");
+        info!(
+            worker = %worker_name,
+            projector = %projector_path.display(),
+            "LLM scheduler loading multimodal projector"
+        );
     }
-    info!(model = %model_path.display(), "LLM scheduler loading model");
+    info!(worker = %worker_name, model = %model_path.display(), "LLM scheduler loading model");
     let mut engine = match LlamaCppEngine::new(LlamaCppConfig {
         model_path,
         mmproj_path: projector_path,
@@ -211,14 +271,27 @@ fn run_scheduler(
         Ok(engine) => engine,
         Err(err) => {
             let message = err.to_string();
-            error!(error = %message, "LLM scheduler failed to load model");
+            error!(worker = %worker_name, error = %message, "LLM scheduler failed to load model");
             return;
         }
     };
 
-    info!("LLM scheduler ready");
+    info!(worker = %worker_name, "LLM scheduler ready");
 
-    while let Ok(command) = receiver.recv() {
+    let mut pending = VecDeque::new();
+    loop {
+        if pending.is_empty() {
+            match receiver.recv() {
+                Ok(command) => pending.push_back(command),
+                Err(_) => break,
+            }
+        }
+        drain_ready_commands(&receiver, &mut pending);
+
+        let Some(command) = pop_next_command(&mut pending) else {
+            continue;
+        };
+
         match command {
             SchedulerCommand::Generate {
                 id,
@@ -253,7 +326,25 @@ fn run_scheduler(
         }
     }
 
-    info!("LLM scheduler stopped");
+    info!(worker = %worker_name, "LLM scheduler stopped");
+}
+
+fn drain_ready_commands(
+    receiver: &mpsc::Receiver<SchedulerCommand>,
+    pending: &mut VecDeque<SchedulerCommand>,
+) {
+    while let Ok(command) = receiver.try_recv() {
+        pending.push_back(command);
+    }
+}
+
+fn pop_next_command(pending: &mut VecDeque<SchedulerCommand>) -> Option<SchedulerCommand> {
+    let index = pending
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, command)| command.kind().priority())
+        .map(|(index, _)| index)?;
+    pending.remove(index)
 }
 
 fn llm_context_size() -> u32 {
@@ -305,9 +396,6 @@ fn run_generation(
 
     loop {
         if let Some(control) = &control {
-            if control.cancel.load(Ordering::Acquire) {
-                let _ = engine.cancel(generation);
-            }
             let appends = {
                 let mut queued = control
                     .appends
@@ -372,6 +460,7 @@ fn run_generation(
                         job_kind: kind.as_str().to_string(),
                         observed_at: chrono::Utc::now(),
                         response_chars: generated.chars().count(),
+                        response: generated.clone(),
                         token_events,
                         elapsed_ms: duration_millis(started_at.elapsed()),
                     });

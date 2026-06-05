@@ -7,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::app::MAX_RECORDED_SENSATIONS;
+use crate::app::{MAX_RECORDED_SENSATIONS, VISION_CHANNEL};
 use crate::messages::{
     FrameMessage, MediaRecord, RawVisionFrame, SensationRecord, SensationSource,
 };
@@ -52,7 +52,7 @@ pub(crate) fn accept_frame(
     };
 
     record_sensation(sensations, record.clone());
-    if socket_faculty == "vision-frame" {
+    if socket_faculty == VISION_CHANNEL {
         record_raw_vision_frame(
             raw_vision_frames,
             RawVisionFrame {
@@ -155,25 +155,25 @@ mod tests {
 
     #[test]
     fn accepts_valid_data_url_frame() {
-        let frame = valid_frame("face");
-        assert!(validate_frame("face", &frame).is_ok());
+        let frame = valid_frame(VISION_CHANNEL);
+        assert!(validate_frame(VISION_CHANNEL, &frame).is_ok());
     }
 
     #[test]
     fn rejects_faculty_socket_mismatch() {
-        let frame = valid_frame("face");
+        let frame = valid_frame(VISION_CHANNEL);
         assert_eq!(
             validate_frame("motion", &frame).unwrap_err(),
-            "faculty 'face' does not match socket 'motion'"
+            "faculty 'vision' does not match socket 'motion'"
         );
     }
 
     #[test]
     fn rejects_raw_base64_for_now() {
-        let mut frame = valid_frame("scene");
+        let mut frame = valid_frame(VISION_CHANNEL);
         frame.data = "abc123".to_string();
         assert_eq!(
-            validate_frame("scene", &frame).unwrap_err(),
+            validate_frame(VISION_CHANNEL, &frame).unwrap_err(),
             "data must be a data URL"
         );
     }

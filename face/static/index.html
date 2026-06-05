@@ -32,10 +32,10 @@
           <div class="thinking-face" aria-live="polite">
             <div class="thought-bubble">
               <div class="voice-stream-header">
-                <span>Silent voice</span>
+                <span>Inner monologue</span>
                 <span class="status" x-bind:data-status="voiceStatus" x-text="voiceStatus"></span>
               </div>
-              <pre class="voice-stream" x-text="voiceResponse || 'Waiting for voice tokens…'"></pre>
+              <pre class="voice-stream" x-text="voiceResponse || 'Waiting for inner monologue…'"></pre>
               <details>
                 <summary>What's happening here?</summary>
                 <pre x-text="experiencePrompt || 'Waiting for the first real-time Experience prompt…'"></pre>
@@ -47,31 +47,6 @@
         </div>
 
         <aside class="panel">
-          <div class="control-row">
-            <label>
-              Format
-              <select x-model="mime">
-                <option value="image/jpeg">JPEG</option>
-                <option value="image/webp">WebP</option>
-              </select>
-            </label>
-            <label>
-              FPS
-              <input type="number" min="1" max="12" x-model.number="fps" />
-            </label>
-          </div>
-
-          <div class="control-row">
-            <label>
-              Width
-              <input type="number" min="160" max="1280" step="80" x-model.number="targetWidth" />
-            </label>
-            <label>
-              Quality
-              <input type="range" min="0.35" max="0.95" step="0.05" x-model.number="quality" />
-            </label>
-          </div>
-
           <section class="llm-monitor" aria-live="polite">
             <header>
               <div>
@@ -80,38 +55,81 @@
               </div>
               <span class="status" x-bind:data-status="llmActivityStatus()" x-text="llmActivityStatus()"></span>
             </header>
-            <div class="llm-job-list">
-              <template x-for="job in visibleLlmJobs()" x-bind:key="job.id">
-                <article class="llm-job" x-bind:data-phase="job.phase">
+            <div class="llm-board">
+              <div class="llm-job-list">
+                <template x-for="job in visibleLlmJobs()" x-bind:key="job.id">
+                  <article
+                    class="llm-job"
+                    role="button"
+                    tabindex="0"
+                    x-bind:data-phase="job.phase"
+                    x-bind:class="{ selected: selectedLlmJobId === job.id }"
+                    x-on:click="selectLlmJob(job.id)"
+                    x-on:keydown.enter.prevent="selectLlmJob(job.id)"
+                    x-on:keydown.space.prevent="selectLlmJob(job.id)"
+                  >
+                    <div>
+                      <strong x-text="formatJobKind(job.kind)"></strong>
+                      <span x-text="job.phase"></span>
+                    </div>
+                    <p x-text="formatJobMetric(job)"></p>
+                  </article>
+                </template>
+                <p class="empty" x-show="llmJobs.length === 0">No jobs yet</p>
+              </div>
+
+              <article class="llm-job-detail" x-show="selectedLlmJob()">
+                <header>
                   <div>
-                    <strong x-text="formatJobKind(job.kind)"></strong>
-                    <span x-text="job.phase"></span>
+                    <p>Selected job</p>
+                    <strong x-text="formatJobKind(selectedLlmJob()?.kind || '')"></strong>
                   </div>
-                  <p x-text="formatJobMetric(job)"></p>
-                </article>
-              </template>
-              <p class="empty" x-show="llmJobs.length === 0">No jobs yet</p>
+                  <span class="status" x-bind:data-status="selectedLlmJob()?.phase" x-text="selectedLlmJob()?.phase"></span>
+                </header>
+                <dl class="job-facts">
+                  <div><dt>priority</dt><dd x-text="selectedLlmJob()?.priority ?? '-'"></dd></div>
+                  <div><dt>queued</dt><dd x-text="formatTimestamp(selectedLlmJob()?.queuedAt)"></dd></div>
+                  <div><dt>updated</dt><dd x-text="formatTimestamp(selectedLlmJob()?.observedAt)"></dd></div>
+                  <div><dt>prompt</dt><dd x-text="formatCount(selectedLlmJob()?.promptChars, 'chars')"></dd></div>
+                  <div><dt>messages</dt><dd x-text="selectedLlmJob()?.messageCount ?? 0"></dd></div>
+                  <div><dt>images</dt><dd x-text="selectedLlmJob()?.imageCount ?? 0"></dd></div>
+                  <div><dt>max tokens</dt><dd x-text="selectedLlmJob()?.maxTokens ?? 'uncapped'"></dd></div>
+                  <div><dt>stop rules</dt><dd x-text="selectedLlmJob()?.stopCount ?? 0"></dd></div>
+                  <div><dt>queue wait</dt><dd x-text="formatDuration(selectedLlmJob()?.queueWaitMs || 0)"></dd></div>
+                  <div><dt>elapsed</dt><dd x-text="formatDuration(selectedLlmJob()?.elapsedMs || 0)"></dd></div>
+                  <div><dt>tokens</dt><dd x-text="selectedLlmJob()?.tokenEvents ?? 0"></dd></div>
+                  <div><dt>response</dt><dd x-text="formatCount(selectedLlmJob()?.responseChars, 'chars')"></dd></div>
+                </dl>
+                <div class="detail-block" x-show="selectedLlmJob()?.error">
+                  <span>Error</span>
+                  <pre x-text="selectedLlmJob()?.error"></pre>
+                </div>
+                <div class="detail-block">
+                  <span>Prompt preview</span>
+                  <pre x-text="selectedLlmJob()?.promptPreview || 'No prompt preview'"></pre>
+                </div>
+                <div class="detail-block">
+                  <span>Response</span>
+                  <pre x-text="selectedLlmJob()?.response || 'No response yet'"></pre>
+                </div>
+                <p class="job-id" x-text="selectedLlmJob()?.id"></p>
+              </article>
             </div>
           </section>
 
           <div class="faculty-list">
-            <template x-for="faculty in faculties" x-bind:key="faculty.name">
-              <article class="faculty">
-                <header>
-                  <label class="toggle">
-                    <input type="checkbox" x-model="faculty.enabled" x-on:change="syncFaculty(faculty)" />
-                    <span x-text="faculty.name"></span>
-                  </label>
-                  <span class="status" x-bind:data-status="faculty.status" x-text="faculty.status"></span>
-                </header>
-                <dl>
-                  <div><dt>sent</dt><dd x-text="faculty.sent"></dd></div>
-                  <div><dt>acked</dt><dd x-text="faculty.acked"></dd></div>
-                  <div><dt>dropped</dt><dd x-text="faculty.dropped"></dd></div>
-                </dl>
-                <p class="error" x-text="faculty.lastError || 'ready'"></p>
-              </article>
-            </template>
+            <article class="faculty">
+              <header>
+                <strong>Vision channel</strong>
+                <span class="status" x-bind:data-status="vision.status" x-text="vision.status"></span>
+              </header>
+              <dl>
+                <div><dt>sent</dt><dd x-text="vision.sent"></dd></div>
+                <div><dt>acked</dt><dd x-text="vision.acked"></dd></div>
+                <div><dt>dropped</dt><dd x-text="vision.dropped"></dd></div>
+              </dl>
+              <p class="error" x-text="vision.lastError || 'ready'"></p>
+            </article>
           </div>
         </aside>
       </section>

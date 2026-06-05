@@ -53,17 +53,17 @@ button:disabled {
 }
 
 .shell {
-  width: min(1180px, calc(100vw - 32px));
-  margin: 0 auto;
-  padding: 28px 0;
+  width: 100%;
+  min-height: 100vh;
+  padding: 16px;
 }
 
 .topbar {
   display: flex;
-  align-items: end;
+  align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .eyebrow {
@@ -77,8 +77,8 @@ button:disabled {
 
 h1 {
   margin: 0;
-  font-size: clamp(2rem, 7vw, 4.8rem);
-  line-height: 0.95;
+  font-size: clamp(1.7rem, 3vw, 2.8rem);
+  line-height: 1;
   letter-spacing: 0;
 }
 
@@ -89,24 +89,36 @@ h1 {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1.4fr) minmax(520px, 0.85fr);
   gap: 18px;
   align-items: start;
 }
 
 .stage {
-  display: grid;
-  gap: 18px;
-}
-
-.preview {
   position: relative;
-  min-height: 420px;
-  aspect-ratio: 16 / 10;
+  display: grid;
+  align-items: stretch;
+  min-height: calc(100vh - 112px);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #080908;
+}
+
+.preview {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0.5;
+  filter: brightness(0.6) saturate(0.8);
+  pointer-events: none;
+}
+
+.preview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 9, 8, 0.34);
 }
 
 video {
@@ -119,21 +131,25 @@ video {
 .preview-status {
   position: absolute;
   inset: auto 16px 16px 16px;
+  z-index: 1;
   color: var(--muted);
   font-weight: 700;
 }
 
 .thinking-face {
   position: relative;
+  z-index: 2;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(112px, 18vw, 180px);
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 18px;
-  align-items: end;
-  min-height: 260px;
+  align-items: stretch;
+  min-height: 0;
+  padding: 18px;
 }
 
 .thought-bubble {
   position: relative;
+  min-height: 0;
   border: 1px solid rgba(110, 208, 166, 0.45);
   border-radius: 8px;
   padding: 14px;
@@ -145,11 +161,11 @@ video {
 .thought-bubble::after {
   content: "";
   position: absolute;
-  right: -15px;
-  bottom: 42px;
+  right: 46px;
+  bottom: -15px;
   width: 28px;
   height: 28px;
-  border-top: 1px solid rgba(110, 208, 166, 0.45);
+  border-bottom: 1px solid rgba(110, 208, 166, 0.45);
   border-right: 1px solid rgba(110, 208, 166, 0.45);
   background: #f5fff9;
   transform: rotate(45deg);
@@ -193,7 +209,8 @@ pre {
 }
 
 .voice-stream {
-  min-height: 112px;
+  min-height: 180px;
+  max-height: 32vh;
   color: #0b1912;
   font: 1rem/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -206,22 +223,18 @@ pre {
 .emoji-face {
   display: grid;
   place-items: center;
-  width: 100%;
+  width: min(170px, 52%);
   aspect-ratio: 1;
+  justify-self: end;
   line-height: 1;
-  font-size: clamp(5.6rem, 14vw, 10rem);
+  font-size: clamp(5.2rem, 8vw, 9rem);
   filter: drop-shadow(0 12px 22px rgba(0, 0, 0, 0.38));
 }
 
 .panel {
   display: grid;
   gap: 14px;
-}
-
-.control-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  align-content: start;
 }
 
 label {
@@ -262,6 +275,13 @@ input[type="range"] {
 .llm-monitor {
   display: grid;
   gap: 12px;
+}
+
+.llm-board {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.72fr) minmax(280px, 1fr);
+  gap: 12px;
+  min-height: 420px;
 }
 
 .faculty header {
@@ -347,7 +367,11 @@ input[type="range"] {
 
 .llm-job-list {
   display: grid;
+  align-content: start;
   gap: 8px;
+  max-height: min(58vh, 680px);
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .llm-job {
@@ -355,6 +379,19 @@ input[type="range"] {
   border-radius: 6px;
   padding: 9px 10px;
   background: var(--panel-strong);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.llm-job:hover,
+.llm-job:focus-visible {
+  background: #2a332f;
+}
+
+.llm-job.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(110, 208, 166, 0.28);
 }
 
 .llm-job[data-phase="queued"] {
@@ -394,6 +431,54 @@ input[type="range"] {
   overflow-wrap: anywhere;
 }
 
+.llm-job-detail {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #171c1a;
+}
+
+.llm-job-detail header {
+  margin-bottom: 12px;
+}
+
+.job-facts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.job-facts dd {
+  font-size: 0.92rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.detail-block {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.detail-block span,
+.job-id {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.detail-block pre {
+  max-height: 220px;
+  margin: 0;
+  border-color: rgba(238, 243, 238, 0.1);
+  background: #101412;
+  color: var(--text);
+}
+
+.job-id {
+  margin: 12px 0 0;
+}
+
 dl {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -427,9 +512,39 @@ dd {
   overflow-wrap: anywhere;
 }
 
+@media (max-width: 1440px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(500px, 0.9fr);
+  }
+
+  .stage {
+    min-height: min(58vh, 620px);
+  }
+
+  .voice-stream {
+    min-height: 132px;
+    max-height: 24vh;
+  }
+}
+
+@media (max-width: 1080px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .stage {
+    min-height: min(60vh, 620px);
+  }
+
+  .llm-job-list {
+    max-height: 420px;
+  }
+}
+
 @media (max-width: 860px) {
   .topbar,
-  .workspace {
+  .workspace,
+  .llm-board {
     grid-template-columns: 1fr;
   }
 
@@ -445,12 +560,16 @@ dd {
     flex: 1;
   }
 
-  .preview {
-    min-height: 280px;
+  .stage {
+    min-height: 360px;
   }
 
-  .thinking-face {
-    grid-template-columns: 1fr;
+  .shell {
+    padding: 12px;
+  }
+
+  .job-facts {
+    grid-template-columns: 1fr 1fr;
   }
 
   .thought-bubble::after {
