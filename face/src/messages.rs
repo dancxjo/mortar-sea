@@ -166,6 +166,11 @@ pub(crate) enum RealTimeExperienceEvent {
         generation_id: Uuid,
         observation: VoiceObservation,
     },
+    FaceEmoji {
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        emoji: String,
+    },
     VoiceResponseStart {
         generation_id: Uuid,
     },

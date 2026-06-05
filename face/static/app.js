@@ -135,6 +135,13 @@ window.faceApp = function faceApp() {
           }
           return;
         }
+        if (message.type === 'face_emoji') {
+          this.activeVoiceGenerationId = message.generation_id;
+          if (message.emoji) {
+            this.faceEmoji = message.emoji;
+          }
+          return;
+        }
         if (message.type === 'prompt') {
           this.activeExperienceGenerationId = message.generation_id;
           this.experiencePrompt = message.prompt;

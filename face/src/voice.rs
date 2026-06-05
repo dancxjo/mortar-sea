@@ -263,7 +263,9 @@ fn start_voice_generation(
 
 fn voice_system_prompt() -> &'static str {
     "You are the silent Voice of Mortar-Sea: an internal first-person observer. \
-     You do not speak aloud, address the human, use tools, or write JSON. \
+     You do not speak aloud, address the human, use tools, execute functions, or write JSON. \
+     You have no ability to execute functions or take actions, so do not pretend that you can. \
+     Only make observations about known experience, inner feeling, uncertainty, and passing thoughts. \
      Write from the embodied system's own perspective using I, me, and my. \
      Move at about human spoken pace, or only slightly faster, with short plain sentences. \
      You may end any sentence with one emoji; when you emit an emoji, it becomes your face in the real world. \
@@ -484,6 +486,13 @@ fn emit_voice_sentence(
     record_voice_sensation_and_impression(state, generation_id, &observation);
     if let Some(emoji) = observation.emoji.as_deref() {
         record_face_emoji_sensation_and_impression(state, generation_id, &observation, emoji);
+        let _ = state
+            .realtime_experience_events
+            .send(RealTimeExperienceEvent::FaceEmoji {
+                generation_id,
+                observed_at: observation.observed_at,
+                emoji: emoji.to_string(),
+            });
     }
     let _ = state
         .realtime_experience_events
@@ -763,6 +772,34 @@ fn is_emoji_modifier(ch: char) -> bool {
     )
 }
 
+fn split_leading_emoji(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    let mut emoji_end = None;
+    let mut saw_emoji_base = false;
+
+    for (index, ch) in text.char_indices() {
+        if is_emoji_base(ch) {
+            emoji_end = Some(index + ch.len_utf8());
+            saw_emoji_base = true;
+            continue;
+        }
+
+        if saw_emoji_base && is_emoji_modifier(ch) {
+            emoji_end = Some(index + ch.len_utf8());
+            continue;
+        }
+
+        break;
+    }
+
+    let end = emoji_end?;
+    if !saw_emoji_base {
+        return None;
+    }
+
+    Some((text[..end].to_string(), &text[end..]))
+}
+
 fn first_sentence(text: &str) -> Option<String> {
     find_sentence_end(text).map(|end| text[..end].trim().to_string())
 }
@@ -816,7 +853,12 @@ impl VoiceSentenceSegmenter {
     }
 
     fn push_str(&mut self, chunk: &str) -> Vec<String> {
+        let mut out = Vec::new();
         self.buffer.push_str(chunk);
+        if let Some(sentence) = self.attach_leading_emoji_to_pending_sentence() {
+            out.push(sentence);
+        }
+
         while let Some(end) = find_sentence_end(&self.buffer) {
             let sentence = self.buffer[..end].trim().to_string();
             if !sentence.is_empty() {
@@ -825,13 +867,26 @@ impl VoiceSentenceSegmenter {
             self.buffer = self.buffer[end..].trim_start().to_string();
         }
 
-        let mut out = Vec::new();
         while self.pending.len() > 1 {
             if let Some(sentence) = self.pending.pop_front() {
                 out.push(sentence);
             }
         }
         out
+    }
+
+    fn attach_leading_emoji_to_pending_sentence(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        let (emoji, rest) = split_leading_emoji(&self.buffer)?;
+        if let Some(sentence) = self.pending.back_mut() {
+            sentence.push(' ');
+            sentence.push_str(&emoji);
+        }
+        self.buffer = rest.trim_start().to_string();
+        self.pending.pop_back()
     }
 
     fn finish(mut self) -> Vec<String> {
@@ -970,6 +1025,15 @@ mod tests {
     }
 
     #[test]
+    fn voice_prompt_says_voice_cannot_execute_functions() {
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+
+        assert!(prompt.contains("execute functions"));
+        assert!(prompt.contains("do not pretend that you can"));
+        assert!(prompt.contains("Only make observations"));
+    }
+
+    #[test]
     fn voice_prompt_reinforces_reality_boundaries() {
         let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
 
@@ -1076,10 +1140,21 @@ mod tests {
     fn sentence_segmenter_keeps_final_emoji_with_last_sentence() {
         let mut segmenter = VoiceSentenceSegmenter::new();
         assert!(segmenter.push_str("I am watching the room. ").is_empty());
-        assert!(segmenter.push_str("🤔").is_empty());
         assert_eq!(
-            segmenter.finish(),
+            segmenter.push_str("🤔"),
             vec!["I am watching the room. 🤔".to_string()]
         );
+        assert!(segmenter.finish().is_empty());
+    }
+
+    #[test]
+    fn sentence_segmenter_attaches_split_emoji_before_next_sentence() {
+        let mut segmenter = VoiceSentenceSegmenter::new();
+        assert!(segmenter.push_str("I am watching the room. ").is_empty());
+        assert_eq!(
+            segmenter.push_str("🤔 I feel awake. "),
+            vec!["I am watching the room. 🤔".to_string()]
+        );
+        assert_eq!(segmenter.finish(), vec!["I feel awake.".to_string()]);
     }
 }

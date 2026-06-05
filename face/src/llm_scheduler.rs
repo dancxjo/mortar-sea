@@ -312,9 +312,14 @@ fn line_bounded_prompt_preview(source: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use psyche::GenerationRequest;
+    use std::collections::VecDeque;
+    use std::time::Instant;
 
-    use super::request_prompt_preview;
+    use anyhow::bail;
+    use psyche::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
+    use uuid::Uuid;
+
+    use super::{LlmJobKind, LlmStreamControl, request_prompt_preview, run_generation};
 
     #[test]
     fn prompt_preview_does_not_abbreviate_timeline_entries_with_ellipses() {
@@ -341,6 +346,122 @@ mod tests {
         let preview = request_prompt_preview(&request, 12);
 
         assert_eq!(preview, "plain prompt...");
+    }
+
+    #[test]
+    fn max_tokens_with_partial_text_returns_generated_response() {
+        let id = Uuid::new_v4();
+        let mut engine = ScriptedEngine::new(
+            id,
+            [
+                vec![LlmEvent::Token {
+                    text: "partial response".to_owned(),
+                }],
+                vec![LlmEvent::MaxTokens {
+                    generated_tokens: 1024,
+                }],
+            ],
+        );
+        let (events, mut receiver) = tokio::sync::broadcast::channel(8);
+
+        let generated = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::RealtimeExperience,
+            Instant::now(),
+            GenerationRequest::default(),
+            None,
+            None,
+            &events,
+        )
+        .expect("partial max-token generation should complete");
+
+        assert_eq!(generated, "partial response");
+        assert!(
+            std::iter::from_fn(|| receiver.try_recv().ok()).any(|event| {
+                matches!(
+                    event,
+                    crate::messages::RealTimeExperienceEvent::LlmJobCompleted { .. }
+                )
+            })
+        );
+    }
+
+    #[test]
+    fn append_failure_can_recover_completed_generation() {
+        let id = Uuid::new_v4();
+        let mut engine = ScriptedEngine::new(
+            id,
+            [
+                Vec::new(),
+                vec![
+                    LlmEvent::Token {
+                        text: "done".to_owned(),
+                    },
+                    LlmEvent::Completed,
+                ],
+            ],
+        );
+        engine.fail_next_append = true;
+        let control = LlmStreamControl::new();
+        control.append_prompt("late input");
+        let (events, _receiver) = tokio::sync::broadcast::channel(8);
+
+        let generated = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::Voice,
+            Instant::now(),
+            GenerationRequest::default(),
+            Some(control),
+            None,
+            &events,
+        )
+        .expect("completed generation should win append race");
+
+        assert_eq!(generated, "done");
+        assert_eq!(engine.append_attempts, 1);
+    }
+
+    struct ScriptedEngine {
+        id: GenerationId,
+        polls: VecDeque<Vec<LlmEvent>>,
+        fail_next_append: bool,
+        append_attempts: usize,
+    }
+
+    impl ScriptedEngine {
+        fn new<const N: usize>(id: Uuid, polls: [Vec<LlmEvent>; N]) -> Self {
+            Self {
+                id: GenerationId(id),
+                polls: VecDeque::from(polls),
+                fail_next_append: false,
+                append_attempts: 0,
+            }
+        }
+    }
+
+    impl LlmEngine for ScriptedEngine {
+        fn start(&mut self, _request: GenerationRequest) -> anyhow::Result<GenerationId> {
+            Ok(self.id)
+        }
+
+        fn poll(&mut self, _id: GenerationId) -> anyhow::Result<Vec<LlmEvent>> {
+            Ok(self.polls.pop_front().unwrap_or_default())
+        }
+
+        fn cancel(&mut self, _id: GenerationId) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn append_prompt(&mut self, _id: GenerationId, _text: String) -> anyhow::Result<()> {
+            self.append_attempts += 1;
+            if self.fail_next_append {
+                self.fail_next_append = false;
+                bail!("generation is no longer accepting prompt appends");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -491,7 +612,7 @@ fn voice_llm_cpu_only() -> bool {
 }
 
 fn run_generation(
-    engine: &mut LlamaCppEngine,
+    engine: &mut impl LlmEngine,
     id: Uuid,
     kind: LlmJobKind,
     queued_at: Instant,
@@ -530,28 +651,7 @@ fn run_generation(
     let mut token_events = 0usize;
 
     loop {
-        if let Some(control) = &control {
-            let appends = {
-                let mut queued = control
-                    .appends
-                    .lock()
-                    .expect("LLM stream append queue lock");
-                queued.drain(..).collect::<Vec<_>>()
-            };
-            for append in appends {
-                if let Err(err) = engine.append_prompt(generation, append) {
-                    warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
-                    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
-                        job_id: id,
-                        job_kind: kind.as_str().to_string(),
-                        observed_at: chrono::Utc::now(),
-                        error: err.to_string(),
-                    });
-                    return Err(err).context("failed to append live prompt input");
-                }
-            }
-        }
-
+        let mut made_progress = false;
         let llm_events = match engine.poll(generation) {
             Ok(events) => events,
             Err(err) => {
@@ -564,63 +664,135 @@ fn run_generation(
                 return Err(err);
             }
         };
-        if llm_events.is_empty() {
-            thread::sleep(Duration::from_millis(10));
-            continue;
-        }
-
-        for event in llm_events {
-            match event {
-                LlmEvent::Token { text } => {
-                    token_events += 1;
-                    generated.push_str(&text);
-                    if let Some(token_sink) = token_sink.as_mut() {
-                        token_sink(text.clone());
+        if !llm_events.is_empty() {
+            made_progress = true;
+            if let Some(generated) = handle_llm_events(
+                id,
+                kind,
+                started_at,
+                &mut generated,
+                &mut token_events,
+                token_sink.as_mut(),
+                events,
+                llm_events,
+            )? {
+                return Ok(generated);
+            }
+        } else if let Some(control) = &control {
+            let appends = {
+                let mut queued = control
+                    .appends
+                    .lock()
+                    .expect("LLM stream append queue lock");
+                queued.drain(..).collect::<Vec<_>>()
+            };
+            made_progress = !appends.is_empty();
+            for append in appends {
+                if let Err(err) = engine.append_prompt(generation, append) {
+                    if let Some(generated) = complete_if_generation_finished(
+                        engine,
+                        generation,
+                        id,
+                        kind,
+                        started_at,
+                        &mut generated,
+                        &mut token_events,
+                        token_sink.as_mut(),
+                        events,
+                    )? {
+                        return Ok(generated);
                     }
-                    if matches!(kind, LlmJobKind::Voice) {
-                        thread::sleep(voice_token_delay(&text));
-                    }
-                }
-                LlmEvent::Completed => {
-                    if generated.trim().is_empty() {
-                        let error = "LLM generated an empty response".to_string();
-                        let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
-                            job_id: id,
-                            job_kind: kind.as_str().to_string(),
-                            observed_at: chrono::Utc::now(),
-                            error: error.clone(),
-                        });
-                        bail!(error);
-                    }
-                    info!(
-                        job_id = %id,
-                        job_kind = kind.as_str(),
-                        response_chars = generated.chars().count(),
-                        token_events,
-                        elapsed_ms = duration_millis(started_at.elapsed()),
-                        "LLM job completed"
-                    );
-                    let _ = events.send(RealTimeExperienceEvent::LlmJobCompleted {
-                        job_id: id,
-                        job_kind: kind.as_str().to_string(),
-                        observed_at: chrono::Utc::now(),
-                        response_chars: generated.chars().count(),
-                        response: generated.clone(),
-                        token_events,
-                        elapsed_ms: duration_millis(started_at.elapsed()),
-                    });
-                    return Ok(generated);
-                }
-                LlmEvent::Cancelled => {
+                    warn!(job_id = %id, job_kind = kind.as_str(), %err, "failed to append live prompt input");
                     let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
                         job_id: id,
                         job_kind: kind.as_str().to_string(),
                         observed_at: chrono::Utc::now(),
-                        error: "cancelled".to_string(),
+                        error: err.to_string(),
                     });
-                    bail!("LLM job {} was cancelled", kind.as_str());
+                    return Err(err).context("failed to append live prompt input");
                 }
-                LlmEvent::MaxTokens { generated_tokens } => {
+            }
+        }
+
+        if made_progress {
+            trace!(
+                job_id = %id,
+                job_kind = kind.as_str(),
+                response_chars = generated.chars().count(),
+                "LLM job made progress"
+            );
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_if_generation_finished(
+    engine: &mut impl LlmEngine,
+    generation: psyche::GenerationId,
+    id: Uuid,
+    kind: LlmJobKind,
+    started_at: Instant,
+    generated: &mut String,
+    token_events: &mut usize,
+    token_sink: Option<&mut TokenSink>,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+) -> Result<Option<String>> {
+    let llm_events = engine.poll(generation)?;
+    if llm_events.is_empty() {
+        return Ok(None);
+    }
+
+    handle_llm_events(
+        id,
+        kind,
+        started_at,
+        generated,
+        token_events,
+        token_sink,
+        events,
+        llm_events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_llm_events(
+    id: Uuid,
+    kind: LlmJobKind,
+    started_at: Instant,
+    generated: &mut String,
+    token_events: &mut usize,
+    mut token_sink: Option<&mut TokenSink>,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+    llm_events: Vec<LlmEvent>,
+) -> Result<Option<String>> {
+    for event in llm_events {
+        match event {
+            LlmEvent::Token { text } => {
+                *token_events += 1;
+                generated.push_str(&text);
+                if let Some(token_sink) = token_sink.as_mut() {
+                    token_sink(text.clone());
+                }
+                if matches!(kind, LlmJobKind::Voice) {
+                    thread::sleep(voice_token_delay(&text));
+                }
+            }
+            LlmEvent::Completed => {
+                return complete_generation(id, kind, started_at, generated, *token_events, events);
+            }
+            LlmEvent::Cancelled => {
+                let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                    job_id: id,
+                    job_kind: kind.as_str().to_string(),
+                    observed_at: chrono::Utc::now(),
+                    error: "cancelled".to_string(),
+                });
+                bail!("LLM job {} was cancelled", kind.as_str());
+            }
+            LlmEvent::MaxTokens { generated_tokens } => {
+                if generated.trim().is_empty() {
                     let error = format!(
                         "LLM job hit max token cap after {generated_tokens} tokens before completion"
                     );
@@ -632,25 +804,66 @@ fn run_generation(
                     });
                     bail!(error);
                 }
-                LlmEvent::Error { message } => {
-                    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
-                        job_id: id,
-                        job_kind: kind.as_str().to_string(),
-                        observed_at: chrono::Utc::now(),
-                        error: message.clone(),
-                    });
-                    bail!(message);
-                }
+                warn!(
+                    job_id = %id,
+                    job_kind = kind.as_str(),
+                    generated_tokens,
+                    response_chars = generated.chars().count(),
+                    "LLM job completed at max token cap"
+                );
+                return complete_generation(id, kind, started_at, generated, *token_events, events);
+            }
+            LlmEvent::Error { message } => {
+                let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                    job_id: id,
+                    job_kind: kind.as_str().to_string(),
+                    observed_at: chrono::Utc::now(),
+                    error: message.clone(),
+                });
+                bail!(message);
             }
         }
-
-        trace!(
-            job_id = %id,
-            job_kind = kind.as_str(),
-            response_chars = generated.chars().count(),
-            "LLM job made progress"
-        );
     }
+
+    Ok(None)
+}
+
+fn complete_generation(
+    id: Uuid,
+    kind: LlmJobKind,
+    started_at: Instant,
+    generated: &str,
+    token_events: usize,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+) -> Result<Option<String>> {
+    if generated.trim().is_empty() {
+        let error = "LLM generated an empty response".to_string();
+        let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+            job_id: id,
+            job_kind: kind.as_str().to_string(),
+            observed_at: chrono::Utc::now(),
+            error: error.clone(),
+        });
+        bail!(error);
+    }
+    info!(
+        job_id = %id,
+        job_kind = kind.as_str(),
+        response_chars = generated.chars().count(),
+        token_events,
+        elapsed_ms = duration_millis(started_at.elapsed()),
+        "LLM job completed"
+    );
+    let _ = events.send(RealTimeExperienceEvent::LlmJobCompleted {
+        job_id: id,
+        job_kind: kind.as_str().to_string(),
+        observed_at: chrono::Utc::now(),
+        response_chars: generated.chars().count(),
+        response: generated.to_owned(),
+        token_events,
+        elapsed_ms: duration_millis(started_at.elapsed()),
+    });
+    Ok(Some(generated.to_owned()))
 }
 
 fn voice_token_delay(text: &str) -> Duration {
