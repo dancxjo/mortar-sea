@@ -51,7 +51,6 @@ pub(crate) struct AppState {
     pub(crate) voice_observations: Arc<RwLock<VecDeque<VoiceObservation>>>,
     pub(crate) voice_impression_ids: Arc<RwLock<HashSet<Uuid>>>,
     pub(crate) llm_scheduler: LlmScheduler,
-    pub(crate) voice_llm_scheduler: LlmScheduler,
     pub(crate) face_detector: Arc<FaceDetector>,
     pub(crate) face_detection_active: Arc<AtomicBool>,
     pub(crate) face_detection_last_sampled: Arc<RwLock<Option<Uuid>>>,
@@ -82,12 +81,6 @@ pub async fn run() -> anyhow::Result<()> {
         models.llm_projector.clone(),
         realtime_experience_events.clone(),
     )?;
-    let voice_llm_scheduler = LlmScheduler::start_named(
-        "face-voice-llm-scheduler",
-        models.llm.clone(),
-        None,
-        realtime_experience_events.clone(),
-    )?;
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
@@ -113,7 +106,6 @@ pub async fn run() -> anyhow::Result<()> {
         voice_observations: Arc::new(RwLock::new(VecDeque::new())),
         voice_impression_ids: Arc::new(RwLock::new(HashSet::new())),
         llm_scheduler,
-        voice_llm_scheduler,
         face_detector,
         face_detection_active: Arc::new(AtomicBool::new(false)),
         face_detection_last_sampled: Arc::new(RwLock::new(None)),

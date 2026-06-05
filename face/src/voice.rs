@@ -198,7 +198,7 @@ fn start_voice_generation(
         stop: Vec::new(),
     };
 
-    let scheduler = state.voice_llm_scheduler.clone();
+    let scheduler = state.llm_scheduler.clone();
     let events = state.realtime_experience_events.clone();
     let control_for_task = control.clone();
     let tx = generation_tx.clone();
