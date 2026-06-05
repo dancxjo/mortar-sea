@@ -49,6 +49,8 @@ window.faceApp = function faceApp() {
     voiceResponse: '',
     voiceHasTokens: false,
     voiceStatus: 'waiting',
+    voiceLastError: '',
+    voicePlaybackDetail: '',
     voiceAudio: null,
     voiceAudioUrl: null,
     voiceCurrentDraft: null,
@@ -268,6 +270,8 @@ window.faceApp = function faceApp() {
       this.stopVoiceMouth('superseded by newer voice draft');
       this.voiceCurrentDraft = draft;
       this.voiceStatus = 'synthesizing';
+      this.voiceLastError = '';
+      this.voicePlaybackDetail = `Synthesizing "${draft.text || ''}"`;
       this.voiceMouthOpen = false;
 
       let response;
@@ -281,8 +285,10 @@ window.faceApp = function faceApp() {
           }),
         });
       } catch (error) {
+        this.voiceLastError = error.message || 'Piper ONNX voice request failed';
+        this.voicePlaybackDetail = this.voiceLastError;
         this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: error.message || 'Piper ONNX voice request failed',
+          reason: this.voiceLastError,
         });
         this.clearFinishedVoiceDraft(draft);
         return;
@@ -290,8 +296,10 @@ window.faceApp = function faceApp() {
 
       if (!response.ok) {
         const message = await response.text().catch(() => '');
+        this.voiceLastError = message || `Piper ONNX voice request returned ${response.status}`;
+        this.voicePlaybackDetail = this.voiceLastError;
         this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: message || `Piper ONNX voice request returned ${response.status}`,
+          reason: this.voiceLastError,
         });
         this.clearFinishedVoiceDraft(draft);
         return;
@@ -300,39 +308,105 @@ window.faceApp = function faceApp() {
       if (this.voiceCurrentDraft !== draft) return;
 
       const blob = await response.blob();
+      const durationMs = response.headers.get('x-duration-ms');
+      const samples = response.headers.get('x-samples');
+      this.voicePlaybackDetail = `WAV ready: ${durationMs || '?'} ms, ${samples || '?'} samples, ${blob.size} bytes`;
+      console.info('Mortar voice WAV ready', {
+        utterance_id: draft.utterance_id,
+        duration_ms: durationMs,
+        samples,
+        bytes: blob.size,
+      });
       const audioUrl = URL.createObjectURL(blob);
       const audio = new Audio(audioUrl);
+      audio.muted = false;
+      audio.volume = 1;
       this.voiceAudio = audio;
       this.voiceAudioUrl = audioUrl;
 
-      audio.onplay = () => {
+      let speechStarted = false;
+      let startWatchdog = null;
+      const markSpeechStarted = () => {
+        if (speechStarted || this.voiceCurrentDraft !== draft || audio.currentTime <= 0) return;
+        speechStarted = true;
+        if (startWatchdog) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
         this.voiceUtteranceStartedAt = performance.now();
         this.voiceMouthOpen = true;
         this.voiceStatus = 'speaking';
+        this.voicePlaybackDetail = `Playing at ${audio.currentTime.toFixed(2)}s`;
+        console.info('Mortar voice playback started', {
+          utterance_id: draft.utterance_id,
+          current_time: audio.currentTime,
+        });
         this.sendVoiceMouthEvent('voice_speech_started', draft);
       };
+      audio.onplaying = markSpeechStarted;
+      audio.ontimeupdate = markSpeechStarted;
       audio.onended = () => {
-        const durationMs = this.voiceUtteranceStartedAt
+        if (startWatchdog) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
+        if (!speechStarted) {
+          const reason = 'Playback ended before audio progress was observed';
+          this.voiceMouthOpen = false;
+          this.voiceLastError = reason;
+          this.voicePlaybackDetail = reason;
+          this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
+          this.clearFinishedVoiceDraft(draft);
+          return;
+        }
+        const playbackDurationMs = this.voiceUtteranceStartedAt
           ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
           : null;
         this.voiceMouthOpen = false;
-        this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: durationMs });
+        this.voicePlaybackDetail = `Playback finished after ${playbackDurationMs} ms`;
+        this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: playbackDurationMs });
         this.clearFinishedVoiceDraft(draft);
       };
       audio.onerror = () => {
+        if (startWatchdog) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
         this.voiceMouthOpen = false;
+        this.voiceLastError = 'Piper WAV playback failed';
+        this.voicePlaybackDetail = this.voiceLastError;
         this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: 'Piper WAV playback failed',
+          reason: this.voiceLastError,
         });
         this.clearFinishedVoiceDraft(draft);
       };
 
       try {
         await audio.play();
+        startWatchdog = window.setTimeout(() => {
+          if (speechStarted || this.voiceCurrentDraft !== draft) return;
+          const reason = `Piper WAV playback did not advance (readyState=${audio.readyState}, paused=${audio.paused}, currentTime=${audio.currentTime.toFixed(3)})`;
+          this.voiceLastError = reason;
+          this.voicePlaybackDetail = reason;
+          console.warn('Mortar voice playback stalled', {
+            utterance_id: draft.utterance_id,
+            ready_state: audio.readyState,
+            paused: audio.paused,
+            current_time: audio.currentTime,
+          });
+          this.sendVoiceMouthEvent('voice_speech_interrupted', draft, { reason });
+          this.clearFinishedVoiceDraft(draft);
+        }, 1500);
       } catch (error) {
+        if (startWatchdog) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
         this.voiceMouthOpen = false;
+        this.voiceLastError = error.message || 'Piper WAV playback was blocked';
+        this.voicePlaybackDetail = this.voiceLastError;
         this.sendVoiceMouthEvent('voice_speech_interrupted', draft, {
-          reason: error.message || 'Piper WAV playback was blocked',
+          reason: this.voiceLastError,
         });
         this.clearFinishedVoiceDraft(draft);
       }

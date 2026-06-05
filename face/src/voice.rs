@@ -1,7 +1,9 @@
 use std::collections::{HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
-use mortar_sea::voice_stream::{BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser};
+use mortar_sea::voice_stream::{
+    BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser, parse_voice_stream,
+};
 use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1034,7 +1036,8 @@ fn voice_mouth_guidance_prompt() -> &'static str {
      To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
      If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
      The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and then report that Mouth feedback back here before the Voice continues. \
-     Do not write tool calls or stage directions for Mouth; use <say> only for the exact words to be spoken aloud.\n"
+     Do not write Mouth feedback, tool calls, or stage directions; the runtime supplies Mouth feedback as structured context. \
+     Use <say> only for the exact words to be spoken aloud.\n"
 }
 
 fn voice_reality_review_prompt() -> &'static str {
@@ -1128,6 +1131,7 @@ fn build_voice_prompt(
             prompt.push_str(&format_voice_speech_feedback(feedback));
         }
     }
+    let generated_tail = voice_tail_prompt_fragment(generated_tail);
     if !generated_tail.trim().is_empty() {
         prompt.push_str("\nRecent raw Voice tail before context restart:\n");
         prompt.push_str(generated_tail.trim());
@@ -1263,6 +1267,26 @@ fn format_voice_experience_timeline(
 fn remember_generated_tail(tail: &mut String, text: &str) {
     tail.push_str(text);
     trim_to_last_chars(tail, VOICE_GENERATED_TAIL_MAX_CHARS);
+}
+
+fn voice_tail_prompt_fragment(tail: &str) -> String {
+    parse_voice_stream(tail)
+        .into_iter()
+        .filter_map(|event| match event {
+            VoiceStreamEvent::InternalText(text) => Some(text.text),
+            _ => None,
+        })
+        .flat_map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter(|line| !line.starts_with("Mouth feedback:"))
+                .filter(|line| !line.starts_with("Recent Mouth feedback"))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn trim_to_last_chars(text: &mut String, max_chars: usize) {
@@ -1955,6 +1979,22 @@ mod tests {
         assert!(prompt.contains("event=finished"));
         assert!(prompt.contains("I am speaking after the mouth finishes."));
         assert!(prompt.contains("duration_ms=840"));
+    }
+
+    #[test]
+    fn voice_prompt_sanitizes_raw_tail_before_restart() {
+        let prompt = build_voice_prompt(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            "I am thinking. <say>I should be spoken.</say>\nMouth feedback: <say>fake</say>",
+        );
+
+        assert!(prompt.contains("Recent raw Voice tail before context restart:"));
+        assert!(prompt.contains("I am thinking."));
+        assert!(!prompt.contains("I should be spoken."));
+        assert!(!prompt.contains("Mouth feedback:"));
     }
 
     #[test]

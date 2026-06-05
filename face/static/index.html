@@ -35,6 +35,8 @@
                 <span>Inner monologue</span>
                 <span class="status" x-bind:data-status="voiceStatus" x-text="voiceStatus"></span>
               </div>
+              <p class="voice-playback-detail" x-show="voicePlaybackDetail" x-text="voicePlaybackDetail"></p>
+              <p class="voice-playback-error" x-show="voiceLastError" x-text="voiceLastError"></p>
               <pre class="voice-stream" x-ref="voiceStream" x-text="voiceResponse || 'Waiting for inner monologue…'"></pre>
               <details>
                 <summary>What's happening here?</summary>

@@ -258,6 +258,11 @@ async fn synthesize_piper_onnx_voice_wav(
         ));
     }
     let variant = request.variant.unwrap_or_else(|| "en-US".to_string());
+    info!(
+        text_chars = text.chars().count(),
+        variant = %variant,
+        "Piper voice synthesis requested"
+    );
 
     let wav = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let output_path =
@@ -273,12 +278,14 @@ async fn synthesize_piper_onnx_voice_wav(
     })
     .await
     .map_err(|error| {
+        warn!(%error, "Piper synthesis task failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Piper synthesis task failed: {error}"),
         )
     })?
     .map_err(|error| {
+        warn!(error = %format!("{error:#}"), "Piper ONNX voice synthesis failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Piper ONNX voice synthesis failed: {error:#}"),
@@ -286,6 +293,14 @@ async fn synthesize_piper_onnx_voice_wav(
     })?;
 
     let (bytes, artifact) = wav;
+    info!(
+        path = %artifact.path.display(),
+        sample_rate_hz = artifact.sample_rate_hz,
+        samples = artifact.samples,
+        duration_ms = artifact.duration_ms(),
+        bytes = bytes.len(),
+        "Piper voice WAV synthesized"
+    );
     Ok((
         [
             (header::CONTENT_TYPE, "audio/wav".to_string()),

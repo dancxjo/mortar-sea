@@ -331,6 +331,12 @@ fn line_bounded_prompt_preview(source: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread;
+    use std::time::Duration;
     use std::time::Instant;
 
     use anyhow::bail;
@@ -476,11 +482,54 @@ mod tests {
         assert_eq!(engine.append_attempts, 1);
     }
 
+    #[test]
+    fn paused_control_defers_live_input_until_resumed() {
+        let id = Uuid::new_v4();
+        let mut engine = ScriptedEngine::new(
+            id,
+            [
+                vec![LlmEvent::Token {
+                    text: "after speech".to_owned(),
+                }],
+                vec![LlmEvent::Completed],
+            ],
+        );
+        let control = LlmStreamControl::new();
+        control.pause();
+        control.append_prompt("mouth finished speaking");
+
+        let append_allowed = Arc::new(AtomicBool::new(false));
+        engine.append_allowed = Some(append_allowed.clone());
+        let resume_control = control.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            append_allowed.store(true, Ordering::SeqCst);
+            resume_control.resume();
+        });
+        let (events, _receiver) = tokio::sync::broadcast::channel(8);
+
+        let generated = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::Voice,
+            Instant::now(),
+            GenerationRequest::default(),
+            Some(control),
+            None,
+            &events,
+        )
+        .expect("paused generation should resume");
+
+        assert_eq!(generated, "after speech");
+        assert_eq!(engine.append_attempts, 1);
+    }
+
     struct ScriptedEngine {
         id: GenerationId,
         polls: VecDeque<Vec<LlmEvent>>,
         fail_next_append: bool,
         append_attempts: usize,
+        append_allowed: Option<Arc<AtomicBool>>,
     }
 
     impl ScriptedEngine {
@@ -490,6 +539,7 @@ mod tests {
                 polls: VecDeque::from(polls),
                 fail_next_append: false,
                 append_attempts: 0,
+                append_allowed: None,
             }
         }
     }
@@ -508,6 +558,12 @@ mod tests {
         }
 
         fn append_prompt(&mut self, _id: GenerationId, _text: String) -> anyhow::Result<()> {
+            if let Some(append_allowed) = &self.append_allowed {
+                assert!(
+                    append_allowed.load(Ordering::SeqCst),
+                    "append_prompt called while generation control was paused"
+                );
+            }
             self.append_attempts += 1;
             if self.fail_next_append {
                 self.fail_next_append = false;
@@ -707,30 +763,6 @@ fn run_generation(
         let mut made_progress = false;
         if let Some(control) = &control {
             if control.is_paused() {
-                let append_result = append_control_prompts(
-                    engine,
-                    generation,
-                    id,
-                    kind,
-                    started_at,
-                    &mut generated,
-                    &mut token_events,
-                    token_sink.as_mut(),
-                    events,
-                    control,
-                )?;
-                if let Some(generated) = append_result.completed {
-                    return Ok(generated);
-                }
-                made_progress |= append_result.made_progress;
-                if made_progress {
-                    trace!(
-                        job_id = %id,
-                        job_kind = kind.as_str(),
-                        response_chars = generated.chars().count(),
-                        "LLM job accepted live prompt input while paused"
-                    );
-                }
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
