@@ -2,6 +2,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::data::arpabet::{self, split_stress};
+use crate::data::cmudict::{self, CmuPhoneme, CmuStress, PronunciationStatus};
+use crate::data::{canonical_variant_id, variant_by_code};
 use crate::evidence::{EvidenceProvenance, EvidenceSource};
 use crate::feature::FeatureBundle;
 use crate::ids::{GraphemeId, PhoneId, PhonemeId, VariantId};
@@ -24,6 +27,12 @@ pub trait Phonemicizer {
 pub struct PhonemicizeRequest {
     pub text: String,
     pub variant: VariantId,
+    pub style: Option<PhonemicizeStyle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PhonemicizeStyle {
+    pub careful_style: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,7 +80,18 @@ impl Phonemicizer for EnglishPhonemicizer {
         if input.text.trim().is_empty() {
             return Err(PhonemicizeError::EmptyInput);
         }
-        if input.variant.0 != "en-US" {
+
+        let canonical_variant = canonical_variant_id(&input.variant.0).ok_or_else(|| {
+            PhonemicizeError::UnsupportedVariant {
+                variant: input.variant.clone(),
+            }
+        })?;
+        let variant = variant_by_code(&canonical_variant.0).ok_or_else(|| {
+            PhonemicizeError::UnsupportedVariant {
+                variant: input.variant.clone(),
+            }
+        })?;
+        if variant.language.0 != "en" {
             return Err(PhonemicizeError::UnsupportedVariant {
                 variant: input.variant.clone(),
             });
@@ -82,6 +102,10 @@ impl Phonemicizer for EnglishPhonemicizer {
         let mut phonemes = Vec::new();
         let mut phones = Vec::new();
         let mut syllables = Vec::new();
+        let careful_style = input
+            .style
+            .as_ref()
+            .is_some_and(|style| style.careful_style);
 
         for (word_index, word) in words.iter().enumerate() {
             if word_index > 0 {
@@ -89,45 +113,51 @@ impl Phonemicizer for EnglishPhonemicizer {
             }
 
             graphemes.push(GraphemeToken {
-                grapheme: Spec::Known(GraphemeId(format!("en-US.word.{}", word.normalized))),
+                grapheme: Spec::Known(GraphemeId(format!(
+                    "{}.word.{}",
+                    canonical_variant.0, word.normalized
+                ))),
                 text: word.text.clone(),
                 span: Some(word.span),
                 confidence: 1.0,
             });
 
             let pronunciation = pronunciation_for_word(&word.normalized);
-            let provenance = if pronunciation.from_lexicon {
-                lexicon_provenance()
-            } else {
-                fallback_provenance()
-            };
-            let mut word_phones = Vec::new();
+            let candidate = pronunciation
+                .candidates
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let mut word_phones = realize_candidate(
+                &candidate,
+                &canonical_variant.0,
+                pronunciation.status,
+                careful_style,
+            );
 
-            for symbol in pronunciation.symbols {
-                let phone = phone_token(symbol, provenance.clone());
+            for (cmu, phone) in candidate.iter().zip(word_phones.iter()) {
+                let raw_symbol = cmu.raw_symbol();
+                let provenance = pronunciation_provenance(pronunciation.status);
                 phonemes.push(PhonemeToken {
-                    phoneme: Spec::Known(PhonemeId(format!("en-US.arpabet.{symbol}"))),
+                    phoneme: Spec::Known(arpabet::phoneme_id(&canonical_variant.0, &raw_symbol)),
                     span: None,
                     realized_as: vec![phone.clone()],
-                    confidence: if pronunciation.from_lexicon {
-                        1.0
-                    } else {
-                        0.55
-                    },
-                    provenance: provenance.clone(),
+                    confidence: confidence_for_status(pronunciation.status),
+                    provenance,
                 });
-                phones.push(phone.clone());
-                word_phones.push(phone);
             }
 
             if !word_phones.is_empty() {
                 syllables.push(Syllable {
-                    nucleus_index: nucleus_index(&word_phones),
-                    stress: stress_for_word(&word_phones),
-                    phones: word_phones,
+                    nucleus_index: candidate
+                        .iter()
+                        .position(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol())),
+                    stress: stress_for_candidate(&candidate),
+                    phones: word_phones.clone(),
                     span: None,
                 });
             }
+            phones.append(&mut word_phones);
         }
 
         Ok(PhonemicizeOutput {
@@ -139,7 +169,10 @@ impl Phonemicizer for EnglishPhonemicizer {
             syllables,
             provenance: EvidenceProvenance {
                 source: EvidenceSource::Rule,
-                method: "en-US built-in CMUdict-style lexicon plus explicit fallback".into(),
+                method: format!(
+                    "{} variant data + CMUdict lookup + explicit unknown-word fallback",
+                    canonical_variant.0
+                ),
                 version: Some("0.1".into()),
             },
         })
@@ -153,17 +186,11 @@ struct WordToken {
     span: TextSpan,
 }
 
-#[derive(Debug, Clone)]
-struct Pronunciation {
-    symbols: Vec<&'static str>,
-    from_lexicon: bool,
-}
-
 fn tokenize_words(text: &str) -> Vec<WordToken> {
     let mut words = Vec::new();
     let mut start = None;
     for (byte_index, character) in text.char_indices() {
-        if character.is_alphanumeric() || character == '\'' {
+        if character.is_alphabetic() || character == '\'' || character == '-' {
             start.get_or_insert(byte_index);
             continue;
         }
@@ -185,7 +212,7 @@ fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<Wor
     let start_char = text[..start_byte].chars().count();
     let end_char = start_char + surface.chars().count();
     let normalized = surface
-        .trim_matches('\'')
+        .trim_matches(|character: char| !character.is_alphabetic())
         .chars()
         .flat_map(char::to_lowercase)
         .collect::<String>();
@@ -203,40 +230,39 @@ fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<Wor
     });
 }
 
-fn pronunciation_for_word(word: &str) -> Pronunciation {
-    if let Some(symbols) = lookup_builtin_lexicon(word) {
-        return Pronunciation {
-            symbols,
-            from_lexicon: true,
+#[derive(Debug, Clone)]
+struct WordPronunciation {
+    candidates: Vec<Vec<CmuPhoneme>>,
+    status: PronunciationStatus,
+}
+
+fn pronunciation_for_word(word: &str) -> WordPronunciation {
+    let entry = cmudict::bundled().lookup_entry(word);
+    if !entry.candidates.is_empty() {
+        return WordPronunciation {
+            candidates: entry.candidates,
+            status: entry.status,
         };
     }
 
-    let symbols = word
-        .chars()
-        .filter_map(fallback_symbol_for_char)
-        .collect::<Vec<_>>();
-    Pronunciation {
-        symbols,
-        from_lexicon: false,
+    let guessed = guess_pronunciation(word);
+    if guessed.is_empty() {
+        WordPronunciation {
+            candidates: Vec::new(),
+            status: PronunciationStatus::Missing,
+        }
+    } else {
+        WordPronunciation {
+            candidates: vec![guessed],
+            status: PronunciationStatus::Guessed,
+        }
     }
 }
 
-fn lookup_builtin_lexicon(word: &str) -> Option<Vec<&'static str>> {
-    let symbols = match word {
-        "a" => &["AH0"][..],
-        "be" => &["B", "IY1"],
-        "hello" => &["HH", "AH0", "L", "OW1"],
-        "i" => &["AY1"],
-        "not" => &["N", "AA1", "T"],
-        "or" => &["AO1", "R"],
-        "see" => &["S", "IY1"],
-        "the" => &["DH", "AH0"],
-        "to" => &["T", "UW1"],
-        "world" => &["W", "ER1", "L", "D"],
-        "you" => &["Y", "UW1"],
-        _ => return None,
-    };
-    Some(symbols.to_vec())
+fn guess_pronunciation(word: &str) -> Vec<CmuPhoneme> {
+    word.chars()
+        .filter_map(|character| fallback_symbol_for_char(character).map(CmuPhoneme::parse))
+        .collect()
 }
 
 fn fallback_symbol_for_char(character: char) -> Option<&'static str> {
@@ -267,26 +293,111 @@ fn fallback_symbol_for_char(character: char) -> Option<&'static str> {
         'x' => Some("K"),
         'y' => Some("Y"),
         'z' => Some("Z"),
-        '\'' => None,
         _ => None,
     }
 }
 
-fn phone_token(symbol: &str, provenance: EvidenceProvenance) -> PhoneToken {
-    PhoneToken {
-        phone: Spec::Known(PhoneId(format!(
-            "en-US.arpabet-phone.{}",
-            unstressed(symbol)
-        ))),
-        span: None,
-        features: FeatureBundle::default(),
-        acoustic_evidence: Vec::new(),
-        confidence: if provenance.source == EvidenceSource::Lexicon {
-            1.0
-        } else {
-            0.55
-        },
-        provenance,
+fn realize_candidate(
+    candidate: &[CmuPhoneme],
+    variant_id: &str,
+    status: PronunciationStatus,
+    careful_style: bool,
+) -> Vec<PhoneToken> {
+    candidate
+        .iter()
+        .enumerate()
+        .map(|(index, phoneme)| {
+            let ipa = realized_ipa(candidate, index, careful_style)
+                .unwrap_or_else(|| default_ipa(&phoneme.base));
+            PhoneToken {
+                phone: Spec::Known(PhoneId(format!("ipa.phone.{ipa}"))),
+                span: None,
+                features: arpabet::entry(&phoneme.base)
+                    .map(arpabet::feature_bundle)
+                    .unwrap_or_default(),
+                acoustic_evidence: Vec::new(),
+                confidence: confidence_for_status(status),
+                provenance: if ipa != default_ipa(&phoneme.base) {
+                    EvidenceProvenance {
+                        source: EvidenceSource::Rule,
+                        method: allophone_method(candidate, index, variant_id),
+                        version: Some("0.1".into()),
+                    }
+                } else {
+                    pronunciation_provenance(status)
+                },
+            }
+        })
+        .collect()
+}
+
+fn realized_ipa(candidate: &[CmuPhoneme], index: usize, careful_style: bool) -> Option<String> {
+    let target = candidate.get(index)?;
+    if target.base == "T"
+        && !careful_style
+        && index > 0
+        && index + 1 < candidate.len()
+        && is_stressed_vowel(&candidate[index - 1])
+        && is_unstressed_vowel(&candidate[index + 1])
+    {
+        return Some("ɾ".into());
+    }
+
+    if target.base == "N"
+        && candidate
+            .get(index + 1)
+            .is_some_and(|next| matches!(next.base.as_str(), "K" | "G"))
+    {
+        return Some("ŋ".into());
+    }
+
+    None
+}
+
+fn default_ipa(base: &str) -> String {
+    arpabet::entry(base)
+        .map(|entry| entry.phone_symbol.to_string())
+        .unwrap_or_else(|| format!("?{base}"))
+}
+
+fn allophone_method(candidate: &[CmuPhoneme], index: usize, variant_id: &str) -> String {
+    match candidate.get(index).map(|phoneme| phoneme.base.as_str()) {
+        Some("T") => {
+            format!("{variant_id} rule american_english_intervocalic_flapping")
+        }
+        Some("N") => {
+            format!("{variant_id} rule alveolar_nasal_velar_assimilation")
+        }
+        _ => format!("{variant_id} allophone rule"),
+    }
+}
+
+fn is_stressed_vowel(phoneme: &CmuPhoneme) -> bool {
+    arpabet::is_vowel(&phoneme.raw_symbol())
+        && matches!(
+            phoneme.stress,
+            Some(CmuStress::Primary | CmuStress::Secondary)
+        )
+}
+
+fn is_unstressed_vowel(phoneme: &CmuPhoneme) -> bool {
+    arpabet::is_vowel(&phoneme.raw_symbol())
+        && matches!(phoneme.stress, Some(CmuStress::Unstressed))
+}
+
+fn stress_for_candidate(candidate: &[CmuPhoneme]) -> Spec<Stress> {
+    if candidate
+        .iter()
+        .any(|phoneme| phoneme.stress == Some(CmuStress::Primary))
+    {
+        Spec::Known(Stress::Primary)
+    } else if candidate
+        .iter()
+        .any(|phoneme| phoneme.stress == Some(CmuStress::Secondary))
+    {
+        Spec::Known(Stress::Secondary)
+    } else {
+        Spec::Known(Stress::Unstressed)
     }
 }
 
@@ -305,61 +416,32 @@ fn boundary_phone_token() -> PhoneToken {
     }
 }
 
-fn nucleus_index(phones: &[PhoneToken]) -> Option<usize> {
-    phones.iter().position(|phone| match &phone.phone {
-        Spec::Known(id) => is_vowel_symbol(id.0.rsplit('.').next().unwrap_or("")),
-        _ => false,
-    })
-}
-
-fn stress_for_word(phones: &[PhoneToken]) -> Spec<Stress> {
-    if phones.iter().any(|phone| match &phone.phone {
-        Spec::Known(id) => id.0.ends_with('1'),
-        _ => false,
-    }) {
-        Spec::Known(Stress::Primary)
-    } else {
-        Spec::Known(Stress::Unstressed)
+fn confidence_for_status(status: PronunciationStatus) -> f32 {
+    match status {
+        PronunciationStatus::Exact => 1.0,
+        PronunciationStatus::Normalized => 0.95,
+        PronunciationStatus::Guessed => 0.55,
+        PronunciationStatus::Missing => 0.0,
     }
 }
 
-fn is_vowel_symbol(symbol: &str) -> bool {
-    matches!(
-        unstressed(symbol),
-        "AA" | "AE"
-            | "AH"
-            | "AO"
-            | "AW"
-            | "AY"
-            | "EH"
-            | "ER"
-            | "EY"
-            | "IH"
-            | "IY"
-            | "OW"
-            | "OY"
-            | "UH"
-            | "UW"
-    )
-}
-
-fn unstressed(symbol: &str) -> &str {
-    symbol.strip_suffix(['0', '1', '2']).unwrap_or(symbol)
-}
-
-fn lexicon_provenance() -> EvidenceProvenance {
-    EvidenceProvenance {
-        source: EvidenceSource::Lexicon,
-        method: "en-US built-in CMUdict-style lexicon".into(),
-        version: Some("0.1".into()),
-    }
-}
-
-fn fallback_provenance() -> EvidenceProvenance {
-    EvidenceProvenance {
-        source: EvidenceSource::Rule,
-        method: "en-US explicit unknown-word fallback".into(),
-        version: Some("0.1".into()),
+fn pronunciation_provenance(status: PronunciationStatus) -> EvidenceProvenance {
+    match status {
+        PronunciationStatus::Exact | PronunciationStatus::Normalized => EvidenceProvenance {
+            source: EvidenceSource::Lexicon,
+            method: format!("cmudict {status:?} lookup").to_lowercase(),
+            version: Some("0.1".into()),
+        },
+        PronunciationStatus::Guessed => EvidenceProvenance {
+            source: EvidenceSource::Rule,
+            method: "unknown-word fallback".into(),
+            version: Some("0.1".into()),
+        },
+        PronunciationStatus::Missing => EvidenceProvenance {
+            source: EvidenceSource::Unknown,
+            method: "missing pronunciation".into(),
+            version: Some("0.1".into()),
+        },
     }
 }
 
@@ -374,58 +456,144 @@ pub fn phone_display_symbol(id: &PhoneId) -> &str {
     id.0.rsplit('.').next().unwrap_or(&id.0)
 }
 
+pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {
+    let symbol = phoneme_display_symbol(id);
+    split_stress(symbol).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variant::VariantImplementationStatus;
 
-    #[test]
-    fn hello_world_phonemicizes_to_tokens_not_characters() {
-        let output = EnglishPhonemicizer
-            .phonemicize(&PhonemicizeRequest {
-                text: "hello world".into(),
-                variant: VariantId("en-US".into()),
-            })
-            .expect("en-US should phonemicize");
+    fn request(text: &str, variant: &str) -> PhonemicizeRequest {
+        PhonemicizeRequest {
+            text: text.into(),
+            variant: VariantId(variant.into()),
+            style: None,
+        }
+    }
 
-        let symbols = output
+    fn phoneme_symbols(output: &PhonemicizeOutput) -> Vec<String> {
+        output
             .phonemes
             .iter()
             .filter_map(|token| match &token.phoneme {
                 Spec::Known(id) => Some(phoneme_display_symbol(id).to_string()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(symbols, ["HH", "AH0", "L", "OW1", "W", "ER1", "L", "D"]);
-        assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
+            .collect()
+    }
+
+    fn phone_symbols(output: &PhonemicizeOutput) -> Vec<String> {
+        output
+            .phones
+            .iter()
+            .filter_map(|token| match &token.phone {
+                Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
-    fn variant_id_is_preserved() {
-        let variant = VariantId("en-US".into());
+    fn hello_world_uses_cmudict_not_characters() {
         let output = EnglishPhonemicizer
-            .phonemicize(&PhonemicizeRequest {
-                text: "hello".into(),
-                variant: variant.clone(),
-            })
+            .phonemicize(&request("hello world", "en-US"))
             .expect("en-US should phonemicize");
 
-        assert_eq!(output.variant, variant);
+        assert_eq!(
+            phoneme_symbols(&output),
+            ["HH", "AH0", "L", "OW1", "W", "ER1", "L", "D"]
+        );
+        assert_ne!(phoneme_symbols(&output), ["h", "e", "l", "l", "o"]);
+        assert!(
+            output
+                .phonemes
+                .iter()
+                .all(|token| token.provenance.source == EvidenceSource::Lexicon)
+        );
+    }
+
+    #[test]
+    fn acceptance_words_match_cmudict_expectations() {
+        for (word, expected) in [
+            ("doctor", vec!["D", "AA1", "K", "T", "ER0"]),
+            (
+                "fitzgerald",
+                vec!["F", "IH0", "T", "S", "JH", "EH1", "R", "AH0", "L", "D"],
+            ),
+            ("xylophone", vec!["Z", "AY1", "L", "AH0", "F", "OW2", "N"]),
+            ("okay", vec!["OW2", "K", "EY1"]),
+        ] {
+            let output = EnglishPhonemicizer
+                .phonemicize(&request(word, "en-US-GA"))
+                .expect("word should phonemicize");
+            assert_eq!(phoneme_symbols(&output), expected, "{word}");
+        }
+    }
+
+    #[test]
+    fn water_flaps_in_ga_and_careful_style_blocks_it() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("water", "en-US-GA"))
+            .expect("water");
+        assert!(phone_symbols(&output).contains(&"ɾ".into()));
+
+        let careful = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "water".into(),
+                variant: VariantId("en-US-GA".into()),
+                style: Some(PhonemicizeStyle {
+                    careful_style: true,
+                }),
+            })
+            .expect("water careful");
+        assert!(phone_symbols(&careful).contains(&"t".into()));
+        assert!(!phone_symbols(&careful).contains(&"ɾ".into()));
+    }
+
+    #[test]
+    fn nasal_assimilation_applies_only_before_velars() {
+        let before_k = EnglishPhonemicizer
+            .phonemicize(&request("nka", "en-US"))
+            .expect("fallback");
+        assert!(phone_symbols(&before_k).contains(&"ŋ".into()));
+
+        let before_d = EnglishPhonemicizer
+            .phonemicize(&request("nda", "en-US"))
+            .expect("fallback");
+        assert!(phone_symbols(&before_d).contains(&"n".into()));
+        assert!(!phone_symbols(&before_d).contains(&"ŋ".into()));
+    }
+
+    #[test]
+    fn aliases_and_stub_status_are_data_driven() {
+        let en_us = EnglishPhonemicizer
+            .phonemicize(&request("okay", "en-US"))
+            .expect("en-US alias");
+        let ga = EnglishPhonemicizer
+            .phonemicize(&request("okay", "en-US-GA"))
+            .expect("GA");
+        assert_eq!(phoneme_symbols(&en_us), phoneme_symbols(&ga));
+
+        let rp = variant_by_code("en-GB-RP").expect("RP");
+        assert_eq!(
+            rp.implementation_status,
+            VariantImplementationStatus::StubDerivedFrom(VariantId("en-US-GA".into()))
+        );
     }
 
     #[test]
     fn unknown_word_fallback_is_explicitly_marked() {
         let output = EnglishPhonemicizer
-            .phonemicize(&PhonemicizeRequest {
-                text: "zzq".into(),
-                variant: VariantId("en-US".into()),
-            })
+            .phonemicize(&request("zzq", "en-US"))
             .expect("fallback should phonemicize");
 
-        assert!(
-            output
-                .phonemes
-                .iter()
-                .all(|token| token.provenance.method.contains("unknown-word fallback"))
-        );
+        assert!(output.phonemes.iter().all(|token| {
+            token.provenance.source == EvidenceSource::Rule
+                && token.provenance.method.contains("unknown-word fallback")
+                && token.confidence < 1.0
+        }));
     }
 }

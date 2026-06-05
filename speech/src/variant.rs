@@ -33,6 +33,7 @@ pub struct LinguisticVariant {
     pub acoustic_profile: Option<AcousticProfile>,
     pub prosody_profile: Option<ProsodyProfile>,
     pub status: VariantStatus,
+    pub implementation_status: VariantImplementationStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,4 +45,12 @@ pub enum VariantStatus {
     Experimental,
     Idiolect,
     SessionLocal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type", content = "data")]
+pub enum VariantImplementationStatus {
+    Complete,
+    StubDerivedFrom(VariantId),
+    PermissiveProfile,
 }

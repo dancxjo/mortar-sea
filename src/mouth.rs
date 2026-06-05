@@ -120,6 +120,7 @@ impl BreathGroupPlanner for DefaultBreathGroupPlanner {
             .phonemicize(&PhonemicizeRequest {
                 text: group.text.clone(),
                 variant: self.variant.clone(),
+                style: None,
             })
             .map_err(|error| MouthError::Planning(error.to_string()))?;
 

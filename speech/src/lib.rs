@@ -5,6 +5,7 @@
 //! leaking backend-specific concepts into the core ontology.
 
 pub mod acoustics;
+pub mod data;
 pub mod evidence;
 pub mod feature;
 pub mod ids;
@@ -22,6 +23,7 @@ pub mod utterance;
 pub mod variant;
 
 pub use acoustics::*;
+pub use data::*;
 pub use evidence::*;
 pub use feature::*;
 pub use ids::*;

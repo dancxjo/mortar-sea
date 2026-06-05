@@ -61,6 +61,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         .phonemicize(&PhonemicizeRequest {
             text: command.text,
             variant: VariantId(command.variant),
+            style: None,
         })
         .context("failed to phonemicize text into a speech plan")?;
     let plan = utterance_plan_from_phonemicized(&phonemicized);
@@ -265,6 +266,7 @@ mod tests {
             .phonemicize(&PhonemicizeRequest {
                 text: "hello world".into(),
                 variant: VariantId("en-US".into()),
+                style: None,
             })
             .expect("phonemicize");
         let plan = utterance_plan_from_phonemicized(&phonemicized);

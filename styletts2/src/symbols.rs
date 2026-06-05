@@ -198,6 +198,51 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         }
     }
 
+    for (phone_id, symbol) in [
+        ("ipa.phone.ɑ", "AA"),
+        ("ipa.phone.æ", "AE"),
+        ("ipa.phone.ʌ", "AH"),
+        ("ipa.phone.ɔ", "AO"),
+        ("ipa.phone.aʊ", "AW"),
+        ("ipa.phone.aɪ", "AY"),
+        ("ipa.phone.b", "B"),
+        ("ipa.phone.tʃ", "CH"),
+        ("ipa.phone.d", "D"),
+        ("ipa.phone.ð", "DH"),
+        ("ipa.phone.ɛ", "EH"),
+        ("ipa.phone.ɝ", "ER"),
+        ("ipa.phone.eɪ", "EY"),
+        ("ipa.phone.f", "F"),
+        ("ipa.phone.ɡ", "G"),
+        ("ipa.phone.h", "HH"),
+        ("ipa.phone.ɪ", "IH"),
+        ("ipa.phone.iː", "IY"),
+        ("ipa.phone.dʒ", "JH"),
+        ("ipa.phone.k", "K"),
+        ("ipa.phone.l", "L"),
+        ("ipa.phone.m", "M"),
+        ("ipa.phone.n", "N"),
+        ("ipa.phone.ŋ", "NG"),
+        ("ipa.phone.oʊ", "OW"),
+        ("ipa.phone.ɔɪ", "OY"),
+        ("ipa.phone.p", "P"),
+        ("ipa.phone.ɹ", "R"),
+        ("ipa.phone.s", "S"),
+        ("ipa.phone.ʃ", "SH"),
+        ("ipa.phone.t", "T"),
+        ("ipa.phone.ɾ", "T"),
+        ("ipa.phone.θ", "TH"),
+        ("ipa.phone.ʊ", "UH"),
+        ("ipa.phone.uː", "UW"),
+        ("ipa.phone.v", "V"),
+        ("ipa.phone.w", "W"),
+        ("ipa.phone.j", "Y"),
+        ("ipa.phone.z", "Z"),
+        ("ipa.phone.ʒ", "ZH"),
+    ] {
+        set = set.with_alias(phone_id, symbol);
+    }
+
     set.with_alias("boundary.word", "|")
 }
 
