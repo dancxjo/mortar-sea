@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
-    BoundaryKind, FeatureId, FeatureValue, PauseKind, PhoneInventory, PhoneToken, PhonemeInventory,
-    PhonemeToken, Spec, SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
+    BoundaryKind, FeatureId, FeatureValue, LinguisticVariant, PauseKind, PhoneInventory,
+    PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, TerminalPunctuation,
+    UtterancePlan, epenthetic_phones_after, variant_by_code,
 };
 use thiserror::Error;
 
@@ -135,8 +136,12 @@ impl SymbolSet {
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         if !plan.intended_phonemes.is_empty() {
-            return self
-                .lower_phoneme_tokens_with_boundaries(&plan.intended_phonemes, &plan.boundaries);
+            let variant = variant_by_code(&plan.variant.0);
+            return self.lower_phoneme_tokens_with_boundaries(
+                &plan.intended_phonemes,
+                &plan.boundaries,
+                variant.as_ref(),
+            );
         }
 
         self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries)
@@ -178,6 +183,7 @@ impl SymbolSet {
         &self,
         tokens: &[PhonemeToken],
         boundaries: &[SpeechBoundaryToken],
+        variant: Option<&LinguisticVariant>,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         let mut lowered = Vec::new();
         let mut boundary_word_index = 0;
@@ -185,7 +191,7 @@ impl SymbolSet {
         let mut current_word_index = None;
         let mut current_letter_index = None;
 
-        for token in tokens {
+        for (token_index, token) in tokens.iter().enumerate() {
             let Some(token_id) = spec_token_id(&token.phoneme) else {
                 continue;
             };
@@ -208,6 +214,15 @@ impl SymbolSet {
                 self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
             }
 
+            if in_word
+                && let Some(variant) = variant
+                && let Some(previous_index) = token_index.checked_sub(1)
+            {
+                for phone in epenthetic_phones_after(variant, tokens, previous_index) {
+                    self.push_epenthetic_phone(&mut lowered, &phone)?;
+                }
+            }
+
             lowered.push(StyleTts2SymbolToken {
                 symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)?,
                 source: StyleTts2SymbolSource::Phoneme,
@@ -223,6 +238,21 @@ impl SymbolSet {
         }
 
         Ok(StyleTts2SymbolSequence { tokens: lowered })
+    }
+
+    fn push_epenthetic_phone(
+        &self,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        phone: &PhoneToken,
+    ) -> Result<(), SymbolLoweringError> {
+        let Some(token_id) = spec_token_id(&phone.phone) else {
+            return Ok(());
+        };
+        lowered.push(StyleTts2SymbolToken {
+            symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
+            source: StyleTts2SymbolSource::Phone,
+        });
+        Ok(())
     }
 
     fn lower_phone_tokens_with_boundaries(

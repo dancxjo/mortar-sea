@@ -8,8 +8,8 @@ use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
 use crate::prosody::{ProsodicContext, Stress};
 use crate::rules::{
-    AllophoneRule, EpenthesisRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics,
-    RuleCondition, RuleStatus, SyllableShape,
+    AllophoneRule, EpenthesisRule, PhonePattern, PhonemePattern, PhonotacticConstraint,
+    Phonotactics, RuleCondition, RuleStatus, SyllableShape,
 };
 use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
@@ -339,18 +339,22 @@ fn epenthesis_rules() -> Vec<EpenthesisRule> {
     vec![EpenthesisRule {
         id: "english_letter_name_front_vowel_linking_yod".into(),
         name: "English letter-name front-vowel linking yod".into(),
-        before: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(&[
-            ("phonology.major", FeatureValue::Category("vowel".into())),
-            (
-                "phonology.vowel_backness",
-                FeatureValue::Category("front".into()),
-            ),
-            ("orthography.letter_name", FeatureValue::Bool(true)),
-        ]))],
-        after: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(&[
-            ("phonology.major", FeatureValue::Category("vowel".into())),
-            ("orthography.letter_name", FeatureValue::Bool(true)),
-        ]))],
+        before: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(
+            &[
+                ("phonology.major", FeatureValue::Category("vowel".into())),
+                (
+                    "phonology.vowel_backness",
+                    FeatureValue::Category("front".into()),
+                ),
+                ("orthography.letter_name", FeatureValue::Bool(true)),
+            ],
+        ))],
+        after: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(
+            &[
+                ("phonology.major", FeatureValue::Category("vowel".into())),
+                ("orthography.letter_name", FeatureValue::Bool(true)),
+            ],
+        ))],
         output: PhonePattern {
             phone: Spec::Known(Y),
             features: Default::default(),

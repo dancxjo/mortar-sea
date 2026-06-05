@@ -196,9 +196,7 @@ impl Phonemicizer for EnglishPhonemicizer {
                 },
             );
 
-            for (phoneme, phone) in word_phonemes.iter_mut().zip(word_phones.iter()) {
-                phoneme.realized_as = vec![phone.clone()];
-            }
+            assign_realized_phones(&mut word_phonemes, &word_phones);
             phonemes.extend(word_phonemes);
 
             if !word_phones.is_empty() {
@@ -836,6 +834,25 @@ fn insert_letter_boundaries(phones: &mut Vec<PhoneToken>, break_offsets: &[usize
     }
 }
 
+fn assign_realized_phones(phonemes: &mut [PhonemeToken], phones: &[PhoneToken]) {
+    let mut phone_iter = phones
+        .iter()
+        .filter(|phone| !is_boundary_phone(phone))
+        .filter(|phone| !phone.provenance.method.contains("epenthesis rule"));
+    for phoneme in phonemes {
+        if let Some(phone) = phone_iter.next() {
+            phoneme.realized_as = vec![phone.clone()];
+        }
+    }
+}
+
+fn is_boundary_phone(phone: &PhoneToken) -> bool {
+    matches!(
+        &phone.phone,
+        Spec::Known(id) if id.as_str().starts_with("boundary.")
+    )
+}
+
 fn add_letter_index_feature(features: &mut FeatureBundle, letter_index: usize) {
     features.values.insert(
         FeatureId("orthography.letter_index".into()),
@@ -1079,7 +1096,7 @@ mod tests {
             .phonemicize(&request("IR", "en-US"))
             .expect("IR");
         assert_eq!(phoneme_symbols(&ir), ["AY1", "AA1", "R"]);
-        assert_eq!(phone_symbols(&ir), ["aɪ", "|", "ɑ", "ɹ"]);
+        assert_eq!(phone_symbols(&ir), ["aɪ", "|", "j", "ɑ", "ɹ"]);
         assert!(ir.warnings.iter().any(|warning| {
             warning.kind == PronunciationWarningKind::AcronymExpanded && warning.token == "IR"
         }));

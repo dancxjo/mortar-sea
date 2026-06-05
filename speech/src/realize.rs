@@ -306,7 +306,7 @@ fn phone_from_rule(
         confidence: token.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: format!("{} rule {}", variant.id.0, rule.id),
+            method: format!("{} epenthesis rule {}", variant.id.0, rule.id),
             version: Some("0.1".into()),
         },
     }
