@@ -664,6 +664,9 @@ fn record_transcript(state: &AppState, result: TranscriptResult) {
                 text: sentence_text,
                 sequence_start: result.sequence_start,
                 sequence_end: result.sequence_end,
+                is_final: true,
+                sentence_index: Some(sentence_index),
+                sentence_count: Some(sentence_count),
             });
     }
 
@@ -754,6 +757,9 @@ fn record_speculative_transcript(state: &AppState, result: TranscriptResult) {
             text,
             sequence_start: result.sequence_start,
             sequence_end: result.sequence_end,
+            is_final: false,
+            sentence_index: None,
+            sentence_count: None,
         });
     crate::realtime_experience::spawn_trace(state.clone());
 }

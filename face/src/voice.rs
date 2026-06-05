@@ -1,5 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
+use chrono::{DateTime, Utc};
 use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -12,11 +13,12 @@ use crate::app::AppState;
 use crate::ingestion::record_sensation;
 use crate::llm_scheduler::{LlmJobKind, LlmStreamControl};
 use crate::messages::{
-    ExperienceRecord, MediaRecord, RealTimeExperienceEvent, SensationRecord, SensationSource,
-    VisionImpressionRecord, VoiceObservation,
+    AudioSentenceClipRecord, ExperienceRecord, MediaRecord, RealTimeExperienceEvent,
+    SensationRecord, SensationSource, VisionImpressionRecord, VoiceObservation,
 };
 
 const RECENT_EXPERIENCE_LIMIT: usize = 12;
+const RECENT_FINALIZED_ASR_LIMIT: usize = 24;
 const RECENT_THOUGHT_LIMIT: usize = 10;
 const VOICE_GENERATED_TAIL_MAX_CHARS: usize = 2_000;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
@@ -37,6 +39,16 @@ struct ActiveVoiceGeneration {
     experience_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone)]
+struct FinalizedAsrUpdate {
+    observed_at: DateTime<Utc>,
+    text: String,
+    sequence_start: u64,
+    sequence_end: u64,
+    sentence_index: Option<usize>,
+    sentence_count: Option<usize>,
+}
+
 #[derive(Debug)]
 enum VoiceGenerationEvent {
     Token {
@@ -53,6 +65,7 @@ async fn run_voice(state: AppState) {
     let mut experience_events = state.realtime_experience_events.subscribe();
     let (generation_tx, mut generation_rx) = mpsc::unbounded_channel();
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
+    let mut recent_finalized_asr = VecDeque::<FinalizedAsrUpdate>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
     let mut generated_tail = String::new();
     let mut last_experience_signature = None::<String>;
@@ -61,10 +74,12 @@ async fn run_voice(state: AppState) {
         &mut recent_experiences,
         &mut last_experience_signature,
     );
+    sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
     let mut active = Some(start_voice_generation(
         &state,
         &generation_tx,
         &recent_experiences,
+        &recent_finalized_asr,
         &recent_thoughts,
         &generated_tail,
     ));
@@ -91,42 +106,85 @@ async fn run_voice(state: AppState) {
                             &mut recent_experiences,
                             &mut last_experience_signature,
                         );
+                        let recovered_asr =
+                            sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
                         if let Some(current) = active.as_mut() {
                             append_voice_experience_updates(&state, current, &recovered);
+                            append_voice_finalized_asr_updates(current, &recovered_asr);
                         }
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
 
-                let RealTimeExperienceEvent::Experience { experience, .. } = event else {
-                    continue;
-                };
+                match event {
+                    RealTimeExperienceEvent::Experience { experience, .. } => {
+                        if !remember_recent_experience_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            experience.clone(),
+                            &mut last_experience_signature,
+                        ) {
+                            continue;
+                        }
 
-                if !remember_recent_experience_from_state(
-                    &state,
-                    &mut recent_experiences,
-                    experience.clone(),
-                    &mut last_experience_signature,
-                ) {
-                    continue;
-                }
+                        if let Some(current) = active.as_mut() {
+                            append_voice_experience_updates(&state, current, &[experience]);
+                        } else {
+                            sync_recent_experiences_from_state(
+                                &state,
+                                &mut recent_experiences,
+                                &mut last_experience_signature,
+                            );
+                            sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
+                            active = Some(start_voice_generation(
+                                &state,
+                                &generation_tx,
+                                &recent_experiences,
+                                &recent_finalized_asr,
+                                &recent_thoughts,
+                                &generated_tail,
+                            ));
+                        }
+                    }
+                    RealTimeExperienceEvent::AsrTranscript {
+                        observed_at,
+                        text,
+                        sequence_start,
+                        sequence_end,
+                        is_final: true,
+                        sentence_index,
+                        sentence_count,
+                    } => {
+                        let update = FinalizedAsrUpdate {
+                            observed_at,
+                            text,
+                            sequence_start,
+                            sequence_end,
+                            sentence_index,
+                            sentence_count,
+                        };
+                        if !remember_recent_finalized_asr_update(
+                            &mut recent_finalized_asr,
+                            update.clone(),
+                        ) {
+                            continue;
+                        }
 
-                if let Some(current) = active.as_mut() {
-                    append_voice_experience_updates(&state, current, &[experience]);
-                } else {
-                    sync_recent_experiences_from_state(
-                        &state,
-                        &mut recent_experiences,
-                        &mut last_experience_signature,
-                    );
-                    active = Some(start_voice_generation(
-                        &state,
-                        &generation_tx,
-                        &recent_experiences,
-                        &recent_thoughts,
-                        &generated_tail,
-                    ));
+                        if let Some(current) = active.as_mut() {
+                            append_voice_finalized_asr_updates(current, &[update]);
+                        } else {
+                            active = Some(start_voice_generation(
+                                &state,
+                                &generation_tx,
+                                &recent_experiences,
+                                &recent_finalized_asr,
+                                &recent_thoughts,
+                                &generated_tail,
+                            ));
+                        }
+                    }
+                    _ => continue,
                 }
             }
             generation_event = generation_rx.recv() => {
@@ -201,10 +259,12 @@ async fn run_voice(state: AppState) {
                             &mut recent_experiences,
                             &mut last_experience_signature,
                         );
+                        sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
                         active = Some(start_voice_generation(
                             &state,
                             &generation_tx,
                             &recent_experiences,
+                            &recent_finalized_asr,
                             &recent_thoughts,
                             &generated_tail,
                         ));
@@ -340,10 +400,109 @@ fn append_voice_experience_updates(
     }
 }
 
+fn sync_recent_finalized_asr_from_state(
+    state: &AppState,
+    recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
+) -> Vec<FinalizedAsrUpdate> {
+    let clips = state
+        .audio_sentence_clips
+        .read()
+        .expect("ASR sentence clip log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    remember_recent_finalized_asr_updates(
+        recent_finalized_asr,
+        clips
+            .into_iter()
+            .filter_map(finalized_asr_update_from_clip)
+            .collect(),
+    )
+}
+
+fn remember_recent_finalized_asr_updates(
+    recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
+    updates: Vec<FinalizedAsrUpdate>,
+) -> Vec<FinalizedAsrUpdate> {
+    updates
+        .into_iter()
+        .filter(|update| remember_recent_finalized_asr_update(recent_finalized_asr, update.clone()))
+        .collect()
+}
+
+fn remember_recent_finalized_asr_update(
+    recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
+    update: FinalizedAsrUpdate,
+) -> bool {
+    if update.text.trim().is_empty() {
+        return false;
+    }
+
+    let signature = finalized_asr_signature(&update);
+    if recent_finalized_asr
+        .iter()
+        .any(|existing| finalized_asr_signature(existing) == signature)
+    {
+        return false;
+    }
+
+    push_limited(recent_finalized_asr, update, RECENT_FINALIZED_ASR_LIMIT);
+    true
+}
+
+fn finalized_asr_update_from_clip(clip: AudioSentenceClipRecord) -> Option<FinalizedAsrUpdate> {
+    let sequence_start = clip
+        .sensation
+        .detail
+        .get("sequence_start")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(clip.sensation.sequence);
+    let sequence_end = clip
+        .sensation
+        .detail
+        .get("sequence_end")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(clip.sensation.sequence);
+    let sentence_index = clip
+        .sensation
+        .detail
+        .get("sentence_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let sentence_count = clip
+        .sensation
+        .detail
+        .get("sentence_count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+
+    Some(FinalizedAsrUpdate {
+        observed_at: clip.sensation.observed_at,
+        text: clip.text,
+        sequence_start,
+        sequence_end,
+        sentence_index,
+        sentence_count,
+    })
+}
+
+fn append_voice_finalized_asr_updates(
+    current: &mut ActiveVoiceGeneration,
+    updates: &[FinalizedAsrUpdate],
+) {
+    for update in updates {
+        current
+            .control
+            .append_prompt(format_voice_finalized_asr_update(update));
+    }
+}
+
 fn start_voice_generation(
     state: &AppState,
     generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     generated_tail: &str,
 ) -> ActiveVoiceGeneration {
@@ -354,7 +513,12 @@ fn start_voice_generation(
         .collect::<Vec<_>>();
     let control = LlmStreamControl::new();
     let request = GenerationRequest {
-        prompt: build_voice_prompt(recent_experiences, recent_thoughts, generated_tail),
+        prompt: build_voice_prompt(
+            recent_experiences,
+            recent_finalized_asr,
+            recent_thoughts,
+            generated_tail,
+        ),
         messages: Vec::new(),
         images: Vec::new(),
         max_tokens: None,
@@ -419,6 +583,7 @@ fn voice_reality_review_prompt() -> &'static str {
 
 fn build_voice_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     generated_tail: &str,
 ) -> String {
@@ -444,6 +609,30 @@ fn build_voice_prompt(
                 experience.observed_at.to_rfc3339(),
                 experience.confidence,
                 prompt_json_string(&experience.what)
+            ));
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Recent finalized ASR transcripts heard directly:\n");
+    if recent_finalized_asr.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for update in recent_finalized_asr {
+            prompt.push_str(&format!(
+                "- observed_at={} sequence_start={} sequence_end={}",
+                update.observed_at.to_rfc3339(),
+                update.sequence_start,
+                update.sequence_end,
+            ));
+            if let Some(sentence_index) = update.sentence_index {
+                prompt.push_str(&format!(" sentence_index={sentence_index}"));
+            }
+            if let Some(sentence_count) = update.sentence_count {
+                prompt.push_str(&format!(" sentence_count={sentence_count}"));
+            }
+            prompt.push_str(&format!(
+                " transcript={}\n",
+                prompt_json_string(&update.text)
             ));
         }
     }
@@ -507,6 +696,25 @@ fn format_voice_sensory_input(
         prompt.push_str(&timeline);
     }
 
+    prompt.push('\n');
+    prompt
+}
+
+fn format_voice_finalized_asr_update(update: &FinalizedAsrUpdate) -> String {
+    let mut prompt = format!(
+        "\n\nREAL-WORLD ASR UPDATE:\nThis is finalized speech heard in the real world.\nobserved_at={}\nsequence_start={}\nsequence_end={}\n",
+        update.observed_at.to_rfc3339(),
+        update.sequence_start,
+        update.sequence_end,
+    );
+    if let Some(sentence_index) = update.sentence_index {
+        prompt.push_str(&format!("sentence_index={sentence_index}\n"));
+    }
+    if let Some(sentence_count) = update.sentence_count {
+        prompt.push_str(&format!("sentence_count={sentence_count}\n"));
+    }
+    prompt.push_str("Transcript:\n");
+    prompt.push_str(&prompt_json_string(update.text.trim()));
     prompt.push('\n');
     prompt
 }
@@ -950,6 +1158,19 @@ fn normalized_signature(text: &str) -> String {
         .join(" ")
 }
 
+fn finalized_asr_signature(update: &FinalizedAsrUpdate) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        update.sequence_start,
+        update.sequence_end,
+        update
+            .sentence_index
+            .map(|index| index.to_string())
+            .unwrap_or_else(|| "_".to_string()),
+        normalized_signature(&update.text)
+    )
+}
+
 fn push_limited<T>(items: &mut VecDeque<T>, item: T, limit: usize) {
     if items.len() == limit {
         items.pop_front();
@@ -1141,10 +1362,78 @@ mod tests {
             confidence: VOICE_OBSERVATION_CONFIDENCE,
         });
 
-        let prompt = build_voice_prompt(&VecDeque::new(), &thoughts, "");
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), &thoughts, "");
 
         assert!(prompt.contains("I am watching the room."));
         assert!(prompt.contains("emoji=\"🤔\""));
+    }
+
+    #[test]
+    fn voice_prompt_includes_recent_finalized_asr_updates() {
+        let observed_at = chrono::Utc::now();
+        let mut asr = VecDeque::new();
+        asr.push_back(FinalizedAsrUpdate {
+            observed_at,
+            text: "hello from the microphone".to_string(),
+            sequence_start: 10,
+            sequence_end: 12,
+            sentence_index: Some(0),
+            sentence_count: Some(1),
+        });
+
+        let prompt = build_voice_prompt(&VecDeque::new(), &asr, &VecDeque::new(), "");
+
+        assert!(prompt.contains("Recent finalized ASR transcripts heard directly:"));
+        assert!(prompt.contains("hello from the microphone"));
+        assert!(prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
+    }
+
+    #[test]
+    fn finalized_asr_update_formats_as_real_world_prompt_append() {
+        let update = FinalizedAsrUpdate {
+            observed_at: chrono::Utc::now(),
+            text: "please look at this".to_string(),
+            sequence_start: 4,
+            sequence_end: 5,
+            sentence_index: Some(1),
+            sentence_count: Some(2),
+        };
+
+        let prompt = format_voice_finalized_asr_update(&update);
+
+        assert!(prompt.contains("REAL-WORLD ASR UPDATE"));
+        assert!(prompt.contains("finalized speech heard in the real world"));
+        assert!(prompt.contains("sequence_start=4"));
+        assert!(prompt.contains("sentence_index=1"));
+        assert!(prompt.contains("\"please look at this\""));
+    }
+
+    #[test]
+    fn finalized_asr_memory_keeps_repeated_text_from_different_sequences() {
+        let observed_at = chrono::Utc::now();
+        let first = FinalizedAsrUpdate {
+            observed_at,
+            text: "again".to_string(),
+            sequence_start: 1,
+            sequence_end: 1,
+            sentence_index: Some(0),
+            sentence_count: Some(1),
+        };
+        let second = FinalizedAsrUpdate {
+            sequence_start: 2,
+            sequence_end: 2,
+            ..first.clone()
+        };
+        let duplicate = first.clone();
+        let mut recent = VecDeque::new();
+
+        assert!(remember_recent_finalized_asr_update(&mut recent, first));
+        assert!(remember_recent_finalized_asr_update(&mut recent, second));
+        assert!(!remember_recent_finalized_asr_update(
+            &mut recent,
+            duplicate
+        ));
+        assert_eq!(recent.len(), 2);
     }
 
     #[test]
@@ -1175,7 +1464,7 @@ mod tests {
             vec![first, second],
             &mut last_signature,
         );
-        let prompt = build_voice_prompt(&recent, &VecDeque::new(), "");
+        let prompt = build_voice_prompt(&recent, &VecDeque::new(), &VecDeque::new(), "");
 
         assert_eq!(recovered.len(), 2);
         assert!(prompt.contains("A person steps into view."));
@@ -1205,7 +1494,7 @@ mod tests {
             vec![experience],
             &mut last_signature,
         );
-        let prompt = build_voice_prompt(&recent, &VecDeque::new(), "");
+        let prompt = build_voice_prompt(&recent, &VecDeque::new(), &VecDeque::new(), "");
 
         assert!(recovered.is_empty());
         assert!(!prompt.contains("The inner voice repeated its own thought."));
@@ -1214,7 +1503,7 @@ mod tests {
 
     #[test]
     fn voice_prompt_explains_emoji_becomes_real_world_face() {
-        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), &VecDeque::new(), "");
 
         assert!(prompt.contains("when you emit an emoji, it becomes your face in the real world"));
         assert!(prompt.contains("Emit emoji often to express how the system feels"));
@@ -1222,7 +1511,7 @@ mod tests {
 
     #[test]
     fn voice_prompt_says_voice_cannot_execute_functions() {
-        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), &VecDeque::new(), "");
 
         assert!(prompt.contains("execute functions"));
         assert!(prompt.contains("do not pretend that you can"));
@@ -1231,7 +1520,7 @@ mod tests {
 
     #[test]
     fn voice_prompt_reinforces_reality_boundaries() {
-        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), "");
+        let prompt = build_voice_prompt(&VecDeque::new(), &VecDeque::new(), &VecDeque::new(), "");
 
         assert!(
             prompt.contains(

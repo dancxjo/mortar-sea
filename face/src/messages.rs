@@ -213,6 +213,11 @@ pub(crate) enum RealTimeExperienceEvent {
         text: String,
         sequence_start: u64,
         sequence_end: u64,
+        is_final: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sentence_index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sentence_count: Option<usize>,
     },
     LlmJobQueued {
         job_id: Uuid,
