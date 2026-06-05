@@ -18,6 +18,28 @@ pub(crate) struct FrameMessage {
     pub(crate) data: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct LocationMessage {
+    pub(crate) kind: String,
+    pub(crate) client_id: String,
+    pub(crate) sensor_id: String,
+    pub(crate) faculty: String,
+    pub(crate) sequence: u64,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) latitude: f64,
+    pub(crate) longitude: f64,
+    #[serde(default)]
+    pub(crate) accuracy_meters: Option<f64>,
+    #[serde(default)]
+    pub(crate) altitude_meters: Option<f64>,
+    #[serde(default)]
+    pub(crate) altitude_accuracy_meters: Option<f64>,
+    #[serde(default)]
+    pub(crate) heading_degrees: Option<f64>,
+    #[serde(default)]
+    pub(crate) speed_meters_per_second: Option<f64>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct SensationRecord {
     pub(crate) id: Uuid,
@@ -80,6 +102,8 @@ pub(crate) struct VoiceObservation {
     pub(crate) id: Uuid,
     pub(crate) observed_at: DateTime<Utc>,
     pub(crate) text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) emoji: Option<String>,
     pub(crate) experience_ids: Vec<Uuid>,
     pub(crate) interrupted_generation_id: Option<Uuid>,
     pub(crate) confidence: f32,

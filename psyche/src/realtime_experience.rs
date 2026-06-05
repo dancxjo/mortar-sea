@@ -129,7 +129,9 @@ impl<E: LlmEngine> Wit for RealTimeExperienceWit<E> {
                 match event {
                     LlmEvent::Token { text } => generated.push_str(&text),
                     LlmEvent::Completed => return parse_experiences(&generated, &window),
-                    LlmEvent::Cancelled | LlmEvent::Error { .. } => return Vec::new(),
+                    LlmEvent::MaxTokens { .. } | LlmEvent::Cancelled | LlmEvent::Error { .. } => {
+                        return Vec::new();
+                    }
                 }
             }
         }

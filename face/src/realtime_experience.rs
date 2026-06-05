@@ -21,6 +21,7 @@ const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
 const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
 const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 12;
 const CONTEXT_FRAME_MAX_TOKENS: usize = 220;
+const REALTIME_EXPERIENCE_MAX_TOKENS: usize = 1024;
 const MAX_CONTEXT_FRAME_TEXT_CHARS: usize = 140;
 const COMPACT_CONTEXT_ITEM_LIMIT: usize = 2;
 
@@ -133,7 +134,7 @@ async fn stream_generation(
                     ChatMessage::new("user", prompt),
                 ],
                 images: Vec::new(),
-                max_tokens: Some(256),
+                max_tokens: Some(REALTIME_EXPERIENCE_MAX_TOKENS),
                 stop: llm_stop_markers(),
             },
             move |text| {
@@ -875,7 +876,22 @@ fn fallback_impression_for_record(record: &SensationRecord) -> String {
     match record.kind.as_str() {
         "vision.face_crop" => fallback_face_impression_for_record(record),
         "vision.frame" => format!("I'm looking with my eye ({}).", record.source.sensor_id),
+        "location.fix" => fallback_location_impression_for_record(record),
         _ => format!("I sense {} from {}.", record.kind, record.source.sensor_id),
+    }
+}
+
+fn fallback_location_impression_for_record(record: &SensationRecord) -> String {
+    let lat = record.detail.get("lat").and_then(serde_json::Value::as_f64);
+    let lon = record.detail.get("lon").and_then(serde_json::Value::as_f64);
+    match (lat, lon) {
+        (Some(lat), Some(lon)) => format!(
+            "My geolocation is approximately ({lat:.5}, {lon:.5}). (This does not necessarily indicate movement or new information.)"
+        ),
+        _ => format!(
+            "My geolocation source ({}) reported a location fix.",
+            record.source.sensor_id
+        ),
     }
 }
 

@@ -235,7 +235,7 @@ fn voice_system_prompt() -> &'static str {
      You do not speak aloud, address the human, use tools, or write JSON. \
      Write from the embodied system's own perspective using I, me, and my. \
      Preserve uncertainty and keep the thought short. \
-     Take exactly one turn of at most one sentence. \
+     Take exactly one turn of at most one sentence, then append exactly one emoji that matches the thought. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM. \
      Do not write stop markers."
 }
@@ -274,15 +274,20 @@ fn build_voice_prompt(
     } else {
         for thought in recent_thoughts {
             prompt.push_str(&format!(
-                "- observed_at={} text={}\n",
+                "- observed_at={} text={} emoji={}\n",
                 thought.observed_at.to_rfc3339(),
-                prompt_json_string(&thought.text)
+                prompt_json_string(&thought.text),
+                thought
+                    .emoji
+                    .as_deref()
+                    .map(prompt_json_string)
+                    .unwrap_or_else(|| "null".to_string())
             ));
         }
     }
     prompt.push_str(
         "\nContinue thinking silently for exactly one turn. \
-         Write at most one concise present-tense sentence from my embodied first-person perspective. \
+         Write at most one concise present-tense sentence from my embodied first-person perspective, followed by one emoji. \
          If the situation is unclear, make that one sentence about what I am uncertain about. \
          If live Experiences are appended while this turn is running, integrate them without addressing the prompt.",
     );
@@ -327,16 +332,16 @@ fn emit_voice_sentence(
     interrupted_generation_id: Option<Uuid>,
     recent_thoughts: &mut VecDeque<VoiceObservation>,
 ) {
-    let text = clean_voice_sentence(&sentence);
-    if text.is_empty() {
+    let Some(thought) = parse_voice_thought(&sentence) else {
         return;
-    }
+    };
 
     let observed_at = chrono::Utc::now();
     let observation = VoiceObservation {
         id: Uuid::new_v4(),
         observed_at,
-        text: text.clone(),
+        text: thought.text.clone(),
+        emoji: thought.emoji.clone(),
         experience_ids: experience_ids.to_vec(),
         interrupted_generation_id,
         confidence: VOICE_OBSERVATION_CONFIDENCE,
@@ -371,6 +376,7 @@ fn record_voice_sensation_and_impression(
 ) {
     let detail = json!({
         "text": observation.text,
+        "emoji": observation.emoji.as_deref(),
         "observation_id": observation.id,
         "voice_generation_id": generation_id,
         "experience_ids": observation.experience_ids,
@@ -469,14 +475,93 @@ fn is_only_voice_feedback(state: &AppState, experience: &ExperienceRecord) -> bo
         .all(|id| voice_ids.contains(id))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct VoiceThought {
+    text: String,
+    emoji: Option<String>,
+}
+
+fn parse_voice_thought(sentence: &str) -> Option<VoiceThought> {
+    let normalized = normalize_voice_text(sentence);
+    let (text_without_emoji, emoji) = split_trailing_emoji(&normalized);
+    let text = first_sentence(text_without_emoji.trim()).unwrap_or_else(|| {
+        text_without_emoji
+            .trim()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(VoiceThought { text, emoji })
+}
+
+#[cfg(test)]
 fn clean_voice_sentence(sentence: &str) -> String {
-    let text = sentence
-        .trim()
+    parse_voice_thought(sentence)
+        .map(|thought| thought.text)
+        .unwrap_or_default()
+}
+
+fn normalize_voice_text(text: &str) -> String {
+    text.trim()
         .trim_matches('"')
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ");
-    first_sentence(&text).unwrap_or(text)
+        .join(" ")
+}
+
+fn split_trailing_emoji(text: &str) -> (&str, Option<String>) {
+    let text = text.trim_end();
+    let mut emoji_start = None;
+    let mut saw_emoji_base = false;
+
+    for (index, ch) in text.char_indices().rev() {
+        if is_emoji_modifier(ch) {
+            emoji_start = Some(index);
+            continue;
+        }
+
+        if is_emoji_base(ch) {
+            emoji_start = Some(index);
+            saw_emoji_base = true;
+            continue;
+        }
+
+        if ch.is_whitespace() && saw_emoji_base {
+            break;
+        }
+
+        return (text, None);
+    }
+
+    let Some(start) = emoji_start else {
+        return (text, None);
+    };
+
+    let emoji = text[start..].trim().to_string();
+    if emoji.is_empty() {
+        return (text, None);
+    }
+
+    (text[..start].trim_end(), Some(emoji))
+}
+
+fn is_emoji_base(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF
+    )
+}
+
+fn is_emoji_modifier(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1F3FB..=0x1F3FF | 0xFE0E..=0xFE0F | 0x200D | 0x20E3
+    )
 }
 
 fn first_sentence(text: &str) -> Option<String> {
@@ -552,7 +637,15 @@ impl VoiceSentenceSegmenter {
 
     fn finish(mut self) -> Vec<String> {
         if !self.buffer.trim().is_empty() {
-            self.pending.push_back(self.buffer.trim().to_string());
+            let buffer = self.buffer.trim().to_string();
+            if self.pending.len() == 1 && split_trailing_emoji(&buffer).1.is_some() {
+                if let Some(sentence) = self.pending.back_mut() {
+                    sentence.push(' ');
+                    sentence.push_str(&buffer);
+                }
+            } else {
+                self.pending.push_back(buffer);
+            }
         }
         self.pending.into_iter().collect()
     }
@@ -639,6 +732,28 @@ mod tests {
         assert_eq!(
             clean_voice_sentence("I see the room. I wonder about the sound."),
             "I see the room."
+        );
+    }
+
+    #[test]
+    fn voice_thought_parser_splits_trailing_emoji_from_text() {
+        assert_eq!(
+            parse_voice_thought("I am watching the room. 🤔"),
+            Some(VoiceThought {
+                text: "I am watching the room.".to_string(),
+                emoji: Some("🤔".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn sentence_segmenter_keeps_final_emoji_with_last_sentence() {
+        let mut segmenter = VoiceSentenceSegmenter::new();
+        assert!(segmenter.push_str("I am watching the room. ").is_empty());
+        assert!(segmenter.push_str("🤔").is_empty());
+        assert_eq!(
+            segmenter.finish(),
+            vec!["I am watching the room. 🤔".to_string()]
         );
     }
 }

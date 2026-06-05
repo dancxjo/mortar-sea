@@ -172,6 +172,9 @@ fn generate_response(
                     response.push_str(&text);
                 }
                 LlmEvent::Completed => return Ok(response),
+                LlmEvent::MaxTokens { generated_tokens } => {
+                    bail!("generation hit max token cap after {generated_tokens} tokens");
+                }
                 LlmEvent::Cancelled => bail!("generation was cancelled"),
                 LlmEvent::Error { message } => bail!(message),
             }

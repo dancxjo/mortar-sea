@@ -182,6 +182,9 @@ impl LlmEngine for LlamaCppEngine {
             .spawn(move || {
                 let event = match worker.run(&sender) {
                     Ok(GenerationOutcome::Completed) => LlmEvent::Completed,
+                    Ok(GenerationOutcome::MaxTokens { generated_tokens }) => {
+                        LlmEvent::MaxTokens { generated_tokens }
+                    }
                     Ok(GenerationOutcome::Cancelled) => LlmEvent::Cancelled,
                     Err(error) => LlmEvent::Error {
                         message: error.to_string(),
@@ -284,6 +287,7 @@ struct LlamaGenerationWorker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenerationOutcome {
     Completed,
+    MaxTokens { generated_tokens: usize },
     Cancelled,
 }
 
@@ -510,6 +514,19 @@ impl LlamaGenerationWorker {
             commit_sampled_token(&mut ctx, &mut batch, token, &mut n_cur)?;
             logit_slot = 0;
             generated_tokens += 1;
+        }
+
+        if self
+            .request
+            .max_tokens
+            .is_some_and(|max_tokens| generated_tokens >= max_tokens)
+        {
+            debug!(
+                generation_id = %self.id.0,
+                generated_tokens,
+                "llama.cpp generation reached max token cap"
+            );
+            return Ok(GenerationOutcome::MaxTokens { generated_tokens });
         }
 
         let trailing = stop_detector.finish();
@@ -1021,7 +1038,10 @@ fn build_sampler(temperature: f32, top_p: f32, top_k: i32) -> LlamaSampler {
 fn is_terminal_event(event: &LlmEvent) -> bool {
     matches!(
         event,
-        LlmEvent::Completed | LlmEvent::Cancelled | LlmEvent::Error { .. }
+        LlmEvent::Completed
+            | LlmEvent::MaxTokens { .. }
+            | LlmEvent::Cancelled
+            | LlmEvent::Error { .. }
     )
 }
 

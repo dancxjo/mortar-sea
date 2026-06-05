@@ -53,6 +53,7 @@ impl ChatMessage {
 pub enum LlmEvent {
     Token { text: String },
     Completed,
+    MaxTokens { generated_tokens: usize },
     Cancelled,
     Error { message: String },
 }

@@ -41,6 +41,9 @@ fn main() -> anyhow::Result<()> {
                     println!();
                     return Ok(());
                 }
+                LlmEvent::MaxTokens { generated_tokens } => {
+                    anyhow::bail!("hit max token cap after {generated_tokens} tokens")
+                }
                 LlmEvent::Cancelled => anyhow::bail!("cancelled"),
                 LlmEvent::Error { message } => anyhow::bail!(message),
             }

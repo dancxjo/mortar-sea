@@ -42,7 +42,7 @@
                 <pre class="response-stream" x-text="experienceResponse || 'Waiting for streamed response…'"></pre>
               </details>
             </div>
-            <div class="emoji-face" aria-label="thinking face">🤔</div>
+            <div class="emoji-face" x-text="faceEmoji" x-bind:aria-label="`face emoji ${faceEmoji}`"></div>
           </div>
         </div>
 
@@ -129,6 +129,18 @@
                 <div><dt>dropped</dt><dd x-text="vision.dropped"></dd></div>
               </dl>
               <p class="error" x-text="vision.lastError || 'ready'"></p>
+            </article>
+            <article class="faculty">
+              <header>
+                <strong>GPS channel</strong>
+                <span class="status" x-bind:data-status="location.status" x-text="location.status"></span>
+              </header>
+              <dl>
+                <div><dt>sent</dt><dd x-text="location.sent"></dd></div>
+                <div><dt>acked</dt><dd x-text="location.acked"></dd></div>
+                <div><dt>dropped</dt><dd x-text="location.dropped"></dd></div>
+              </dl>
+              <p class="error" x-text="location.lastError || location.lastFix || 'ready'"></p>
             </article>
           </div>
         </aside>

@@ -22,8 +22,9 @@ use tracing::{error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::face_detection::{self, FaceDetector};
-use crate::ingestion::{accept_frame, sequence_from_raw_json};
+use crate::ingestion::{accept_frame, accept_location, sequence_from_raw_json};
 use crate::llm_scheduler::LlmScheduler;
+use crate::location;
 use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
     AckMessage, ErrorMessage, ExperienceRecord, RawFaceCrop, RawVisionFrame,
@@ -33,6 +34,7 @@ use crate::vision;
 use crate::voice;
 
 pub(crate) const VISION_CHANNEL: &str = "vision";
+pub(crate) const LOCATION_CHANNEL: &str = "location";
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
 pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
 pub(crate) const MAX_RECORDED_FACE_CROPS: usize = 24;
@@ -124,6 +126,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/api/sensations", get(recent_sensations))
         .route("/ws/vision", get(vision_ws))
+        .route("/ws/location", get(location_ws))
         .route("/ws/realtime-experience", get(realtime_experience_ws))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
@@ -166,6 +169,11 @@ async fn recent_sensations(State(state): State<AppState>) -> Json<Vec<SensationR
 
 async fn vision_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_vision_socket(socket, state))
+        .into_response()
+}
+
+async fn location_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_location_socket(socket, state))
         .into_response()
 }
 
@@ -239,6 +247,70 @@ async fn handle_vision_socket(socket: WebSocket, state: AppState) {
     }
 
     info!(channel = VISION_CHANNEL, "vision socket disconnected");
+}
+
+async fn handle_location_socket(socket: WebSocket, state: AppState) {
+    let (mut sender, mut receiver) = socket.split();
+    info!(channel = LOCATION_CHANNEL, "location socket connected");
+
+    while let Some(message) = receiver.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(err) => {
+                warn!(channel = LOCATION_CHANNEL, %err, "websocket receive error");
+                break;
+            }
+        };
+
+        let Message::Text(text) = message else {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+            continue;
+        };
+
+        let sequence = sequence_from_raw_json(&text);
+        match accept_location(LOCATION_CHANNEL, &text, &state.sensations) {
+            Ok(record) => {
+                let ack = AckMessage {
+                    r#type: "ack",
+                    faculty: LOCATION_CHANNEL.to_string(),
+                    sequence: record.sequence,
+                    observed_at: record.observed_at,
+                };
+
+                trace!(
+                    channel = LOCATION_CHANNEL,
+                    sequence = record.sequence,
+                    detail = %record.detail,
+                    "accepted location.fix sensation"
+                );
+
+                if let Err(err) = send_json(&mut sender, &ack).await {
+                    warn!(channel = LOCATION_CHANNEL, %err, "failed to send acknowledgement");
+                    break;
+                }
+
+                location::record_location_impression(&state, record);
+                crate::realtime_experience::spawn_trace(state.clone());
+            }
+            Err(error) => {
+                let error = ErrorMessage {
+                    r#type: "error",
+                    faculty: LOCATION_CHANNEL.to_string(),
+                    sequence,
+                    error,
+                };
+
+                if let Err(err) = send_json(&mut sender, &error).await {
+                    warn!(channel = LOCATION_CHANNEL, %err, "failed to send validation error");
+                    break;
+                }
+            }
+        }
+    }
+
+    info!(channel = LOCATION_CHANNEL, "location socket disconnected");
 }
 
 async fn realtime_experience_ws(

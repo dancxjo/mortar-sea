@@ -475,6 +475,18 @@ fn run_generation(
                     });
                     bail!("LLM job {} was cancelled", kind.as_str());
                 }
+                LlmEvent::MaxTokens { generated_tokens } => {
+                    let error = format!(
+                        "LLM job hit max token cap after {generated_tokens} tokens before completion"
+                    );
+                    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+                        job_id: id,
+                        job_kind: kind.as_str().to_string(),
+                        observed_at: chrono::Utc::now(),
+                        error: error.clone(),
+                    });
+                    bail!(error);
+                }
                 LlmEvent::Error { message } => {
                     let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
                         job_id: id,

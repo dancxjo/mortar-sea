@@ -3,6 +3,7 @@ window.faceApp = function faceApp() {
     cameraMessage: 'Camera idle',
     clientId: 'face-browser',
     sensorId: 'camera.default',
+    locationSensorId: 'gps.default',
     vision: {
       socket: null,
       status: 'disconnected',
@@ -12,6 +13,18 @@ window.faceApp = function faceApp() {
       dropped: 0,
       lastError: '',
     },
+    location: {
+      socket: null,
+      status: 'disconnected',
+      pending: false,
+      sent: 0,
+      acked: 0,
+      dropped: 0,
+      lastError: '',
+      lastFix: '',
+      pendingPosition: null,
+      watchId: null,
+    },
     fps: 3,
     experiencePrompt: '',
     experienceResponse: '',
@@ -19,6 +32,7 @@ window.faceApp = function faceApp() {
     experienceStatus: 'disconnected',
     activeExperienceGenerationId: null,
     activeVoiceGenerationId: null,
+    faceEmoji: '🤔',
     voiceResponse: '',
     voiceHasTokens: false,
     voiceStatus: 'waiting',
@@ -28,6 +42,7 @@ window.faceApp = function faceApp() {
     quality: 0.45,
     running: false,
     sequence: 0,
+    locationSequence: 0,
     stream: null,
     targetWidth: 160,
     timer: null,
@@ -51,6 +66,7 @@ window.faceApp = function faceApp() {
         this.running = true;
         this.cameraMessage = 'Camera running';
         this.syncVision();
+        this.startLocation();
         this.scheduleCapture();
       } catch (error) {
         this.cameraMessage = error.message || 'Camera permission failed';
@@ -61,6 +77,7 @@ window.faceApp = function faceApp() {
       this.running = false;
       window.clearTimeout(this.timer);
       this.disconnectVision();
+      this.stopLocation();
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
@@ -109,6 +126,9 @@ window.faceApp = function faceApp() {
         if (message.type === 'voice_observation') {
           this.activeVoiceGenerationId = message.generation_id;
           this.voiceResponse = message.observation?.text || this.voiceResponse;
+          if (message.observation?.emoji) {
+            this.faceEmoji = message.observation.emoji;
+          }
           this.voiceHasTokens = Boolean(this.voiceResponse);
           this.voiceStatus = 'waiting';
           return;
@@ -330,6 +350,105 @@ window.faceApp = function faceApp() {
       });
     },
 
+    startLocation() {
+      if (!('geolocation' in navigator)) {
+        this.location.status = 'error';
+        this.location.lastError = 'geolocation unavailable';
+        return;
+      }
+      this.syncLocation();
+      if (this.location.watchId !== null) return;
+
+      this.location.status = 'connecting';
+      this.location.lastError = '';
+      this.location.watchId = navigator.geolocation.watchPosition(
+        (position) => this.sendLocationFix(position),
+        (error) => {
+          this.location.status = 'error';
+          this.location.pending = false;
+          this.location.lastError = error.message || 'geolocation permission failed';
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 5000,
+          timeout: 10000,
+        },
+      );
+    },
+
+    stopLocation() {
+      if (this.location.watchId !== null && 'geolocation' in navigator) {
+        navigator.geolocation.clearWatch(this.location.watchId);
+      }
+      this.location.watchId = null;
+      this.location.pendingPosition = null;
+      this.location.pending = false;
+      this.disconnectLocation();
+    },
+
+    syncLocation() {
+      if (!this.running) {
+        this.disconnectLocation();
+        return;
+      }
+      if (this.location.socket && this.location.socket.readyState <= WebSocket.OPEN) return;
+      this.connectLocation();
+    },
+
+    connectLocation() {
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws/location`);
+      this.location.socket = socket;
+      this.location.status = 'connecting';
+      this.location.lastError = '';
+
+      socket.addEventListener('open', () => {
+        this.location.status = 'connected';
+        if (this.location.pendingPosition) {
+          const pendingPosition = this.location.pendingPosition;
+          this.location.pendingPosition = null;
+          this.sendLocationFix(pendingPosition);
+        }
+      });
+
+      socket.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'ack') {
+          this.location.pending = false;
+          this.location.acked += 1;
+          this.location.lastError = '';
+          return;
+        }
+        if (message.type === 'error') {
+          this.location.pending = false;
+          this.location.lastError = message.error;
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        this.location.status = 'disconnected';
+        this.location.pending = false;
+        this.location.socket = null;
+        if (this.running && this.location.watchId !== null) {
+          window.setTimeout(() => this.connectLocation(), 1000);
+        }
+      });
+
+      socket.addEventListener('error', () => {
+        this.location.status = 'error';
+        this.location.lastError = 'socket error';
+      });
+    },
+
+    disconnectLocation() {
+      this.location.pending = false;
+      if (this.location.socket) {
+        this.location.socket.close();
+        this.location.socket = null;
+      }
+      this.location.status = 'disconnected';
+    },
+
     disconnectVision() {
       this.vision.pending = false;
       if (this.vision.socket) {
@@ -379,6 +498,48 @@ window.faceApp = function faceApp() {
       this.vision.socket.send(JSON.stringify(frame));
       this.vision.pending = true;
       this.vision.sent += 1;
+    },
+
+    sendLocationFix(position) {
+      this.syncLocation();
+      const coords = position.coords;
+      this.location.lastFix = this.formatCoordinates(coords.latitude, coords.longitude);
+
+      if (!this.location.socket || this.location.socket.readyState !== WebSocket.OPEN) {
+        this.location.pendingPosition = position;
+        return;
+      }
+      if (this.location.pending) {
+        this.location.dropped += 1;
+        return;
+      }
+
+      const sequence = ++this.locationSequence;
+      const occurredAt = new Date(position.timestamp || Date.now()).toISOString();
+      const fix = {
+        kind: 'location.fix',
+        client_id: this.clientId,
+        sensor_id: this.locationSensorId,
+        faculty: 'location',
+        sequence,
+        occurred_at: occurredAt,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy_meters: coords.accuracy,
+        altitude_meters: coords.altitude,
+        altitude_accuracy_meters: coords.altitudeAccuracy,
+        heading_degrees: coords.heading,
+        speed_meters_per_second: coords.speed,
+      };
+
+      this.location.socket.send(JSON.stringify(fix));
+      this.location.pending = true;
+      this.location.sent += 1;
+    },
+
+    formatCoordinates(latitude, longitude) {
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return '-';
+      return `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`;
     },
   };
 };
