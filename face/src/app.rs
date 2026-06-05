@@ -27,17 +27,20 @@ use crate::llm_scheduler::{LlmScheduler, LlmSchedulerConfig};
 use crate::location;
 use crate::memory::{FaceMemory, FaceMemoryConfig, MemoryBackend};
 use crate::messages::{
-    AckMessage, ErrorMessage, ExperienceRecord, RawFaceCrop, RawVisionFrame,
-    RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord, VoiceObservation,
+    AckMessage, AudioSentenceClipRecord, ErrorMessage, ExperienceRecord, RawFaceCrop,
+    RawVisionFrame, RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord,
+    VoiceObservation,
 };
 use crate::vision;
 use crate::voice;
 
 pub(crate) const VISION_CHANNEL: &str = "vision";
 pub(crate) const LOCATION_CHANNEL: &str = "location";
+pub(crate) const ASR_CHANNEL: &str = "asr";
 pub(crate) const MAX_RECORDED_SENSATIONS: usize = 200;
 pub(crate) const MAX_RECORDED_RAW_VISION_FRAMES: usize = 6;
 pub(crate) const MAX_RECORDED_FACE_CROPS: usize = 24;
+pub(crate) const MAX_RECORDED_AUDIO_SENTENCE_CLIPS: usize = 80;
 pub(crate) const MAX_RECORDED_VISION_IMPRESSIONS: usize = 80;
 pub(crate) const MAX_RECORDED_EXPERIENCES: usize = 80;
 pub(crate) const MAX_RECORDED_VOICE_OBSERVATIONS: usize = 80;
@@ -48,6 +51,7 @@ pub(crate) struct AppState {
     pub(crate) sensations: Arc<RwLock<VecDeque<SensationRecord>>>,
     pub(crate) raw_vision_frames: Arc<RwLock<VecDeque<RawVisionFrame>>>,
     pub(crate) raw_face_crops: Arc<RwLock<VecDeque<RawFaceCrop>>>,
+    pub(crate) audio_sentence_clips: Arc<RwLock<VecDeque<AudioSentenceClipRecord>>>,
     pub(crate) vision_impressions: Arc<RwLock<VecDeque<VisionImpressionRecord>>>,
     pub(crate) experiences: Arc<RwLock<VecDeque<ExperienceRecord>>>,
     pub(crate) voice_observations: Arc<RwLock<VecDeque<VoiceObservation>>>,
@@ -64,6 +68,7 @@ pub(crate) struct AppState {
     pub(crate) realtime_experience_events: broadcast::Sender<RealTimeExperienceEvent>,
     pub(crate) realtime_experience_active: Arc<AtomicBool>,
     pub(crate) realtime_experience_pending: Arc<AtomicBool>,
+    pub(crate) asr_backend: Option<crate::asr::AsrBackend>,
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -97,6 +102,7 @@ pub async fn run() -> anyhow::Result<()> {
     info!("initializing face analyzer");
     let face_detector = Arc::new(FaceDetector::new(models.face)?);
     info!("face analyzer ready");
+    let asr_backend = crate::asr::initialize_backend()?;
     let face_memory_config = FaceMemoryConfig::from_env()?;
     let face_memory = FaceMemory::from_config(&face_memory_config)?;
     match face_memory_config.backend {
@@ -114,6 +120,7 @@ pub async fn run() -> anyhow::Result<()> {
         sensations: Arc::new(RwLock::new(VecDeque::new())),
         raw_vision_frames: Arc::new(RwLock::new(VecDeque::new())),
         raw_face_crops: Arc::new(RwLock::new(VecDeque::new())),
+        audio_sentence_clips: Arc::new(RwLock::new(VecDeque::new())),
         vision_impressions: Arc::new(RwLock::new(VecDeque::new())),
         experiences: Arc::new(RwLock::new(VecDeque::new())),
         voice_observations: Arc::new(RwLock::new(VecDeque::new())),
@@ -130,6 +137,7 @@ pub async fn run() -> anyhow::Result<()> {
         realtime_experience_events,
         realtime_experience_active: Arc::new(AtomicBool::new(false)),
         realtime_experience_pending: Arc::new(AtomicBool::new(false)),
+        asr_backend,
     };
     voice::spawn_voice(state.clone());
 
@@ -137,8 +145,10 @@ pub async fn run() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/sensations", get(recent_sensations))
+        .route("/api/asr-sentences", get(recent_asr_sentences))
         .route("/ws/vision", get(vision_ws))
         .route("/ws/location", get(location_ws))
+        .route("/ws/asr", get(asr_ws))
         .route("/ws/realtime-experience", get(realtime_experience_ws))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
@@ -186,6 +196,17 @@ async fn recent_sensations(State(state): State<AppState>) -> Json<Vec<SensationR
     Json(records)
 }
 
+async fn recent_asr_sentences(State(state): State<AppState>) -> Json<Vec<AudioSentenceClipRecord>> {
+    let records = state
+        .audio_sentence_clips
+        .read()
+        .expect("ASR sentence clip log lock")
+        .iter()
+        .cloned()
+        .collect();
+    Json(records)
+}
+
 async fn vision_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_vision_socket(socket, state))
         .into_response()
@@ -193,6 +214,11 @@ async fn vision_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl 
 
 async fn location_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_location_socket(socket, state))
+        .into_response()
+}
+
+async fn asr_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| crate::asr::handle_asr_socket(socket, state))
         .into_response()
 }
 

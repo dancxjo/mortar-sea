@@ -9,8 +9,8 @@ use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
 use crate::models::manifest::{
-    DEFAULT_FACE_MODEL_ID, ModelAsset, ModelBundle, ModelKind, bundle_primary_asset,
-    bundle_required_assets, find_asset, find_bundle,
+    DEFAULT_ASR_MODEL_ID, DEFAULT_FACE_MODEL_ID, ModelAsset, ModelBundle, ModelKind,
+    bundle_primary_asset, bundle_required_assets, find_asset, find_bundle,
 };
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
@@ -73,6 +73,25 @@ pub fn ensure_face_models_available() -> Result<FaceModelPaths> {
     face_model_paths()
 }
 
+pub fn ensure_asr_whisper_model_available() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("MORTAR_ASR_WHISPER_MODEL") {
+        let path = PathBuf::from(path);
+        if is_non_empty_file(&path) {
+            return Ok(path);
+        }
+        anyhow::bail!(
+            "MORTAR_ASR_WHISPER_MODEL points to a missing or empty file: {}",
+            path.display()
+        );
+    }
+
+    let bundle =
+        find_bundle(DEFAULT_ASR_MODEL_ID).context("default ASR model bundle is not registered")?;
+    ensure_bundle_available(bundle)?;
+    let primary = bundle_primary_asset(bundle)?;
+    Ok(asset_path(&resolve_mortar_home()?, primary))
+}
+
 pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
     Ok(RuntimeModelPaths {
         llm: ensure_selected_llm_available()?,
@@ -106,6 +125,10 @@ fn fetch_all_runtime_bundles(force: bool) -> Result<()> {
     fetch_bundle(
         find_bundle(DEFAULT_FACE_MODEL_ID)
             .context("default face model bundle is not registered")?,
+        force,
+    )?;
+    fetch_bundle(
+        find_bundle(DEFAULT_ASR_MODEL_ID).context("default ASR model bundle is not registered")?,
         force,
     )?;
     Ok(())

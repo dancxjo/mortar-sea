@@ -2,6 +2,7 @@
 pub enum ModelKind {
     Llm,
     Face,
+    Asr,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +28,7 @@ pub struct ModelBundle {
 
 pub const DEFAULT_LLM_MODEL_ID: &str = "gemma-4-e4b-it-q4-k-m";
 pub const DEFAULT_FACE_MODEL_ID: &str = "face-insightface-buffalo-l";
+pub const DEFAULT_ASR_MODEL_ID: &str = "whisper-base-en";
 
 pub const MODEL_ASSETS: &[ModelAsset] = &[
     ModelAsset {
@@ -83,6 +85,15 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         license: None,
         source: Some("https://huggingface.co/public-data/insightface"),
     },
+    ModelAsset {
+        id: "whisper-base-en",
+        filename: "ggml-base.en.bin",
+        relative_path: "models/whisper/ggml-base.en.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        sha256: None,
+        license: Some("MIT"),
+        source: Some("https://huggingface.co/ggerganov/whisper.cpp"),
+    },
 ];
 
 pub const MODEL_BUNDLES: &[ModelBundle] = &[
@@ -113,6 +124,14 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
             "face-buffalo-l-genderage",
         ],
         aliases: &["face", "faces", "insightface", "buffalo-l"],
+    },
+    ModelBundle {
+        id: DEFAULT_ASR_MODEL_ID,
+        display_name: "Whisper Base English",
+        kind: ModelKind::Asr,
+        primary_asset_id: "whisper-base-en",
+        required_asset_ids: &["whisper-base-en"],
+        aliases: &["asr", "whisper", "whisper-base", "base-en"],
     },
 ];
 

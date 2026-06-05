@@ -40,6 +40,21 @@ pub(crate) struct LocationMessage {
     pub(crate) speed_meters_per_second: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct AudioClipMessage {
+    pub(crate) kind: String,
+    pub(crate) client_id: String,
+    pub(crate) sensor_id: String,
+    pub(crate) faculty: String,
+    pub(crate) sequence: u64,
+    pub(crate) occurred_at: DateTime<Utc>,
+    pub(crate) duration_ms: u64,
+    pub(crate) sample_rate_hz: u32,
+    pub(crate) channels: u16,
+    pub(crate) sample_format: String,
+    pub(crate) data: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct SensationRecord {
     pub(crate) id: Uuid,
@@ -70,6 +85,18 @@ pub(crate) struct RawFaceCrop {
     pub(crate) face_index: usize,
     pub(crate) data: String,
     pub(crate) embedding: Vec<f32>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct AudioSentenceClipRecord {
+    pub(crate) sensation: SensationRecord,
+    pub(crate) text: String,
+    pub(crate) sample_rate_hz: u32,
+    pub(crate) channels: u16,
+    pub(crate) sample_format: String,
+    pub(crate) start_ms: u64,
+    pub(crate) end_ms: u64,
+    pub(crate) data: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -180,6 +207,12 @@ pub(crate) enum RealTimeExperienceEvent {
     },
     VoiceResponseDone {
         generation_id: Uuid,
+    },
+    AsrTranscript {
+        observed_at: DateTime<Utc>,
+        text: String,
+        sequence_start: u64,
+        sequence_end: u64,
     },
     LlmJobQueued {
         job_id: Uuid,

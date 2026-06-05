@@ -190,6 +190,23 @@ fn print_status() -> Result<()> {
             println!("{} cargo run models fetch", "fetch with:".dimmed());
         }
     }
+
+    println!();
+    println!("{}", "ASR".bold());
+    for bundle in MODEL_BUNDLES
+        .iter()
+        .filter(|bundle| bundle.kind == ModelKind::Asr)
+    {
+        let state = if bundle_present(bundle)? {
+            "present".green().to_string()
+        } else {
+            "missing".red().to_string()
+        };
+        println!("{} {} ({})", state, bundle.display_name.bold(), bundle.id);
+        if !bundle_present(bundle)? {
+            println!("{} cargo run models fetch asr", "fetch with:".dimmed());
+        }
+    }
     Ok(())
 }
 
@@ -207,5 +224,6 @@ fn model_kind_label(kind: ModelKind) -> &'static str {
     match kind {
         ModelKind::Llm => "llm",
         ModelKind::Face => "face",
+        ModelKind::Asr => "asr",
     }
 }

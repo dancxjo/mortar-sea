@@ -25,6 +25,19 @@ window.faceApp = function faceApp() {
       pendingPosition: null,
       watchId: null,
     },
+    asr: {
+      socket: null,
+      status: 'disconnected',
+      sent: 0,
+      acked: 0,
+      dropped: 0,
+      lastError: '',
+      lastTranscript: '',
+      sampleRate: 0,
+      clipMs: 500,
+      chunks: [],
+      queuedSamples: 0,
+    },
     fps: 3,
     experiencePrompt: '',
     experienceResponse: '',
@@ -43,7 +56,12 @@ window.faceApp = function faceApp() {
     running: false,
     sequence: 0,
     locationSequence: 0,
+    asrSequence: 0,
     stream: null,
+    audioContext: null,
+    audioSource: null,
+    audioProcessor: null,
+    audioSink: null,
     targetWidth: 160,
     timer: null,
 
@@ -59,7 +77,11 @@ window.faceApp = function faceApp() {
             width: { ideal: this.targetWidth },
             facingMode: 'user',
           },
-          audio: false,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
         });
         this.$refs.video.srcObject = this.stream;
         await this.$refs.video.play();
@@ -67,6 +89,7 @@ window.faceApp = function faceApp() {
         this.cameraMessage = 'Camera running';
         this.syncVision();
         this.startLocation();
+        await this.startAsr();
         this.scheduleCapture();
       } catch (error) {
         this.cameraMessage = error.message || 'Camera permission failed';
@@ -78,6 +101,7 @@ window.faceApp = function faceApp() {
       window.clearTimeout(this.timer);
       this.disconnectVision();
       this.stopLocation();
+      this.stopAsr();
       if (this.stream) {
         this.stream.getTracks().forEach((track) => track.stop());
         this.stream = null;
@@ -140,6 +164,10 @@ window.faceApp = function faceApp() {
           if (message.emoji) {
             this.faceEmoji = message.emoji;
           }
+          return;
+        }
+        if (message.type === 'asr_transcript') {
+          this.asr.lastTranscript = message.text || '';
           return;
         }
         if (message.type === 'prompt') {
@@ -473,6 +501,180 @@ window.faceApp = function faceApp() {
         this.vision.socket = null;
       }
       this.vision.status = 'disconnected';
+    },
+
+    async startAsr() {
+      this.syncAsr();
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        this.asr.status = 'error';
+        this.asr.lastError = 'Web Audio unavailable';
+        return;
+      }
+      if (!this.stream || !this.stream.getAudioTracks().length) {
+        this.asr.status = 'error';
+        this.asr.lastError = 'microphone track unavailable';
+        return;
+      }
+      this.audioContext = new AudioContextClass();
+      await this.audioContext.resume();
+      this.asr.sampleRate = this.audioContext.sampleRate;
+      this.audioSource = this.audioContext.createMediaStreamSource(this.stream);
+      this.audioProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
+      this.audioSink = this.audioContext.createGain();
+      this.audioSink.gain.value = 0;
+      this.audioProcessor.onaudioprocess = (event) => {
+        if (!this.running) return;
+        const input = event.inputBuffer.getChannelData(0);
+        this.collectAsrSamples(input);
+      };
+      this.audioSource.connect(this.audioProcessor);
+      this.audioProcessor.connect(this.audioSink);
+      this.audioSink.connect(this.audioContext.destination);
+    },
+
+    stopAsr() {
+      if (this.audioProcessor) {
+        this.audioProcessor.disconnect();
+        this.audioProcessor.onaudioprocess = null;
+        this.audioProcessor = null;
+      }
+      if (this.audioSource) {
+        this.audioSource.disconnect();
+        this.audioSource = null;
+      }
+      if (this.audioSink) {
+        this.audioSink.disconnect();
+        this.audioSink = null;
+      }
+      if (this.audioContext) {
+        this.audioContext.close();
+        this.audioContext = null;
+      }
+      this.asr.chunks = [];
+      this.asr.queuedSamples = 0;
+      this.disconnectAsr();
+    },
+
+    syncAsr() {
+      if (!this.running) {
+        this.disconnectAsr();
+        return;
+      }
+      if (this.asr.socket && this.asr.socket.readyState <= WebSocket.OPEN) return;
+      this.connectAsr();
+    },
+
+    connectAsr() {
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const socket = new WebSocket(`${protocol}://${window.location.host}/ws/asr`);
+      this.asr.socket = socket;
+      this.asr.status = 'connecting';
+      this.asr.lastError = '';
+
+      socket.addEventListener('open', () => {
+        this.asr.status = 'connected';
+      });
+
+      socket.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'ack') {
+          this.asr.acked += 1;
+          this.asr.lastError = '';
+          return;
+        }
+        if (message.type === 'error') {
+          this.asr.lastError = message.error;
+        }
+      });
+
+      socket.addEventListener('close', () => {
+        this.asr.status = 'disconnected';
+        this.asr.socket = null;
+        if (this.running) {
+          window.setTimeout(() => this.connectAsr(), 1000);
+        }
+      });
+
+      socket.addEventListener('error', () => {
+        this.asr.status = 'error';
+        this.asr.lastError = 'socket error';
+      });
+    },
+
+    disconnectAsr() {
+      if (this.asr.socket) {
+        this.asr.socket.close();
+        this.asr.socket = null;
+      }
+      this.asr.status = 'disconnected';
+    },
+
+    collectAsrSamples(input) {
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      this.asr.chunks.push(copy);
+      this.asr.queuedSamples += copy.length;
+
+      const clipSamples = Math.round((this.asr.sampleRate * this.asr.clipMs) / 1000);
+      while (this.asr.queuedSamples >= clipSamples) {
+        this.sendAsrClip(this.takeAsrSamples(clipSamples));
+      }
+    },
+
+    takeAsrSamples(count) {
+      const output = new Float32Array(count);
+      let offset = 0;
+      while (offset < count && this.asr.chunks.length) {
+        const chunk = this.asr.chunks.shift();
+        const needed = count - offset;
+        if (chunk.length <= needed) {
+          output.set(chunk, offset);
+          offset += chunk.length;
+          this.asr.queuedSamples -= chunk.length;
+        } else {
+          output.set(chunk.subarray(0, needed), offset);
+          this.asr.chunks.unshift(chunk.subarray(needed));
+          this.asr.queuedSamples -= needed;
+          offset += needed;
+        }
+      }
+      return output;
+    },
+
+    sendAsrClip(samples) {
+      this.syncAsr();
+      if (!this.asr.socket || this.asr.socket.readyState !== WebSocket.OPEN) {
+        this.asr.dropped += 1;
+        return;
+      }
+
+      const sequence = ++this.asrSequence;
+      const clip = {
+        kind: 'audio.clip',
+        client_id: this.clientId,
+        sensor_id: 'microphone.default',
+        faculty: 'asr',
+        sequence,
+        occurred_at: new Date().toISOString(),
+        duration_ms: this.asr.clipMs,
+        sample_rate_hz: this.asr.sampleRate,
+        channels: 1,
+        sample_format: 'f32le',
+        data: this.float32ToBase64(samples),
+      };
+      this.asr.socket.send(JSON.stringify(clip));
+      this.asr.sent += 1;
+    },
+
+    float32ToBase64(samples) {
+      const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      return window.btoa(binary);
     },
 
     async captureFrame() {

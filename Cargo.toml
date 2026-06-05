@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "mortar-sea"
 
 [workspace]
-members = [".", "psyche", "face"]
+members = [".", "psyche", "face", "asr-worker"]
 resolver = "2"
 
 [patch.crates-io]
