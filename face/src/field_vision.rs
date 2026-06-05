@@ -7,7 +7,7 @@ use image::DynamicImage;
 use psyche::{ChatMessage, GenerationImage, GenerationRequest};
 use serde::Serialize;
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::app::AppState;
@@ -18,6 +18,7 @@ const MAX_FIELD_VISION_TOKENS: usize = 96;
 const FIELD_VISION_BASE_CONFIDENCE: f32 = 0.65;
 const MAX_FIELD_VISION_DATA_CHARS: usize = 2_000_000;
 const MAX_IMAGE_SUMMARY_SAMPLES: u32 = 6_400;
+const MAX_FIELD_VISION_LOG_CHARS: usize = 220;
 
 #[derive(Debug, Clone)]
 struct VisionFieldDescription {
@@ -408,6 +409,19 @@ fn looks_like_empty_json_response(text: &str) -> bool {
     serde_json::from_str::<Value>(text).is_ok()
 }
 
+fn compact_log_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for ch in compact.chars() {
+        if out.chars().count() == max_chars {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn record_impression(state: &AppState, frame: RawVisionFrame, description: VisionFieldDescription) {
     let impression = VisionFieldImpressionRecord {
         id: Uuid::new_v4(),
@@ -423,9 +437,11 @@ fn record_impression(state: &AppState, frame: RawVisionFrame, description: Visio
         payload: description.payload,
     };
 
-    debug!(
+    info!(
         sensation_id = %impression.sensation_id,
         impression_id = %impression.id,
+        sequence = impression.sequence,
+        impression = %compact_log_text(&impression.text, MAX_FIELD_VISION_LOG_CHARS),
         "field vision faculty produced impression"
     );
 
@@ -545,5 +561,14 @@ mod tests {
             clean_impression("{\"description\":\"I see a red surface.\"}", "fallback"),
             "I see a red surface."
         );
+    }
+
+    #[test]
+    fn compact_log_text_limits_long_impressions() {
+        assert_eq!(
+            compact_log_text("  I   see   a monitor   and desk.  ", 80),
+            "I see a monitor and desk."
+        );
+        assert_eq!(compact_log_text("abcdef", 3), "abc...");
     }
 }

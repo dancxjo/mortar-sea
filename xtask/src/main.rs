@@ -59,11 +59,15 @@ fn prepare_llama_cpp_sys() -> Result<(), Box<dyn std::error::Error>> {
 
     let patch = root.join(PATCH_PATH);
     run_command(
-        Command::new("git")
-            .arg("apply")
+        Command::new("patch")
+            .arg("--batch")
+            .arg("--forward")
+            .arg("-p1")
+            .arg("-i")
             .arg(&patch)
             .current_dir(&patched_dir),
     )?;
+    verify_llama_cpp_sys_patch(&patched_dir)?;
 
     println!(
         "prepared patched {CRATE_NAME} {CRATE_VERSION} at {}",
@@ -93,6 +97,26 @@ fn write_fetch_manifest(dir: &Path) -> io::Result<()> {
             "[package]\nname = \"llama_cpp_sys_fetch\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\n{CRATE_NAME} = \"={CRATE_VERSION}\"\n"
         ),
     )
+}
+
+fn verify_llama_cpp_sys_patch(patched_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let clip_cpp = patched_dir.join("llama.cpp/tools/mtmd/clip.cpp");
+    let source = fs::read_to_string(&clip_cpp)?;
+    let expected = concat!(
+        "case PROJECTOR_TYPE_LFM2A:\n",
+        "            return ctx->model.position_embeddings->ne[0];\n",
+        "        case PROJECTOR_TYPE_GEMMA4A:\n",
+        "        case PROJECTOR_TYPE_GEMMA4UA:"
+    );
+    if source.contains(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} does not contain the Gemma 4 audio projector patch",
+            clip_cpp.display()
+        )
+        .into())
+    }
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
