@@ -8,7 +8,7 @@ use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
 use crate::prosody::ProsodyProfile;
-use crate::rules::{AllophoneRule, Phonotactics};
+use crate::rules::{AllophoneRule, EpenthesisRule, Phonotactics};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Language {
@@ -27,6 +27,8 @@ pub struct LinguisticVariant {
     pub phonemes: PhonemeInventory,
     pub phones: PhoneInventory,
     pub allophone_rules: Vec<AllophoneRule>,
+    #[serde(default)]
+    pub epenthesis_rules: Vec<EpenthesisRule>,
     pub phonotactics: Option<Phonotactics>,
     pub orthography: Option<Orthography>,
     pub morphology: Option<Morphology>,

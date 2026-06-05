@@ -171,6 +171,7 @@ impl Phonemicizer for EnglishPhonemicizer {
                         pronunciation.letter_indices.get(phoneme_index).copied()
                     {
                         add_letter_index_feature(&mut features, letter_index);
+                        add_letter_name_feature(&mut features);
                     }
                     add_word_index_feature(&mut features, word_index);
                     PhonemeToken {
@@ -839,6 +840,13 @@ fn add_letter_index_feature(features: &mut FeatureBundle, letter_index: usize) {
     features.values.insert(
         FeatureId("orthography.letter_index".into()),
         Spec::Known(FeatureValue::Number(letter_index as f64)),
+    );
+}
+
+fn add_letter_name_feature(features: &mut FeatureBundle) {
+    features.values.insert(
+        FeatureId("orthography.letter_name".into()),
+        Spec::Known(FeatureValue::Bool(true)),
     );
 }
 

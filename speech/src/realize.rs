@@ -5,7 +5,7 @@ use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::Stress;
-use crate::rules::{AllophoneRule, RuleCondition};
+use crate::rules::{AllophoneRule, EpenthesisRule, RuleCondition};
 use crate::segment::SegmentMatcher;
 use crate::spec::Spec;
 use crate::variant::LinguisticVariant;
@@ -37,21 +37,41 @@ pub fn realize_phonemes(
     phonemes: &[PhonemeToken],
     options: &RealizationOptions,
 ) -> Vec<PhoneToken> {
-    phonemes
-        .iter()
-        .enumerate()
-        .map(|(index, token)| {
-            let default_phone = default_phone_token(variant, token);
-            let Some(rule) = variant
-                .allophone_rules
-                .iter()
-                .find(|rule| rule_applies(rule, variant, phonemes, index, options))
-            else {
-                return default_phone;
-            };
-
+    let mut phones = Vec::new();
+    for (index, token) in phonemes.iter().enumerate() {
+        let default_phone = default_phone_token(variant, token);
+        let phone = if let Some(rule) = variant
+            .allophone_rules
+            .iter()
+            .find(|rule| rule_applies(rule, variant, phonemes, index, options))
+        {
             phone_from_rule(variant, token, &default_phone, rule)
-        })
+        } else {
+            default_phone
+        };
+        phones.push(phone);
+        phones.extend(epenthetic_phones_after(variant, phonemes, index));
+    }
+    phones
+}
+
+pub fn epenthetic_phones_after(
+    variant: &LinguisticVariant,
+    phonemes: &[PhonemeToken],
+    index: usize,
+) -> Vec<PhoneToken> {
+    let Some(before) = phonemes.get(index) else {
+        return Vec::new();
+    };
+    let Some(after) = phonemes.get(index + 1) else {
+        return Vec::new();
+    };
+
+    variant
+        .epenthesis_rules
+        .iter()
+        .filter(|rule| epenthesis_rule_applies(rule, variant, before, after))
+        .map(|rule| phone_from_epenthesis_rule(variant, before, rule))
         .collect()
 }
 
@@ -200,6 +220,24 @@ fn segment_matches(
     }
 }
 
+fn epenthesis_rule_applies(
+    rule: &EpenthesisRule,
+    variant: &LinguisticVariant,
+    before: &PhonemeToken,
+    after: &PhonemeToken,
+) -> bool {
+    (rule.before.is_empty()
+        || rule
+            .before
+            .iter()
+            .any(|matcher| segment_matches(variant, before, matcher)))
+        && (rule.after.is_empty()
+            || rule
+                .after
+                .iter()
+                .any(|matcher| segment_matches(variant, after, matcher)))
+}
+
 fn phoneme_token_matches_id(token: &PhonemeToken, expected: &PhonemeId) -> bool {
     let Spec::Known(actual) = &token.phoneme else {
         return false;
@@ -225,6 +263,15 @@ fn token_feature_matches(
     feature: &FeatureId,
     expected: &FeatureValue,
 ) -> bool {
+    if token
+        .features
+        .values
+        .get(feature)
+        .is_some_and(|actual| actual == &Spec::Known(expected.clone()))
+    {
+        return true;
+    }
+
     let Spec::Known(id) = &token.phoneme else {
         return false;
     };
@@ -257,6 +304,35 @@ fn phone_from_rule(
         features,
         acoustic_evidence: Vec::new(),
         confidence: token.confidence.min(rule.confidence),
+        provenance: EvidenceProvenance {
+            source: EvidenceSource::Rule,
+            method: format!("{} rule {}", variant.id.0, rule.id),
+            version: Some("0.1".into()),
+        },
+    }
+}
+
+fn phone_from_epenthesis_rule(
+    variant: &LinguisticVariant,
+    previous: &PhonemeToken,
+    rule: &EpenthesisRule,
+) -> PhoneToken {
+    let features = match &rule.output.phone {
+        Spec::Known(id) => variant
+            .phones
+            .phones
+            .get(id)
+            .map(|phone| phone.features.clone())
+            .unwrap_or_default(),
+        _ => rule.output.features.clone(),
+    };
+
+    PhoneToken {
+        phone: rule.output.phone.clone(),
+        span: None,
+        features,
+        acoustic_evidence: Vec::new(),
+        confidence: previous.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
             method: format!("{} rule {}", variant.id.0, rule.id),

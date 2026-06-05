@@ -20,6 +20,17 @@ pub struct AllophoneRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EpenthesisRule {
+    pub id: String,
+    pub name: String,
+    pub before: Vec<SegmentMatcher>,
+    pub after: Vec<SegmentMatcher>,
+    pub output: PhonePattern,
+    pub confidence: f32,
+    pub status: RuleStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhonemePattern {
     pub phoneme: Spec<PhonemeId>,
     pub features: FeatureBundle,

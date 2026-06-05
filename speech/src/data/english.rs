@@ -8,7 +8,7 @@ use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
 use crate::prosody::{ProsodicContext, Stress};
 use crate::rules::{
-    AllophoneRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics,
+    AllophoneRule, EpenthesisRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics,
     RuleCondition, RuleStatus, SyllableShape,
 };
 use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
@@ -81,6 +81,7 @@ const NG: PhoneId = PhoneId::borrowed("ipa.phone.ŋ");
 const L: PhoneId = PhoneId::borrowed("ipa.phone.l");
 const R: PhoneId = PhoneId::borrowed("ipa.phone.ɹ");
 const W: PhoneId = PhoneId::borrowed("ipa.phone.w");
+const Y: PhoneId = PhoneId::borrowed("ipa.phone.j");
 const CH: PhoneId = PhoneId::borrowed("ipa.phone.tʃ");
 const JH: PhoneId = PhoneId::borrowed("ipa.phone.dʒ");
 const TAP: PhoneId = PhoneId::borrowed("ipa.phone.ɾ");
@@ -199,6 +200,7 @@ pub fn variant(id: &str) -> LinguisticVariant {
         phonemes: phoneme_inventory(row.id),
         phones: phone_inventory(),
         allophone_rules: allophone_rules(row.id),
+        epenthesis_rules: epenthesis_rules(),
         phonotactics: Some(phonotactics(row.singing)),
         orthography: Some(Orthography {
             name: "English Latin orthography".into(),
@@ -333,6 +335,31 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
     ]
 }
 
+fn epenthesis_rules() -> Vec<EpenthesisRule> {
+    vec![EpenthesisRule {
+        id: "english_letter_name_front_vowel_linking_yod".into(),
+        name: "English letter-name front-vowel linking yod".into(),
+        before: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(&[
+            ("phonology.major", FeatureValue::Category("vowel".into())),
+            (
+                "phonology.vowel_backness",
+                FeatureValue::Category("front".into()),
+            ),
+            ("orthography.letter_name", FeatureValue::Bool(true)),
+        ]))],
+        after: vec![SegmentMatcher::FeatureBundle(feature_bundle_with_values(&[
+            ("phonology.major", FeatureValue::Category("vowel".into())),
+            ("orthography.letter_name", FeatureValue::Bool(true)),
+        ]))],
+        output: PhonePattern {
+            phone: Spec::Known(Y),
+            features: Default::default(),
+        },
+        confidence: 0.85,
+        status: RuleStatus::Productive,
+    }]
+}
+
 fn feature_bundle(values: &[(&str, &str)]) -> FeatureBundle {
     let mut bundle = FeatureBundle::default();
     for (name, value) in values {
@@ -340,6 +367,16 @@ fn feature_bundle(values: &[(&str, &str)]) -> FeatureBundle {
             FeatureId(format!("phonology.{name}")),
             Spec::Known(FeatureValue::Category((*value).into())),
         );
+    }
+    bundle
+}
+
+fn feature_bundle_with_values(values: &[(&str, FeatureValue)]) -> FeatureBundle {
+    let mut bundle = FeatureBundle::default();
+    for (id, value) in values {
+        bundle
+            .values
+            .insert(FeatureId((*id).into()), Spec::Known(value.clone()));
     }
     bundle
 }
