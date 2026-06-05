@@ -8,6 +8,7 @@ use crate::{
     context_frame::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS},
     experience::Experience,
     llm::{GenerationRequest, LlmEngine, LlmEvent},
+    time::local_iso,
     timeline::{EventCluster, TimelineEntry, TimelineFrame, event_clusters},
     wit::Wit,
 };
@@ -208,7 +209,11 @@ fn format_cluster_boundary(cluster: &EventCluster, start: DateTime<Utc>) -> Stri
     let start_seconds = start_elapsed_ms as f64 / MILLIS_PER_SECOND;
     let end_seconds = end_elapsed_ms as f64 / MILLIS_PER_SECOND;
 
-    format!("[T+{start_seconds:06.3} - T+{end_seconds:06.3}]\n")
+    format!(
+        "[T+{start_seconds:06.3} - T+{end_seconds:06.3} | {} to {}]\n",
+        local_iso(cluster.start),
+        local_iso(cluster.end)
+    )
 }
 
 fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String {
@@ -217,6 +222,7 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
         .signed_duration_since(start)
         .num_milliseconds();
     let seconds = elapsed_ms as f64 / MILLIS_PER_SECOND;
+    let occurred_at = local_iso(entry.occurred_at());
 
     match entry {
         TimelineEntry::Sensation(sensation) => {
@@ -237,32 +243,34 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
                     .payload
                     .get("original_occurred_at")
                     .and_then(|value| value.as_str())
-                    .unwrap_or("unknown");
+                    .map(format_payload_timestamp)
+                    .unwrap_or_else(|| "unknown".to_owned());
 
                 format!(
-                    "T+{seconds:06.3}\n  RECOLLECTION {} id={} source={} observed_at={} original_experience_id={} original_occurred_at={}\n",
+                    "T+{seconds:06.3} occurred_at={occurred_at}\n  RECOLLECTION {} id={} source={} observed_at={} original_experience_id={} original_occurred_at={}\n",
                     sensation.kind,
                     sensation.id,
                     sensation.source,
-                    sensation.observed_at.to_rfc3339(),
+                    local_iso(sensation.observed_at),
                     original_experience_id,
                     original_occurred_at
                 )
             } else {
                 format!(
-                    "T+{seconds:06.3}\n  SENSATION {} id={} source={} observed_at={}\n",
+                    "T+{seconds:06.3} occurred_at={occurred_at}\n  SENSATION {} id={} source={} observed_at={}\n",
                     sensation.kind,
                     sensation.id,
                     sensation.source,
-                    sensation.observed_at.to_rfc3339()
+                    local_iso(sensation.observed_at)
                 )
             }
         }
         TimelineEntry::Impression(impression) => format!(
-            "T+{seconds:06.3}\n  IMPRESSION id={} kind={} faculty={} confidence={:.3} about=[{}] payload={} text={}\n",
+            "T+{seconds:06.3} occurred_at={occurred_at}\n  IMPRESSION id={} kind={} faculty={} observed_at={} confidence={:.3} about=[{}] payload={} text={}\n",
             impression.id,
             impression.kind,
             prompt_json_string(&impression.faculty),
+            local_iso(impression.observed_at),
             impression.confidence,
             impression
                 .about
@@ -274,8 +282,9 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
             prompt_json_string(&impression.text)
         ),
         TimelineEntry::Experience(experience) => format!(
-            "T+{seconds:06.3}\n  EXPERIENCE id={} from=[{}] what={}\n",
+            "T+{seconds:06.3} occurred_at={occurred_at}\n  EXPERIENCE id={} observed_at={} from=[{}] what={}\n",
             experience.id,
+            local_iso(experience.observed_at),
             experience
                 .impression_ids
                 .iter()
@@ -285,6 +294,12 @@ fn format_timeline_entry(entry: &TimelineEntry, start: DateTime<Utc>) -> String 
             prompt_json_string(&experience.what)
         ),
     }
+}
+
+fn format_payload_timestamp(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|parsed| local_iso(parsed.with_timezone(&Utc)))
+        .unwrap_or_else(|_| timestamp.to_owned())
 }
 
 fn prompt_json_string(text: &str) -> String {
@@ -506,9 +521,9 @@ mod tests {
             800,
         );
 
-        assert!(prompt.contains("[T+00.000 - T+00.650]"));
-        assert!(prompt.contains("[T+03.000 - T+03.000]"));
-        let first_cluster_end = prompt.find("[T+03.000 - T+03.000]").unwrap();
+        assert!(prompt.contains("[T+00.000 - T+00.650 | "));
+        assert!(prompt.contains("[T+03.000 - T+03.000 | "));
+        let first_cluster_end = prompt.find("[T+03.000 - T+03.000 | ").unwrap();
         assert!(prompt[..first_cluster_end].contains("SENSATION vision.face_crop"));
         assert!(prompt[..first_cluster_end].contains("That face looks like Tim."));
         assert!(prompt[..first_cluster_end].contains("SENSATION audio.utterance"));
@@ -545,7 +560,7 @@ mod tests {
             500,
         );
 
-        assert!(prompt.contains("[T+00.000 - T+00.260]"));
+        assert!(prompt.contains("[T+00.000 - T+00.260 | "));
         assert!(prompt.contains("That face looks like Tim."));
         assert!(prompt.contains("That face may not be Tim after all."));
         assert_eq!(prompt.matches("[T+").count(), 1);
@@ -592,6 +607,39 @@ mod tests {
         assert!(prompt.contains("\\u003cstart_of_turn\\u003e"));
         assert!(prompt.contains("\\\"value\\\""));
         assert!(prompt.contains("\\n"));
+    }
+
+    #[test]
+    fn prompt_renders_local_iso_timestamps_with_offsets() {
+        let t0 = DateTime::parse_from_rfc3339("2026-06-04T12:34:56.789Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        let sensation = Sensation::new(
+            "vision.frame",
+            "camera",
+            t0,
+            t0 + ChronoDuration::milliseconds(25),
+            json!({}),
+        );
+        let impression = Impression::new(
+            vec![sensation.id],
+            t0 + ChronoDuration::milliseconds(50),
+            t0 + ChronoDuration::milliseconds(75),
+            "A frame arrived.",
+        );
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(sensation));
+        frame.push(TimelineEntry::Impression(impression));
+
+        let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
+        let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
+
+        assert!(prompt.contains(&format!("occurred_at={}", local_iso(t0))));
+        assert!(prompt.contains(&format!(
+            "observed_at={}",
+            local_iso(t0 + ChronoDuration::milliseconds(25))
+        )));
+        assert!(!prompt.contains("2026-06-04T12:34:56.789Z"));
     }
 
     #[test]

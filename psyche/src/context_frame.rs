@@ -2,7 +2,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::timeline::{TimelineEntry, TimelineFrame};
+use crate::{
+    time::local_iso,
+    timeline::{TimelineEntry, TimelineFrame},
+};
 
 pub const DEFAULT_CONTEXT_FRAME_ITEMS: usize = 4;
 const CONTEXT_SCAN_MULTIPLIER: usize = 8;
@@ -445,14 +448,14 @@ fn format_when(window: &[TimelineEntry]) -> String {
     compact_text(
         &format!(
             "{} to {} ({} ms, {} entries)",
-            first.occurred_at().to_rfc3339(),
-            last.occurred_at().to_rfc3339(),
+            local_iso(first.occurred_at()),
+            local_iso(last.occurred_at()),
             duration_ms,
             window.len()
         ),
         MAX_CONTEXT_TEXT_CHARS,
     )
-    .unwrap_or_else(|| Utc::now().to_rfc3339())
+    .unwrap_or_else(|| local_iso(Utc::now()))
 }
 
 fn compact_text(text: &str, max_chars: usize) -> Option<String> {
