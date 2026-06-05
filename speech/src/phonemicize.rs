@@ -328,7 +328,7 @@ fn stress_for_candidate(candidate: &[CmuPhoneme]) -> Spec<Stress> {
 
 fn boundary_phone_token() -> PhoneToken {
     PhoneToken {
-        phone: Spec::Known(PhoneId(WORD_BOUNDARY_ID.into())),
+        phone: Spec::Known(PhoneId::from(WORD_BOUNDARY_ID)),
         span: None,
         features: FeatureBundle::default(),
         acoustic_evidence: Vec::new(),
@@ -375,10 +375,10 @@ pub fn phoneme_display_symbol(id: &PhonemeId) -> &str {
 }
 
 pub fn phone_display_symbol(id: &PhoneId) -> &str {
-    if id.0 == WORD_BOUNDARY_ID {
+    if id.as_str() == WORD_BOUNDARY_ID {
         return "|";
     }
-    id.0.rsplit('.').next().unwrap_or(&id.0)
+    id.as_str().rsplit('.').next().unwrap_or(id.as_str())
 }
 
 pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {

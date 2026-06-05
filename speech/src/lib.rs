@@ -57,9 +57,9 @@ mod tests {
     #[test]
     fn phone_and_phoneme_are_separate_categories() {
         let t_phoneme = PhonemeId("en-US.phoneme.t".into());
-        let tap_phone = PhoneId("ipa.phone.tap".into());
+        let tap_phone = PhoneId::from("ipa.phone.tap");
 
-        assert_ne!(t_phoneme.0, tap_phone.0);
+        assert_ne!(t_phoneme.0, tap_phone.as_str());
     }
 
     #[test]

@@ -6,12 +6,12 @@ use crate::ids::{FeatureId, LanguageId, PhoneId, VariantId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
-use crate::prosody::Stress;
+use crate::prosody::{ProsodicContext, Stress};
 use crate::rules::{
     AllophoneRule, PhonePattern, PhonemePattern, PhonotacticConstraint, Phonotactics,
     RuleCondition, RuleStatus, SyllableShape,
 };
-use crate::segment::{Environment, SegmentMatcher};
+use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
 use crate::variant::{LinguisticVariant, VariantImplementationStatus, VariantStatus};
 
@@ -63,102 +63,126 @@ const VARIANTS: &[EnglishVariantRow] = &[
     },
 ];
 
-const LEGAL_ONSETS: &[&[&str]] = &[
-    &["p", "l"],
-    &["b", "l"],
-    &["k", "l"],
-    &["ɡ", "l"],
-    &["f", "l"],
-    &["p", "ɹ"],
-    &["b", "ɹ"],
-    &["t", "ɹ"],
-    &["d", "ɹ"],
-    &["k", "ɹ"],
-    &["ɡ", "ɹ"],
-    &["f", "ɹ"],
-    &["θ", "ɹ"],
-    &["ʃ", "ɹ"],
-    &["s", "p"],
-    &["s", "t"],
-    &["s", "k"],
-    &["s", "l"],
-    &["s", "m"],
-    &["s", "n"],
-    &["s", "w"],
-    &["s", "f"],
-    &["t", "w"],
-    &["k", "w"],
-    &["ɡ", "w"],
-    &["d", "w"],
-    &["ʃ", "w"],
-    &["θ", "w"],
-    &["s", "p", "l"],
-    &["s", "p", "ɹ"],
-    &["s", "t", "ɹ"],
-    &["s", "k", "ɹ"],
-    &["s", "k", "w"],
-    &["s", "t", "w"],
+const P: PhoneId = PhoneId::borrowed("ipa.phone.p");
+const B: PhoneId = PhoneId::borrowed("ipa.phone.b");
+const T: PhoneId = PhoneId::borrowed("ipa.phone.t");
+const D: PhoneId = PhoneId::borrowed("ipa.phone.d");
+const K: PhoneId = PhoneId::borrowed("ipa.phone.k");
+const G: PhoneId = PhoneId::borrowed("ipa.phone.ɡ");
+const F: PhoneId = PhoneId::borrowed("ipa.phone.f");
+const V: PhoneId = PhoneId::borrowed("ipa.phone.v");
+const TH: PhoneId = PhoneId::borrowed("ipa.phone.θ");
+const SH: PhoneId = PhoneId::borrowed("ipa.phone.ʃ");
+const S: PhoneId = PhoneId::borrowed("ipa.phone.s");
+const Z: PhoneId = PhoneId::borrowed("ipa.phone.z");
+const M: PhoneId = PhoneId::borrowed("ipa.phone.m");
+const N: PhoneId = PhoneId::borrowed("ipa.phone.n");
+const NG: PhoneId = PhoneId::borrowed("ipa.phone.ŋ");
+const L: PhoneId = PhoneId::borrowed("ipa.phone.l");
+const R: PhoneId = PhoneId::borrowed("ipa.phone.ɹ");
+const W: PhoneId = PhoneId::borrowed("ipa.phone.w");
+const CH: PhoneId = PhoneId::borrowed("ipa.phone.tʃ");
+const JH: PhoneId = PhoneId::borrowed("ipa.phone.dʒ");
+const TAP: PhoneId = PhoneId::borrowed("ipa.phone.ɾ");
+const SYLLABLE_BREAK: PhoneId = PhoneId::borrowed("ipa.phone.|");
+
+const LEGAL_ONSETS: &[&[PhoneId]] = &[
+    &[P, L],
+    &[B, L],
+    &[K, L],
+    &[G, L],
+    &[F, L],
+    &[P, R],
+    &[B, R],
+    &[T, R],
+    &[D, R],
+    &[K, R],
+    &[G, R],
+    &[F, R],
+    &[TH, R],
+    &[SH, R],
+    &[S, P],
+    &[S, T],
+    &[S, K],
+    &[S, L],
+    &[S, M],
+    &[S, N],
+    &[S, W],
+    &[S, F],
+    &[T, W],
+    &[K, W],
+    &[G, W],
+    &[D, W],
+    &[SH, W],
+    &[TH, W],
+    &[S, P, L],
+    &[S, P, R],
+    &[S, T, R],
+    &[S, K, R],
+    &[S, K, W],
+    &[S, T, W],
 ];
 
-const SINGING_ONSET_ADDITIONS: &[&[&str]] = &[
-    &["t", "l"],
-    &["d", "l"],
-    &["v", "ɹ"],
-    &["v", "l"],
-    &["z", "w"],
+const SINGING_ONSET_ADDITIONS: &[&[PhoneId]] = &[&[T, L], &[D, L], &[V, R], &[V, L], &[Z, W]];
+
+const LEGAL_CODAS: &[&[PhoneId]] = &[
+    &[N, D],
+    &[N, T],
+    &[N, Z],
+    &[NG, K],
+    &[NG, Z],
+    &[M, P],
+    &[M, Z],
+    &[L, D],
+    &[L, T],
+    &[L, K],
+    &[L, P],
+    &[L, F],
+    &[L, M],
+    &[L, N],
+    &[L, Z],
+    &[S, T],
+    &[S, K],
+    &[S, P],
+    &[F, T],
+    &[K, T],
+    &[K, S],
+    &[P, T],
+    &[P, S],
+    &[T, S],
+    &[D, Z],
+    &[R, D],
+    &[R, T],
+    &[R, K],
+    &[R, N],
+    &[R, M],
+    &[R, Z],
+    &[R, P],
+    &[R, F],
+    &[N, CH],
+    &[N, JH],
+    &[L, CH],
+    &[R, CH],
+    &[N, D, Z],
+    &[N, T, S],
+    &[NG, K, S],
+    &[L, D, Z],
+    &[L, T, S],
+    &[L, K, S],
+    &[M, P, T],
+    &[M, P, S],
+    &[S, T, S],
+    &[K, T, S],
+    &[NG, TH, S],
+    &[NG, K, TH, S],
 ];
 
-const LEGAL_CODAS: &[&[&str]] = &[
-    &["n", "d"],
-    &["n", "t"],
-    &["n", "z"],
-    &["ŋ", "k"],
-    &["ŋ", "z"],
-    &["m", "p"],
-    &["m", "z"],
-    &["l", "d"],
-    &["l", "t"],
-    &["l", "k"],
-    &["l", "p"],
-    &["l", "f"],
-    &["l", "m"],
-    &["l", "n"],
-    &["l", "z"],
-    &["s", "t"],
-    &["s", "k"],
-    &["s", "p"],
-    &["f", "t"],
-    &["k", "t"],
-    &["k", "s"],
-    &["p", "t"],
-    &["p", "s"],
-    &["t", "s"],
-    &["d", "z"],
-    &["ɹ", "d"],
-    &["ɹ", "t"],
-    &["ɹ", "k"],
-    &["ɹ", "n"],
-    &["ɹ", "m"],
-    &["ɹ", "z"],
-    &["ɹ", "p"],
-    &["ɹ", "f"],
-    &["n", "tʃ"],
-    &["n", "dʒ"],
-    &["l", "tʃ"],
-    &["ɹ", "tʃ"],
-    &["n", "d", "z"],
-    &["n", "t", "s"],
-    &["ŋ", "k", "s"],
-    &["l", "d", "z"],
-    &["l", "t", "s"],
-    &["l", "k", "s"],
-    &["m", "p", "t"],
-    &["m", "p", "s"],
-    &["s", "t", "s"],
-    &["k", "t", "s"],
-    &["ŋ", "θ", "s"],
-    &["ŋ", "k", "θ", "s"],
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterScope {
+    Onset,
+    SingingOnset,
+    Coda,
+}
 
 pub fn variant(id: &str) -> LinguisticVariant {
     let row = VARIANTS
@@ -212,10 +236,11 @@ fn phone_inventory() -> PhoneInventory {
         let phone = arpabet::phone_for_entry(entry);
         phones.insert(phone.id.clone(), phone);
     }
-    for ipa in ["ɾ", "|"] {
+    for phone_ref in [TAP, SYLLABLE_BREAK] {
+        let ipa = phone_symbol(&phone_ref).into();
         let phone = crate::phonetics::Phone {
-            id: arpabet::phone_id_for_ipa(ipa),
-            ipa: ipa.into(),
+            id: phone_ref,
+            ipa,
             features: Default::default(),
             aliases: Vec::new(),
             status: crate::segment::SegmentStatus::Allophonic,
@@ -256,7 +281,7 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
                 RuleCondition::NotCarefulStyle,
             ],
             output: PhonePattern {
-                phone: Spec::Known(PhoneId("ipa.phone.ɾ".into())),
+                phone: Spec::Known(TAP),
                 features: Default::default(),
             },
             confidence: 0.95,
@@ -280,7 +305,7 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
                 feature_bundle(&[("place", "velar"), ("manner", "stop")]),
             ))],
             output: PhonePattern {
-                phone: Spec::Known(PhoneId("ipa.phone.ŋ".into())),
+                phone: Spec::Known(NG),
                 features: Default::default(),
             },
             confidence: 0.98,
@@ -305,7 +330,7 @@ fn phonotactics(singing: bool) -> Phonotactics {
     constraints.push(PhonotacticConstraint {
         id: "english.illegal_onset.ng".into(),
         description: "Velar nasal is not a legal singleton onset in English".into(),
-        matcher: SegmentMatcher::Phone(PhoneId("ipa.phone.ŋ".into())),
+        matcher: SegmentMatcher::Phone(NG),
         environment: Environment {
             syllable_position: Spec::Known(crate::segment::SyllablePosition::Onset),
             ..Default::default()
@@ -315,7 +340,7 @@ fn phonotactics(singing: bool) -> Phonotactics {
 
     for cluster in LEGAL_ONSETS {
         constraints.push(cluster_constraint(
-            "english.legal_onset",
+            ClusterScope::Onset,
             cluster,
             RuleStatus::Productive,
         ));
@@ -323,7 +348,7 @@ fn phonotactics(singing: bool) -> Phonotactics {
     if singing {
         for cluster in SINGING_ONSET_ADDITIONS {
             constraints.push(cluster_constraint(
-                "english.singing_legal_onset",
+                ClusterScope::SingingOnset,
                 cluster,
                 RuleStatus::Experimental,
             ));
@@ -331,7 +356,7 @@ fn phonotactics(singing: bool) -> Phonotactics {
     }
     for cluster in LEGAL_CODAS {
         constraints.push(cluster_constraint(
-            "english.legal_coda",
+            ClusterScope::Coda,
             cluster,
             RuleStatus::Productive,
         ));
@@ -359,30 +384,79 @@ fn phonotactics(singing: bool) -> Phonotactics {
     }
 }
 
-fn cluster_constraint(prefix: &str, cluster: &[&str], status: RuleStatus) -> PhonotacticConstraint {
+fn cluster_constraint(
+    scope: ClusterScope,
+    cluster: &[PhoneId],
+    status: RuleStatus,
+) -> PhonotacticConstraint {
+    let suffix = cluster_suffix(cluster);
+    let label = cluster_label(cluster);
     PhonotacticConstraint {
-        id: format!("{prefix}.{}", cluster.join("_")),
-        description: format!("Legal cluster {}", cluster.join("")),
+        id: format!("{}.{}", scope.constraint_prefix(), suffix),
+        description: format!("Legal {} cluster {}", scope.label(), label),
         matcher: SegmentMatcher::Any,
         environment: Environment {
-            before: cluster
-                .iter()
-                .map(|ipa| SegmentMatcher::Phone(arpabet::phone_id_for_ipa(ipa)))
-                .collect(),
-            syllable_position: if prefix.contains("coda") {
-                Spec::Known(crate::segment::SyllablePosition::Coda)
-            } else {
-                Spec::Known(crate::segment::SyllablePosition::Onset)
-            },
-            prosodic_context: if prefix.contains("singing") {
-                Spec::Known(crate::prosody::ProsodicContext::Emphasized)
-            } else {
-                Spec::Unspecified
-            },
+            before: cluster.iter().cloned().map(SegmentMatcher::Phone).collect(),
+            syllable_position: Spec::Known(scope.syllable_position()),
+            prosodic_context: scope.prosodic_context(),
             ..Default::default()
         },
         status,
     }
+}
+
+impl ClusterScope {
+    fn constraint_prefix(self) -> &'static str {
+        match self {
+            Self::Onset => "english.legal_onset",
+            Self::SingingOnset => "english.singing_legal_onset",
+            Self::Coda => "english.legal_coda",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Onset | Self::SingingOnset => "onset",
+            Self::Coda => "coda",
+        }
+    }
+
+    fn syllable_position(self) -> SyllablePosition {
+        match self {
+            Self::Onset | Self::SingingOnset => SyllablePosition::Onset,
+            Self::Coda => SyllablePosition::Coda,
+        }
+    }
+
+    fn prosodic_context(self) -> Spec<ProsodicContext> {
+        match self {
+            Self::SingingOnset => Spec::Known(ProsodicContext::Emphasized),
+            Self::Onset | Self::Coda => Spec::Unspecified,
+        }
+    }
+}
+
+fn cluster_suffix(cluster: &[PhoneId]) -> String {
+    cluster
+        .iter()
+        .map(phone_symbol)
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn cluster_label(cluster: &[PhoneId]) -> String {
+    cluster
+        .iter()
+        .map(phone_symbol)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn phone_symbol(phone: &PhoneId) -> &str {
+    phone
+        .as_str()
+        .strip_prefix("ipa.phone.")
+        .unwrap_or(phone.as_str())
 }
 
 #[cfg(test)]
@@ -413,11 +487,7 @@ mod tests {
                 .phonemes
                 .contains_key(&arpabet::phoneme_id("en-US-GA", "AH"))
         );
-        assert!(
-            ga.phones
-                .phones
-                .contains_key(&PhoneId("ipa.phone.ʌ".into()))
-        );
+        assert!(ga.phones.phones.contains_key(&PhoneId::from("ipa.phone.ʌ")));
     }
 
     #[test]

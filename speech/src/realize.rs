@@ -398,7 +398,12 @@ mod tests {
         phones
             .iter()
             .map(|token| match &token.phone {
-                Spec::Known(id) => id.0.rsplit('.').next().unwrap_or(&id.0).to_string(),
+                Spec::Known(id) => id
+                    .as_str()
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(id.as_str())
+                    .to_string(),
                 Spec::Unknown => "?".into(),
                 Spec::Unspecified => "_".into(),
                 Spec::NotApplicable => "na".into(),

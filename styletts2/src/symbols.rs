@@ -80,7 +80,8 @@ impl SymbolSet {
     ) -> Self {
         for (id, phone) in &inventory.phones {
             if self.symbols.contains(&phone.ipa) {
-                self.aliases.insert(id.0.clone(), phone.ipa.clone());
+                self.aliases
+                    .insert(id.as_str().to_string(), phone.ipa.clone());
             }
 
             let preferred = preferred_systems.iter().find_map(|system| {
@@ -96,7 +97,8 @@ impl SymbolSet {
                     .find(|alias| self.symbols.contains(&alias.symbol))
             });
             if let Some(alias) = alias {
-                self.aliases.insert(id.0.clone(), alias.symbol.clone());
+                self.aliases
+                    .insert(id.as_str().to_string(), alias.symbol.clone());
             }
         }
         self
@@ -314,7 +316,7 @@ trait AsRefId {
 
 impl AsRefId for speech::PhoneId {
     fn as_ref_id(&self) -> &str {
-        &self.0
+        self.as_str()
     }
 }
 

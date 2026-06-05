@@ -224,7 +224,7 @@ fn phoneme_token(id: &str) -> PhonemeToken {
 
 fn phone_token(id: &str) -> PhoneToken {
     PhoneToken {
-        phone: Spec::Known(PhoneId(id.into())),
+        phone: Spec::Known(PhoneId::from(id.to_string())),
         span: None,
         features: FeatureBundle::default(),
         acoustic_evidence: Vec::new(),

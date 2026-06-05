@@ -123,7 +123,7 @@ pub fn is_vowel(symbol: &str) -> bool {
 }
 
 pub fn phone_id_for_ipa(ipa: &str) -> PhoneId {
-    PhoneId(format!("ipa.phone.{ipa}"))
+    PhoneId::from(format!("ipa.phone.{ipa}"))
 }
 
 pub fn phoneme_id(variant: &str, symbol: &str) -> PhonemeId {
