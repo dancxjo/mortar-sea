@@ -55,6 +55,12 @@ async fn run_voice(state: AppState) {
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
     let mut generated_tail = String::new();
+    let mut last_experience_signature = None::<String>;
+    sync_recent_experiences_from_state(
+        &state,
+        &mut recent_experiences,
+        &mut last_experience_signature,
+    );
     let mut active = Some(start_voice_generation(
         &state,
         &generation_tx,
@@ -62,7 +68,6 @@ async fn run_voice(state: AppState) {
         &recent_thoughts,
         &generated_tail,
     ));
-    let mut last_experience_signature = None::<String>;
     let mut reality_review = interval(VOICE_REALITY_REVIEW_INTERVAL);
     reality_review.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reality_review.tick().await;
@@ -81,6 +86,14 @@ async fn run_voice(state: AppState) {
                     Ok(event) => event,
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         debug!(skipped, "Voice lagged behind real-time Experience events");
+                        let recovered = sync_recent_experiences_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            &mut last_experience_signature,
+                        );
+                        if let Some(current) = active.as_mut() {
+                            append_voice_experience_updates(&state, current, &recovered);
+                        }
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -90,34 +103,23 @@ async fn run_voice(state: AppState) {
                     continue;
                 };
 
-                if !is_meaningful_new_experience(&state, &experience, &mut last_experience_signature) {
+                if !remember_recent_experience_from_state(
+                    &state,
+                    &mut recent_experiences,
+                    experience.clone(),
+                    &mut last_experience_signature,
+                ) {
                     continue;
                 }
 
-                push_limited(&mut recent_experiences, experience.clone(), RECENT_EXPERIENCE_LIMIT);
-
                 if let Some(current) = active.as_mut() {
-                    let sensations = state
-                        .sensations
-                        .read()
-                        .expect("sensation log lock")
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let impressions = state
-                        .vision_impressions
-                        .read()
-                        .expect("vision impression log lock")
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    current.control.append_prompt(format_voice_sensory_input(
-                        &experience,
-                        &sensations,
-                        &impressions,
-                    ));
-                    current.experience_ids.push(experience.id);
+                    append_voice_experience_updates(&state, current, &[experience]);
                 } else {
+                    sync_recent_experiences_from_state(
+                        &state,
+                        &mut recent_experiences,
+                        &mut last_experience_signature,
+                    );
                     active = Some(start_voice_generation(
                         &state,
                         &generation_tx,
@@ -194,6 +196,11 @@ async fn run_voice(state: AppState) {
                             });
 
                         sleep(VOICE_RESTART_DELAY).await;
+                        sync_recent_experiences_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            &mut last_experience_signature,
+                        );
                         active = Some(start_voice_generation(
                             &state,
                             &generation_tx,
@@ -204,6 +211,131 @@ async fn run_voice(state: AppState) {
                     }
                 }
             }
+        }
+    }
+}
+
+fn sync_recent_experiences_from_state(
+    state: &AppState,
+    recent_experiences: &mut VecDeque<ExperienceRecord>,
+    last_signature: &mut Option<String>,
+) -> Vec<ExperienceRecord> {
+    let mut experiences = state
+        .experiences
+        .read()
+        .expect("experience log lock")
+        .iter()
+        .rev()
+        .take(RECENT_EXPERIENCE_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    experiences.reverse();
+    let voice_impression_ids = state
+        .voice_impression_ids
+        .read()
+        .expect("voice impression id lock")
+        .clone();
+
+    remember_recent_experiences(
+        &voice_impression_ids,
+        recent_experiences,
+        experiences,
+        last_signature,
+    )
+}
+
+fn remember_recent_experience_from_state(
+    state: &AppState,
+    recent_experiences: &mut VecDeque<ExperienceRecord>,
+    experience: ExperienceRecord,
+    last_signature: &mut Option<String>,
+) -> bool {
+    let voice_impression_ids = state
+        .voice_impression_ids
+        .read()
+        .expect("voice impression id lock")
+        .clone();
+
+    remember_recent_experience(
+        &voice_impression_ids,
+        recent_experiences,
+        experience,
+        last_signature,
+    )
+}
+
+fn remember_recent_experiences(
+    voice_impression_ids: &HashSet<Uuid>,
+    recent_experiences: &mut VecDeque<ExperienceRecord>,
+    experiences: Vec<ExperienceRecord>,
+    last_signature: &mut Option<String>,
+) -> Vec<ExperienceRecord> {
+    experiences
+        .into_iter()
+        .filter(|experience| {
+            remember_recent_experience(
+                voice_impression_ids,
+                recent_experiences,
+                experience.clone(),
+                last_signature,
+            )
+        })
+        .collect()
+}
+
+fn remember_recent_experience(
+    voice_impression_ids: &HashSet<Uuid>,
+    recent_experiences: &mut VecDeque<ExperienceRecord>,
+    experience: ExperienceRecord,
+    last_signature: &mut Option<String>,
+) -> bool {
+    if recent_experiences
+        .iter()
+        .any(|existing| existing.id == experience.id)
+    {
+        return false;
+    }
+
+    if !is_meaningful_new_experience(voice_impression_ids, &experience, last_signature) {
+        return false;
+    }
+
+    push_limited(recent_experiences, experience, RECENT_EXPERIENCE_LIMIT);
+    true
+}
+
+fn append_voice_experience_updates(
+    state: &AppState,
+    current: &mut ActiveVoiceGeneration,
+    experiences: &[ExperienceRecord],
+) {
+    if experiences.is_empty() {
+        return;
+    }
+
+    let sensations = state
+        .sensations
+        .read()
+        .expect("sensation log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let impressions = state
+        .vision_impressions
+        .read()
+        .expect("vision impression log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for experience in experiences {
+        current.control.append_prompt(format_voice_sensory_input(
+            experience,
+            &sensations,
+            &impressions,
+        ));
+        if !current.experience_ids.contains(&experience.id) {
+            current.experience_ids.push(experience.id);
         }
     }
 }
@@ -649,7 +781,7 @@ fn face_emoji_impression_text(emoji: &str) -> String {
 }
 
 fn is_meaningful_new_experience(
-    state: &AppState,
+    voice_impression_ids: &HashSet<Uuid>,
     experience: &ExperienceRecord,
     last_signature: &mut Option<String>,
 ) -> bool {
@@ -657,7 +789,7 @@ fn is_meaningful_new_experience(
     if trimmed.is_empty() {
         return false;
     }
-    if is_only_voice_feedback(state, experience) {
+    if is_only_voice_feedback(voice_impression_ids, experience) {
         return false;
     }
 
@@ -669,18 +801,17 @@ fn is_meaningful_new_experience(
     true
 }
 
-fn is_only_voice_feedback(state: &AppState, experience: &ExperienceRecord) -> bool {
+fn is_only_voice_feedback(
+    voice_impression_ids: &HashSet<Uuid>,
+    experience: &ExperienceRecord,
+) -> bool {
     if experience.impression_ids.is_empty() {
         return false;
     }
-    let voice_ids = state
-        .voice_impression_ids
-        .read()
-        .expect("voice impression id lock");
     experience
         .impression_ids
         .iter()
-        .all(|id| voice_ids.contains(id))
+        .all(|id| voice_impression_ids.contains(id))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1014,6 +1145,71 @@ mod tests {
 
         assert!(prompt.contains("I am watching the room."));
         assert!(prompt.contains("emoji=\"🤔\""));
+    }
+
+    #[test]
+    fn recovered_experiences_are_dumped_into_voice_prompt_context() {
+        let observed_at = chrono::Utc::now();
+        let first = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at,
+            occurred_at: observed_at,
+            what: "A person steps into view.".to_string(),
+            impression_ids: Vec::new(),
+            confidence: 0.68,
+        };
+        let second = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at,
+            occurred_at: observed_at,
+            what: "The person raises a hand near the desk.".to_string(),
+            impression_ids: Vec::new(),
+            confidence: 0.72,
+        };
+        let mut recent = VecDeque::new();
+        let mut last_signature = None;
+
+        let recovered = remember_recent_experiences(
+            &HashSet::new(),
+            &mut recent,
+            vec![first, second],
+            &mut last_signature,
+        );
+        let prompt = build_voice_prompt(&recent, &VecDeque::new(), "");
+
+        assert_eq!(recovered.len(), 2);
+        assert!(prompt.contains("A person steps into view."));
+        assert!(prompt.contains("The person raises a hand near the desk."));
+    }
+
+    #[test]
+    fn recovered_voice_only_experiences_are_not_dumped_into_voice_prompt_context() {
+        let observed_at = chrono::Utc::now();
+        let voice_impression_id = Uuid::new_v4();
+        let experience = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at,
+            occurred_at: observed_at,
+            what: "The inner voice repeated its own thought.".to_string(),
+            impression_ids: vec![voice_impression_id],
+            confidence: 0.55,
+        };
+        let mut voice_impression_ids = HashSet::new();
+        voice_impression_ids.insert(voice_impression_id);
+        let mut recent = VecDeque::new();
+        let mut last_signature = None;
+
+        let recovered = remember_recent_experiences(
+            &voice_impression_ids,
+            &mut recent,
+            vec![experience],
+            &mut last_signature,
+        );
+        let prompt = build_voice_prompt(&recent, &VecDeque::new(), "");
+
+        assert!(recovered.is_empty());
+        assert!(!prompt.contains("The inner voice repeated its own thought."));
+        assert!(prompt.contains("- None yet."));
     }
 
     #[test]
