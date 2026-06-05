@@ -20,6 +20,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "webp"
 psyche = { path = "../psyche", default-features = false }
 mortar-sea = { path = "..", default-features = false, features = ["piper-onnx"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reverse_geocoder = "4.1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -1,9 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use chrono::{DateTime, Utc};
-use mortar_sea::voice_stream::{
-    BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser,
-};
+use mortar_sea::voice_stream::{BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser};
 use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -800,12 +798,9 @@ fn draft_next_voice_speech(
     current: &mut ActiveVoiceGeneration,
 ) -> Option<PendingVoiceSpeech> {
     while let Some(group) = current.pending_breath_groups.pop_front() {
-        if let Some(draft) = draft_voice_speech(
-            state,
-            current.generation_id,
-            group,
-            &current.experience_ids,
-        ) {
+        if let Some(draft) =
+            draft_voice_speech(state, current.generation_id, group, &current.experience_ids)
+        {
             return Some(draft);
         }
     }
@@ -1669,6 +1664,7 @@ fn is_emoji_modifier(ch: char) -> bool {
     )
 }
 
+#[cfg(test)]
 fn split_leading_emoji(text: &str) -> Option<(String, &str)> {
     let text = text.trim_start();
     let mut emoji_end = None;
@@ -1749,11 +1745,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct VoiceSentenceSegmenter {
     buffer: String,
     pending: VecDeque<String>,
 }
 
+#[cfg(test)]
 impl VoiceSentenceSegmenter {
     fn new() -> Self {
         Self {
@@ -2155,6 +2153,7 @@ mod tests {
         assert!(prompt.contains("you can and should wrap"));
         assert!(prompt.contains("<say>...</say>"));
         assert!(prompt.contains("Text outside <say> stays internal"));
+        assert!(prompt.contains("put the emoji inside <say> just before </say>"));
         assert!(prompt.contains("use <say> only for the exact words to be spoken aloud"));
     }
 
@@ -2262,6 +2261,45 @@ mod tests {
             parse_voice_thought("I am watching the room. 🤔"),
             Some(VoiceThought {
                 text: "I am watching the room.".to_string(),
+                emoji: Some("🤔".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn voice_thought_parser_splits_unspaced_trailing_emoji_from_text() {
+        assert_eq!(
+            parse_voice_thought("I am watching the room.🤔"),
+            Some(VoiceThought {
+                text: "I am watching the room.".to_string(),
+                emoji: Some("🤔".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn voice_stream_parser_queues_say_breath_group_from_streaming_tokens() {
+        let generation_id = Uuid::new_v4();
+        let mut parser = VoiceStreamParser::default();
+        let mut pending_breath_groups = VecDeque::new();
+
+        let events = parser.push_chunk("internal <say boundary=\"final\" tone=\"warm\">Hello");
+        collect_voice_stream_events(generation_id, events, &mut pending_breath_groups);
+        assert!(pending_breath_groups.is_empty());
+
+        let events = parser.push_chunk(".🤔</say> after");
+        collect_voice_stream_events(generation_id, events, &mut pending_breath_groups);
+
+        let group = pending_breath_groups
+            .pop_front()
+            .expect("completed say breath group");
+        assert_eq!(group.text, "Hello.🤔");
+        assert_eq!(group.boundary, SpeechBoundary::Final);
+        assert_eq!(group.tone.as_deref(), Some("warm"));
+        assert_eq!(
+            parse_voice_thought(&group.text),
+            Some(VoiceThought {
+                text: "Hello.".to_string(),
                 emoji: Some("🤔".to_string()),
             })
         );

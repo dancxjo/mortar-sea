@@ -903,17 +903,12 @@ fn fallback_impression_faculty(record: &SensationRecord) -> &str {
 }
 
 fn fallback_location_impression_for_record(record: &SensationRecord) -> String {
-    let lat = record.detail.get("lat").and_then(serde_json::Value::as_f64);
-    let lon = record.detail.get("lon").and_then(serde_json::Value::as_f64);
-    match (lat, lon) {
-        (Some(lat), Some(lon)) => format!(
-            "My geolocation is approximately ({lat:.5}, {lon:.5}). (This does not necessarily indicate movement or new information.)"
-        ),
-        _ => format!(
+    crate::location::location_impression_text_from_detail(&record.detail).unwrap_or_else(|| {
+        format!(
             "My geolocation source ({}) reported a location fix.",
             record.source.sensor_id
-        ),
-    }
+        )
+    })
 }
 
 fn fallback_audio_utterance_impression_for_record(record: &SensationRecord) -> String {
