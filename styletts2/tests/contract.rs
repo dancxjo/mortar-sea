@@ -127,10 +127,9 @@ fn lower_plan_tokens_preserves_text_punctuation_at_word_boundaries() {
 
 #[test]
 fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
-    let symbol_set =
-        SymbolSet::new(["alpha", "|", ",", "."])
-            .with_alias("variant.phone.a", "alpha")
-            .with_alias("boundary.word", "|");
+    let symbol_set = SymbolSet::new(["alpha", "|", ",", "."])
+        .with_alias("variant.phone.a", "alpha")
+        .with_alias("boundary.word", "|");
     let plan = plan(
         None,
         None,
