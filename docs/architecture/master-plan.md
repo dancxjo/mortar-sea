@@ -775,6 +775,16 @@ attributes are carried into the breath group; the planner attaches those hints t
 the utterance plan as style/prosody metadata so they are not lost before the TTS
 adapter.
 
+For this contract layer, the parser and gate behavior are the main deliverable:
+
+- Voice is not a Wit and not a Faculty.
+- Internal speech is default; `<say>` marks audible-eligible material.
+- Mouth gate state is `outside <say> = inhibited`, `inside <say> = speaking`.
+- Breath groups are the atomic committed spoken unit.
+
+Real TTS orchestration details (playback stack, ASR loopback, barge-in, phoneme-level
+control, neural prosody memory) remain intentionally out of scope for this layer.
+
 ## Self-hearing
 
 For practical implementation, TTS sits behind the Mouth gate.

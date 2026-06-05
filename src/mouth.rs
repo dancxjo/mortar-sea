@@ -10,10 +10,18 @@ use speech::{
 };
 
 use crate::speak::{self, SpeechSynthesisArtifact};
-use crate::voice_stream::{BreathGroup, VoiceStreamEvent, parse_voice_stream};
+use crate::voice_stream::{
+    BreathGroup, SayAttributes, SpeechBoundary, VoiceStreamEvent, parse_voice_stream,
+};
 
 pub trait Mouth {
     fn accept(&mut self, event: VoiceStreamEvent) -> Vec<MouthEvent>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MouthGateEvent {
+    InhibitedInternalText(String),
+    AllowedBreathGroup(BreathGroup),
 }
 
 pub trait BreathGroupPlanner {
@@ -80,24 +88,91 @@ impl fmt::Display for MouthError {
 impl std::error::Error for MouthError {}
 
 #[derive(Debug, Default)]
-pub struct MouthGate;
+pub struct VoiceMouthGate {
+    pending_say: Option<SayAttributes>,
+    pending_text: String,
+    expected_breath_group: Option<BreathGroup>,
+}
+
+impl VoiceMouthGate {
+    pub fn accept(&mut self, event: VoiceStreamEvent) -> Vec<MouthGateEvent> {
+        match event {
+            VoiceStreamEvent::InternalText(text) => {
+                vec![MouthGateEvent::InhibitedInternalText(text.text)]
+            }
+            VoiceStreamEvent::SayStart(attributes) => {
+                self.pending_say = Some(attributes);
+                self.pending_text.clear();
+                self.expected_breath_group = None;
+                Vec::new()
+            }
+            VoiceStreamEvent::SayText(text) => {
+                if self.pending_say.is_some() {
+                    if !self.pending_text.is_empty() {
+                        self.pending_text.push(' ');
+                    }
+                    self.pending_text.push_str(text.text.trim());
+                }
+                Vec::new()
+            }
+            VoiceStreamEvent::SayEnd => {
+                if let Some(attributes) = self.pending_say.take() {
+                    let text = self.pending_text.trim().to_string();
+                    self.pending_text.clear();
+                    let raw_attributes = attributes.raw_attributes();
+                    let group = BreathGroup {
+                        text,
+                        boundary: attributes.boundary,
+                        tone: attributes.tone,
+                        pace: attributes.pace,
+                        act: attributes.act,
+                        raw_attributes,
+                    };
+                    self.expected_breath_group = Some(group.clone());
+                    return vec![MouthGateEvent::AllowedBreathGroup(group)];
+                }
+                Vec::new()
+            }
+            VoiceStreamEvent::BreathGroup(group) => {
+                if self.expected_breath_group.as_ref() == Some(&group) {
+                    self.expected_breath_group = None;
+                    Vec::new()
+                } else {
+                    vec![MouthGateEvent::AllowedBreathGroup(group)]
+                }
+            }
+            VoiceStreamEvent::ParseWarning(_) => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MouthGate {
+    stream_gate: VoiceMouthGate,
+}
 
 impl Mouth for MouthGate {
     fn accept(&mut self, event: VoiceStreamEvent) -> Vec<MouthEvent> {
-        match event {
-            VoiceStreamEvent::InternalText { text } => {
-                vec![MouthEvent::InhibitedInternalText { text }]
-            }
-            VoiceStreamEvent::BreathGroup(group) if group.text.trim().is_empty() => {
-                vec![MouthEvent::RejectedBreathGroup {
-                    group,
-                    reason: MouthRejectReason::EmptyBreathGroup,
-                }]
-            }
-            VoiceStreamEvent::BreathGroup(group) => {
-                vec![MouthEvent::AcceptedBreathGroup { group }]
+        let mut events = Vec::new();
+
+        for gated in self.stream_gate.accept(event) {
+            match gated {
+                MouthGateEvent::InhibitedInternalText(text) => {
+                    events.push(MouthEvent::InhibitedInternalText { text });
+                }
+                MouthGateEvent::AllowedBreathGroup(group) if group.text.trim().is_empty() => {
+                    events.push(MouthEvent::RejectedBreathGroup {
+                        group,
+                        reason: MouthRejectReason::EmptyBreathGroup,
+                    });
+                }
+                MouthGateEvent::AllowedBreathGroup(group) => {
+                    events.push(MouthEvent::AcceptedBreathGroup { group });
+                }
             }
         }
+
+        events
     }
 }
 
@@ -175,7 +250,7 @@ pub struct DefaultMouth<P, S> {
 impl<P, S> DefaultMouth<P, S> {
     pub fn new(planner: P, synthesizer: S) -> Self {
         Self {
-            gate: MouthGate,
+            gate: MouthGate::default(),
             planner,
             synthesizer,
         }
@@ -263,8 +338,19 @@ pub fn run(command: MouthCommand) -> Result<()> {
     println!("voice events:");
     for event in &events {
         match event {
-            VoiceStreamEvent::InternalText { text } => println!("  internal: {text}"),
-            VoiceStreamEvent::BreathGroup(group) => println!("  say: {}", group.text),
+            VoiceStreamEvent::InternalText(text) => println!("  internal: {}", text.text),
+            VoiceStreamEvent::SayStart(attributes) => {
+                println!(
+                    "  say start: boundary={}",
+                    attributes.boundary.as_attr_value()
+                )
+            }
+            VoiceStreamEvent::SayText(text) => println!("  say text: {}", text.text),
+            VoiceStreamEvent::SayEnd => println!("  say end"),
+            VoiceStreamEvent::BreathGroup(group) => println!("  breath group: {}", group.text),
+            VoiceStreamEvent::ParseWarning(warning) => {
+                println!("  parse warning: {}", warning.message)
+            }
         }
     }
 
@@ -283,9 +369,7 @@ fn print_mouth_event(event: &MouthEvent) {
         MouthEvent::InhibitedInternalText { text } => println!("  inhibited internal: {text}"),
         MouthEvent::AcceptedBreathGroup { group } => {
             println!("  accepted say: {}", group.text);
-            if let Some(boundary) = &group.boundary {
-                println!("  boundary: {boundary}");
-            }
+            println!("  boundary: {}", group.boundary.as_attr_value());
             if let Some(tone) = &group.tone {
                 println!("  tone: {tone}");
             }
@@ -331,15 +415,14 @@ fn stable_utterance_id(group: &BreathGroup) -> String {
     group.tone.hash(&mut hasher);
     group.pace.hash(&mut hasher);
     group.act.hash(&mut hasher);
-    group.raw_attributes.hash(&mut hasher);
+    let raw_attributes = serde_json::to_string(&group.raw_attributes).unwrap_or_default();
+    raw_attributes.hash(&mut hasher);
     format!("mouth.utterance.{:016x}", hasher.finish())
 }
 
 fn style_description(group: &BreathGroup) -> String {
     let mut parts = Vec::new();
-    if let Some(boundary) = &group.boundary {
-        parts.push(format!("boundary={boundary}"));
-    }
+    parts.push(format!("boundary={}", group.boundary.as_attr_value()));
     if let Some(tone) = &group.tone {
         parts.push(format!("tone={tone}"));
     }
@@ -349,9 +432,11 @@ fn style_description(group: &BreathGroup) -> String {
     if let Some(act) = &group.act {
         parts.push(format!("act={act}"));
     }
-    for (key, value) in &group.raw_attributes {
-        if !matches!(key.as_str(), "boundary" | "tone" | "pace" | "act") {
-            parts.push(format!("{key}={value}"));
+    if let Some(raw) = group.raw_attributes.as_object() {
+        for (key, value) in raw {
+            if !matches!(key.as_str(), "boundary" | "tone" | "pace" | "act") {
+                parts.push(format!("{key}={}", value.as_str().unwrap_or_default()));
+            }
         }
     }
     parts.join("; ")
@@ -366,8 +451,8 @@ fn prosody_from_group(group: &BreathGroup) -> ProsodyTrack {
         confidence: 1.0,
     });
 
-    match group.boundary.as_deref() {
-        Some("continuing") => prosody.labels.push(ProsodicLabel {
+    match &group.boundary {
+        SpeechBoundary::Continuing => prosody.labels.push(ProsodicLabel {
             span: speech::TimeSpan {
                 start_s: 0.0,
                 end_s: 0.0,
@@ -375,7 +460,7 @@ fn prosody_from_group(group: &BreathGroup) -> ProsodyTrack {
             kind: ProsodicLabelKind::ContinuationRise,
             confidence: 0.75,
         }),
-        Some("final") => prosody.labels.push(ProsodicLabel {
+        SpeechBoundary::Final => prosody.labels.push(ProsodicLabel {
             span: speech::TimeSpan {
                 start_s: 0.0,
                 end_s: 0.0,
@@ -383,7 +468,7 @@ fn prosody_from_group(group: &BreathGroup) -> ProsodyTrack {
             kind: ProsodicLabelKind::FinalFall,
             confidence: 0.75,
         }),
-        _ => {}
+        SpeechBoundary::Interrupted | SpeechBoundary::Unknown(_) => {}
     }
 
     if let Some(rate) = speaking_rate_hint(group.pace.as_deref()) {
@@ -430,7 +515,8 @@ pub fn run_command_for_test(input: &str, output_dir: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voice_stream::parse_voice_stream;
+    use crate::voice_stream::{InternalText, SayText, parse_voice_stream};
+    use serde_json::Value;
 
     #[test]
     fn internal_only_voice_output_does_not_synthesize() {
@@ -446,6 +532,47 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, MouthEvent::SynthesisStarted { .. }))
         );
+    }
+
+    #[test]
+    fn mouth_gate_inhibits_internal_text() {
+        let mut gate = VoiceMouthGate::default();
+        let events = gate.accept(VoiceStreamEvent::InternalText(InternalText {
+            text: "internal only".into(),
+        }));
+
+        assert_eq!(
+            events,
+            vec![MouthGateEvent::InhibitedInternalText(
+                "internal only".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn mouth_gate_allows_only_completed_breath_groups() {
+        let mut gate = VoiceMouthGate::default();
+        let attrs = SayAttributes {
+            boundary: SpeechBoundary::Final,
+            tone: Some("settled".into()),
+            pace: None,
+            act: None,
+            extra: Value::Object(Default::default()),
+        };
+
+        assert!(gate.accept(VoiceStreamEvent::SayStart(attrs)).is_empty());
+        assert!(
+            gate.accept(VoiceStreamEvent::SayText(SayText {
+                text: "hello".into()
+            }))
+            .is_empty()
+        );
+
+        let events = gate.accept(VoiceStreamEvent::SayEnd);
+        assert!(matches!(
+            events.as_slice(),
+            [MouthGateEvent::AllowedBreathGroup(group)] if group.text == "hello"
+        ));
     }
 
     #[test]
@@ -516,9 +643,13 @@ mod tests {
         let events = parse_voice_stream(
             r#"<say boundary="final" tone="warm" pace="slow" act="answer" x-extra="1">hello</say>"#,
         );
-        let VoiceStreamEvent::BreathGroup(group) = &events[0] else {
-            panic!("expected breath group");
-        };
+        let group = events
+            .iter()
+            .find_map(|event| match event {
+                VoiceStreamEvent::BreathGroup(group) => Some(group),
+                _ => None,
+            })
+            .expect("expected breath group");
         let plan = DefaultBreathGroupPlanner::default()
             .plan_breath_group(group)
             .expect("plan");
@@ -552,11 +683,11 @@ mod tests {
         let mut mouth = DefaultMouth::new(DefaultBreathGroupPlanner::default(), FailingSynthesizer);
         let events = mouth.accept(VoiceStreamEvent::BreathGroup(BreathGroup {
             text: "hello".into(),
-            boundary: Some("final".into()),
+            boundary: SpeechBoundary::Final,
             tone: None,
             pace: None,
             act: None,
-            raw_attributes: Default::default(),
+            raw_attributes: Value::Object(Default::default()),
         }));
 
         assert!(events.iter().any(|event| matches!(
