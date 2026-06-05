@@ -834,6 +834,12 @@ fn draft_voice_speech(
         confidence: VOICE_OBSERVATION_CONFIDENCE,
     };
 
+    info!(
+        utterance_id = %observation.id,
+        %generation_id,
+        text = %thought.text,
+        "Mouth accepted Voice <say> breath group"
+    );
     let _ = state
         .realtime_experience_events
         .send(RealTimeExperienceEvent::VoiceSpeechDraft {
@@ -863,6 +869,18 @@ fn synthesize_voice_speech_audio(
     let state = state.clone();
     let events = state.realtime_experience_events.clone();
     tokio::spawn(async move {
+        info!(
+            %utterance_id,
+            %generation_id,
+            text_chars = text.chars().count(),
+            "Mouth starting Piper synthesis for browser playback"
+        );
+        let _ = events.send(RealTimeExperienceEvent::VoiceSpeechSynthesisStarted {
+            utterance_id,
+            generation_id,
+            observed_at: chrono::Utc::now(),
+            text: text.clone(),
+        });
         let text_for_task = text.clone();
         let wav = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let output_path =

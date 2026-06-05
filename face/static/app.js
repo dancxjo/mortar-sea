@@ -53,6 +53,7 @@ window.faceApp = function faceApp() {
     voicePlaybackDetail: '',
     voicePlaybackEvents: {
       drafts: 0,
+      tts: 0,
       audio: 0,
       started: 0,
       finished: 0,
@@ -86,7 +87,7 @@ window.faceApp = function faceApp() {
     },
 
     voicePlaybackEventSummary() {
-      return `draft ${this.voicePlaybackEvents.drafts} / audio ${this.voicePlaybackEvents.audio} / started ${this.voicePlaybackEvents.started} / finished ${this.voicePlaybackEvents.finished} / interrupted ${this.voicePlaybackEvents.interrupted}`;
+      return `draft ${this.voicePlaybackEvents.drafts} / tts ${this.voicePlaybackEvents.tts} / audio ${this.voicePlaybackEvents.audio} / started ${this.voicePlaybackEvents.started} / finished ${this.voicePlaybackEvents.finished} / interrupted ${this.voicePlaybackEvents.interrupted}`;
     },
 
     async start() {
@@ -248,6 +249,12 @@ window.faceApp = function faceApp() {
           this.activeVoiceGenerationId = message.generation_id;
           this.voicePlaybackEvents.drafts += 1;
           this.prepareVoiceDraft(message);
+          return;
+        }
+        if (message.type === 'voice_speech_synthesis_started') {
+          this.activeVoiceGenerationId = message.generation_id;
+          this.voicePlaybackEvents.tts += 1;
+          this.voicePlaybackDetail = `Server TTS started for "${message.text || ''}"`;
           return;
         }
         if (message.type === 'voice_speech_audio') {

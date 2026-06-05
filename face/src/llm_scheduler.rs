@@ -45,13 +45,14 @@ impl LlmSchedulerConfig {
     }
 
     pub(crate) fn dedicated_voice(model_path: PathBuf) -> Self {
+        let gpu_layers = voice_llm_gpu_layers();
         Self {
             model_path: voice_llm_model_path().unwrap_or(model_path),
             projector_path: voice_llm_projector_path(),
             context_size: llm_context_size("MORTAR_VOICE_LLAMA_CONTEXT_SIZE", 8_192),
             max_tokens: 96,
-            gpu_layers: voice_llm_gpu_layers(),
-            cpu_only: voice_llm_cpu_only(),
+            gpu_layers,
+            cpu_only: voice_llm_cpu_only(gpu_layers),
         }
     }
 }
@@ -343,7 +344,10 @@ mod tests {
     use psyche::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
     use uuid::Uuid;
 
-    use super::{LlmJobKind, LlmStreamControl, request_prompt_preview, run_generation};
+    use super::{
+        LlmJobKind, LlmStreamControl, request_prompt_preview, run_generation,
+        voice_llm_cpu_only_from_env,
+    };
 
     #[test]
     fn prompt_preview_does_not_abbreviate_timeline_entries_with_ellipses() {
@@ -370,6 +374,20 @@ mod tests {
         let preview = request_prompt_preview(&request, 12);
 
         assert_eq!(preview, "plain prompt...");
+    }
+
+    #[test]
+    fn dedicated_voice_defaults_to_cpu_when_gpu_layers_are_not_explicit() {
+        assert!(voice_llm_cpu_only_from_env(None, None));
+        assert!(!voice_llm_cpu_only_from_env(None, Some(8)));
+        assert!(!voice_llm_cpu_only_from_env(
+            Some("false".to_string()),
+            None
+        ));
+        assert!(voice_llm_cpu_only_from_env(
+            Some("true".to_string()),
+            Some(8)
+        ));
     }
 
     #[test]
@@ -713,11 +731,18 @@ fn voice_llm_gpu_layers() -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
-fn voice_llm_cpu_only() -> bool {
-    std::env::var("MORTAR_VOICE_LLAMA_CPU_ONLY")
-        .ok()
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+fn voice_llm_cpu_only(gpu_layers: Option<u32>) -> bool {
+    voice_llm_cpu_only_from_env(
+        std::env::var("MORTAR_VOICE_LLAMA_CPU_ONLY").ok(),
+        gpu_layers,
+    )
+}
+
+fn voice_llm_cpu_only_from_env(value: Option<String>, gpu_layers: Option<u32>) -> bool {
+    value
+        .as_deref()
+        .map(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or_else(|| gpu_layers.is_none())
 }
 
 fn run_generation(

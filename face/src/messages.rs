@@ -233,6 +233,12 @@ pub(crate) enum RealTimeExperienceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pace: Option<String>,
     },
+    VoiceSpeechSynthesisStarted {
+        utterance_id: Uuid,
+        generation_id: Uuid,
+        observed_at: DateTime<Utc>,
+        text: String,
+    },
     VoiceSpeechAudio {
         utterance_id: Uuid,
         generation_id: Uuid,
