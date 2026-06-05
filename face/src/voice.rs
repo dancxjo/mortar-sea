@@ -272,9 +272,6 @@ async fn run_voice(state: AppState) {
                         if current.generation_id != generation_id {
                             continue;
                         }
-                        if pending_speech.is_some() {
-                            continue;
-                        }
 
                         let _ = state.realtime_experience_events.send(
                             RealTimeExperienceEvent::VoiceResponseToken {
@@ -283,6 +280,9 @@ async fn run_voice(state: AppState) {
                             },
                         );
                         remember_generated_tail(&mut generated_tail, &text);
+                        if pending_speech.is_some() {
+                            continue;
+                        }
                         for sentence in current.segmenter.push_str(&text) {
                             if let Some(draft) = draft_voice_speech(
                                 &state,
