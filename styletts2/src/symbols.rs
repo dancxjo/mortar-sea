@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
-    BoundaryKind, PauseKind, PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, Spec,
-    SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
+    BoundaryKind, FeatureId, FeatureValue, PauseKind, PhoneInventory, PhoneToken, PhonemeInventory,
+    PhonemeToken, Spec, SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
 };
 use thiserror::Error;
 
@@ -134,13 +134,12 @@ impl SymbolSet {
         &self,
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
-        if !plan.target_phones.is_empty() {
-            return self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries);
+        if !plan.intended_phonemes.is_empty() {
+            return self
+                .lower_phoneme_tokens_with_boundaries(&plan.intended_phonemes, &plan.boundaries);
         }
 
-        let mut sequence = self.lower_phoneme_tokens(&plan.intended_phonemes)?;
-        self.append_boundary_or_default_terminal(&mut sequence.tokens, &plan.boundaries);
-        Ok(sequence)
+        self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries)
     }
 
     pub fn lower_phoneme_tokens(
@@ -175,6 +174,57 @@ impl SymbolSet {
         Ok(StyleTts2SymbolSequence { tokens: lowered })
     }
 
+    fn lower_phoneme_tokens_with_boundaries(
+        &self,
+        tokens: &[PhonemeToken],
+        boundaries: &[SpeechBoundaryToken],
+    ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        let mut lowered = Vec::new();
+        let mut boundary_word_index = 0;
+        let mut in_word = false;
+        let mut current_word_index = None;
+        let mut current_letter_index = None;
+
+        for token in tokens {
+            let Some(token_id) = spec_token_id(&token.phoneme) else {
+                continue;
+            };
+            let word_index = phoneme_word_index(token);
+            if in_word && word_index != current_word_index {
+                if !self.push_boundary_after_word(&mut lowered, boundaries, boundary_word_index) {
+                    self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
+                }
+                boundary_word_index += 1;
+                current_letter_index = None;
+            }
+
+            let letter_index = phoneme_letter_index(token);
+            if in_word
+                && word_index == current_word_index
+                && current_letter_index.is_some()
+                && letter_index.is_some()
+                && letter_index != current_letter_index
+            {
+                self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
+            }
+
+            lowered.push(StyleTts2SymbolToken {
+                symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)?,
+                source: StyleTts2SymbolSource::Phoneme,
+            });
+            current_word_index = word_index;
+            current_letter_index = letter_index;
+            in_word = true;
+        }
+
+        if in_word {
+            self.push_boundary_after_word(&mut lowered, boundaries, boundary_word_index);
+            self.append_final_punctuation_if_missing(&mut lowered);
+        }
+
+        Ok(StyleTts2SymbolSequence { tokens: lowered })
+    }
+
     fn lower_phone_tokens_with_boundaries(
         &self,
         tokens: &[PhoneToken],
@@ -199,6 +249,13 @@ impl SymbolSet {
                     word_index += 1;
                     in_word = false;
                 }
+                continue;
+            }
+            if token_id == "boundary.letter" {
+                lowered.push(StyleTts2SymbolToken {
+                    symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
+                    source: StyleTts2SymbolSource::Boundary,
+                });
                 continue;
             }
 
@@ -235,21 +292,6 @@ impl SymbolSet {
             return self.push_boundary_symbol(lowered, symbol, boundary_symbol_source(boundary));
         }
         false
-    }
-
-    fn append_boundary_or_default_terminal(
-        &self,
-        lowered: &mut Vec<StyleTts2SymbolToken>,
-        boundaries: &[SpeechBoundaryToken],
-    ) {
-        if let Some(symbol) = boundaries
-            .iter()
-            .filter(|boundary| boundary.terminal.is_some() || boundary.pause.is_some())
-            .find_map(boundary_symbol)
-        {
-            self.push_boundary_symbol(lowered, symbol, StyleTts2SymbolSource::BoundaryPunctuation);
-        }
-        self.append_final_punctuation_if_missing(lowered);
     }
 
     fn append_final_punctuation_if_missing(&self, lowered: &mut Vec<StyleTts2SymbolToken>) {
@@ -326,8 +368,28 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         set = set
             .with_alias(format!("en-US.arpabet.{symbol}"), symbol)
             .with_alias(format!("en-US.arpabet-phone.{symbol}"), symbol);
+        for variant in [
+            "en-US",
+            "en-US-GA",
+            "en-US-singing",
+            "en-GB-RP",
+            "en-GB-ScotE",
+            "en-US-AAE",
+        ] {
+            set = set.with_alias(format!("{variant}.phoneme.{symbol}"), symbol);
+        }
         for stress in ["0", "1", "2"] {
             set = set.with_alias(format!("en-US.arpabet.{symbol}{stress}"), symbol);
+            for variant in [
+                "en-US",
+                "en-US-GA",
+                "en-US-singing",
+                "en-GB-RP",
+                "en-GB-ScotE",
+                "en-US-AAE",
+            ] {
+                set = set.with_alias(format!("{variant}.phoneme.{symbol}{stress}"), symbol);
+            }
         }
     }
     set = set
@@ -386,6 +448,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     }
 
     set.with_alias("boundary.word", "|")
+        .with_alias("boundary.letter", "|")
 }
 
 fn boundary_symbol(boundary: &SpeechBoundaryToken) -> Option<&'static str> {
@@ -410,6 +473,22 @@ fn boundary_symbol_source(boundary: &SpeechBoundaryToken) -> StyleTts2SymbolSour
         StyleTts2SymbolSource::BoundaryPunctuation
     } else {
         StyleTts2SymbolSource::Boundary
+    }
+}
+
+fn phoneme_letter_index(token: &PhonemeToken) -> Option<usize> {
+    phoneme_usize_feature(token, "orthography.letter_index")
+}
+
+fn phoneme_word_index(token: &PhonemeToken) -> Option<usize> {
+    phoneme_usize_feature(token, "orthography.word_index")
+}
+
+fn phoneme_usize_feature(token: &PhonemeToken, feature_id: &str) -> Option<usize> {
+    let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Number(index)) if *index >= 0.0 => Some(*index as usize),
+        _ => None,
     }
 }
 

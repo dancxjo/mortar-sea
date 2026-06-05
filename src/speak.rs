@@ -12,7 +12,7 @@ use speech::{
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
     StyleTts2PlanOptions, StyleTts2SynthesisRequest, prepare_styletts2_plan,
-    styletts2_en_us_symbol_set, validate_styletts2_plan,
+    styletts2_en_us_symbol_set, styletts2_text_for_symbols, validate_styletts2_plan,
 };
 
 #[cfg(feature = "styletts2-onnx")]
@@ -131,10 +131,13 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             .expect("StyleTTS2 plan should be prepared")
             .chunks
             .iter()
-            .flat_map(|chunk| &chunk.symbols)
-            .map(|token| token.symbol.clone())
-            .collect::<Vec<_>>(),
-        SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols,
+            .map(|chunk| {
+                styletts2_text_for_symbols(&chunk.symbols).map(|text| text.trim().to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to format StyleTTS2 backend symbols")?
+            .join(" || "),
+        SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols.join(" "),
     };
     let artifact = match command.backend {
         SpeakBackend::Mock => synthesize_backend_plan_with_mock_to_wav(
@@ -174,19 +177,16 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         );
     }
     println!("phones: {}", format_phones(&phonemicized));
-    println!("backend_symbols: {}", backend_symbols.join(" "));
+    println!("backend_symbols: {backend_symbols}");
     if let Some(plan) = &styletts2_plan {
         println!("chunks:");
         for (index, chunk) in plan.chunks.iter().enumerate() {
             println!(
                 "  {}: {}",
                 index + 1,
-                chunk
-                    .symbols
-                    .iter()
-                    .map(|token| token.symbol.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                styletts2_text_for_symbols(&chunk.symbols)
+                    .map(|text| text.trim().to_string())
+                    .context("failed to format StyleTTS2 chunk")?
             );
         }
     }
@@ -415,7 +415,7 @@ fn format_phones(output: &PhonemicizeOutput) -> String {
         .phones
         .iter()
         .filter_map(|token| match &token.phone {
-            Spec::Known(id) if id.as_str() != "boundary.word" => {
+            Spec::Known(id) if !id.as_str().starts_with("boundary.") => {
                 Some(phone_display_symbol(id).to_string())
             }
             _ => None,
@@ -545,7 +545,7 @@ mod tests {
 
         assert_eq!(
             symbols,
-            ["HH", "ə", "L", "OW", "|", "W", "ɝ", "L", "D", "."]
+            ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D", "."]
         );
         assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
     }
@@ -576,8 +576,8 @@ mod tests {
         assert_eq!(
             symbols,
             [
-                "HH", "ə", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "ə",
-                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "ə",
+                "HH", "AH", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "AH",
+                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "AH",
                 "L", "OW", "|", "M", "AY", "|", "R", "AE", "G", "T", "AY", "M", "|", "G", "AE",
                 "L", "."
             ]

@@ -8,11 +8,11 @@ use ort::value::{DynTensorValueType, Tensor};
 use speech::{StyleRef, StyleSource};
 
 use crate::backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput};
-use crate::plan::{
-    styletts2_character_id, styletts2_text_for_symbol, styletts2_token_ids_for_symbols,
-    validate_styletts2_plan,
-};
+#[cfg(test)]
+use crate::plan::{styletts2_character_id, styletts2_text_for_symbol};
+use crate::plan::{styletts2_token_ids_for_symbols, validate_styletts2_plan};
 use crate::request::StyleTts2SynthesisRequest;
+#[cfg(test)]
 use crate::symbols::StyleTts2SymbolSequence;
 
 const SAMPLE_RATE_HZ: u32 = 24_000;
@@ -505,6 +505,7 @@ impl StyleTts2OnnxBackend {
     }
 }
 
+#[cfg(test)]
 fn styletts2_token_ids(sequence: &StyleTts2SymbolSequence) -> Result<Vec<i64>, StyleTts2Error> {
     styletts2_token_ids_for_symbols(&sequence.tokens)
 }

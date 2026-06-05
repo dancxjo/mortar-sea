@@ -336,6 +336,60 @@ fn en_us_phone_lowering_preserves_schwa_and_strut_distinction() {
 }
 
 #[test]
+fn en_us_phone_lowering_keeps_acronym_letter_boundaries() {
+    let lowered = styletts2_en_us_symbol_set()
+        .lower_phone_tokens(&[
+            phone_token("ipa.phone.aɪ"),
+            phone_token("boundary.letter"),
+            phone_token("ipa.phone.ɑ"),
+            phone_token("ipa.phone.ɹ"),
+        ])
+        .expect("letter boundary should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["AY", "|", "AA", "R"]);
+}
+
+#[test]
+fn plan_lowering_prefers_phoneme_sequence_over_realized_phones() {
+    let plan = plan(
+        None,
+        None,
+        vec![phoneme_token("en-US-GA.phoneme.AH0")],
+        vec![phone_token("ipa.phone.ə")],
+        vec![terminal_boundary(0, TerminalPunctuation::Period)],
+        Some("a".into()),
+    );
+
+    let lowered = styletts2_en_us_symbol_set()
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+    let sources = lowered
+        .tokens
+        .iter()
+        .map(|token| token.source)
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["AH", "."]);
+    assert_eq!(
+        sources,
+        [
+            StyleTts2SymbolSource::Phoneme,
+            StyleTts2SymbolSource::BoundaryPunctuation
+        ]
+    );
+}
+
+#[test]
 fn prepared_plan_chunks_long_input_on_word_boundaries() {
     let phones = vec![
         phone_token("variant.phone.a"),

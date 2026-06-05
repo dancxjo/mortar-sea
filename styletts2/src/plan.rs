@@ -115,10 +115,7 @@ pub fn validate_styletts2_plan(plan: &BackendSynthesisPlan) -> Result<(), StyleT
 pub fn styletts2_token_ids_for_symbols(
     symbols: &[StyleTts2SymbolToken],
 ) -> Result<Vec<i64>, StyleTts2Error> {
-    let mut text = String::new();
-    for token in symbols {
-        text.push_str(styletts2_text_for_symbol(&token.symbol)?);
-    }
+    let text = styletts2_text_for_symbols(symbols)?;
     let text = text.trim();
     if text.is_empty() {
         return Ok(Vec::new());
@@ -136,6 +133,16 @@ pub fn styletts2_token_ids_for_symbols(
     }
     ids.push(0);
     Ok(ids)
+}
+
+pub fn styletts2_text_for_symbols(
+    symbols: &[StyleTts2SymbolToken],
+) -> Result<String, StyleTts2Error> {
+    let mut text = String::new();
+    for token in symbols {
+        text.push_str(styletts2_text_for_symbol(&token.symbol)?);
+    }
+    Ok(text)
 }
 
 pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2Error> {
