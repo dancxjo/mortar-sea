@@ -3,31 +3,65 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use speech::{
-    EvidenceProvenance, EvidenceSource, FeatureBundle, PhoneId, PhoneToken, PhonemeId,
-    PhonemeToken, ProsodyTrack, Spec, UtteranceId, UtterancePlan, VariantId,
+    EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
+    Phonemicizer, ProsodyTrack, Spec, UtteranceId, UtterancePlan, VariantId, phone_display_symbol,
+    phoneme_display_symbol,
 };
-use styletts2::{MockStyleTts2Backend, StyleTts2Backend, StyleTts2SynthesisRequest, SymbolSet};
+use styletts2::{
+    MockStyleTts2Backend, StyleTts2Backend, StyleTts2SymbolMapper, StyleTts2SynthesisRequest,
+    styletts2_en_us_symbol_set,
+};
+
+use crate::models::{DEFAULT_STYLETTS2_MODEL_ID, missing_model_asset_paths};
 
 #[derive(Debug, Args)]
 pub struct SpeakCommand {
     #[arg(default_value = "hello world")]
     pub text: String,
-    #[arg(long, default_value = "target/styletts2-mock-speak.wav")]
+    #[arg(long, default_value = "en-US")]
+    pub variant: String,
+    #[arg(long, value_enum, default_value_t = SpeakBackend::Mock)]
+    pub backend: SpeakBackend,
+    #[arg(long, default_value = "target/styletts2-speak.wav")]
     pub output: PathBuf,
     #[arg(long, default_value_t = 24_000)]
     pub sample_rate_hz: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SpeakBackend {
+    Mock,
+    Styletts2,
+}
+
 pub fn run(command: SpeakCommand) -> Result<()> {
-    let text = command.text;
-    let (phoneme_tokens, phone_tokens, symbol_set) = demo_tokens_for_text(&text);
-    let symbol_sequence = symbol_set
-        .lower_request_tokens(&phoneme_tokens, &phone_tokens)
-        .context("failed to lower Mortar speech tokens into StyleTTS2 symbols")?;
-    let request =
-        StyleTts2SynthesisRequest::from_plan(demo_plan(text, phoneme_tokens, phone_tokens));
+    let phonemicized = EnglishPhonemicizer
+        .phonemicize(&PhonemicizeRequest {
+            text: command.text,
+            variant: VariantId(command.variant),
+        })
+        .context("failed to phonemicize text into a speech plan")?;
+    let plan = utterance_plan_from_phonemicized(&phonemicized);
+    let symbol_sequence = styletts2_en_us_symbol_set()
+        .lower(&plan)
+        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
+
+    if command.backend == SpeakBackend::Styletts2 {
+        let missing = missing_model_asset_paths(DEFAULT_STYLETTS2_MODEL_ID)?;
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "{}",
+                missing_model_assets_message(DEFAULT_STYLETTS2_MODEL_ID)
+            );
+        }
+        anyhow::bail!(
+            "native StyleTTS2 inference is not wired yet; assets are registered, use `--backend mock` to exercise the phonemicized pipeline"
+        );
+    }
+
+    let request = StyleTts2SynthesisRequest::from_plan(plan);
     let mut backend = MockStyleTts2Backend::new(command.sample_rate_hz);
     let output = backend
         .synthesize(&request)
@@ -36,7 +70,9 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     write_wav_mono_f32(&command.output, output.sample_rate_hz, &output.pcm_mono_f32)
         .with_context(|| format!("failed to write WAV to {}", command.output.display()))?;
 
-    println!("StyleTTS2 mock synthesis");
+    println!("Mortar speech synthesis plan");
+    println!("backend: mock");
+    println!("variant: {}", request.utterance_plan.variant.0);
     println!(
         "text: {}",
         request
@@ -45,8 +81,10 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             .as_deref()
             .unwrap_or("")
     );
+    println!("phonemes: {}", format_phonemes(&phonemicized));
+    println!("phones: {}", format_phones(&phonemicized));
     println!(
-        "symbols: {}",
+        "backend_symbols: {}",
         symbol_sequence
             .tokens
             .iter()
@@ -61,86 +99,52 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     Ok(())
 }
 
-fn demo_plan(
-    text: String,
-    phoneme_tokens: Vec<PhonemeToken>,
-    phone_tokens: Vec<PhoneToken>,
-) -> UtterancePlan {
+fn missing_model_assets_message(model: &str) -> String {
+    format!("missing model assets for {model}; run: cargo run models fetch {model}")
+}
+
+fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
     UtterancePlan {
         id: UtteranceId("styletts2.demo.utterance".into()),
-        variant: VariantId("styletts2.demo.variant".into()),
+        variant: output.variant.clone(),
         speaker: None,
-        intended_text: Some(text),
+        intended_text: Some(output.text.clone()),
         intended_morphemes: Vec::new(),
-        intended_phonemes: phoneme_tokens,
-        target_phones: phone_tokens,
+        intended_phonemes: output.phonemes.clone(),
+        target_phones: output.phones.clone(),
         target_prosody: ProsodyTrack::default(),
         target_acoustics: Vec::new(),
         style: None,
-        provenance: provenance(),
+        provenance: EvidenceProvenance {
+            source: EvidenceSource::TtsPlan,
+            method: "mortar-sea speak phonemicized StyleTTS2 plan".into(),
+            version: Some("0.1".into()),
+        },
     }
 }
 
-fn demo_tokens_for_text(text: &str) -> (Vec<PhonemeToken>, Vec<PhoneToken>, SymbolSet) {
-    let mut symbols = Vec::new();
-    let mut phoneme_tokens = Vec::new();
-    let mut phone_tokens = Vec::new();
-
-    for character in text.chars() {
-        let symbol = character.to_string();
-        let id_suffix = demo_symbol_id_suffix(character);
-        let phoneme_id = format!("styletts2.demo.phoneme.{id_suffix}");
-        let phone_id = format!("styletts2.demo.phone.{id_suffix}");
-        symbols.push(symbol.clone());
-        phoneme_tokens.push(phoneme_token(phoneme_id, phone_id.clone()));
-        phone_tokens.push(phone_token(phone_id));
-    }
-
-    let mut symbol_set = SymbolSet::new(symbols.clone());
-    for (character, symbol) in text.chars().zip(symbols) {
-        let id_suffix = demo_symbol_id_suffix(character);
-        symbol_set = symbol_set
-            .with_alias(
-                format!("styletts2.demo.phoneme.{id_suffix}"),
-                symbol.clone(),
-            )
-            .with_alias(format!("styletts2.demo.phone.{id_suffix}"), symbol);
-    }
-
-    (phoneme_tokens, phone_tokens, symbol_set)
+fn format_phonemes(output: &PhonemicizeOutput) -> String {
+    output
+        .phonemes
+        .iter()
+        .filter_map(|token| match &token.phoneme {
+            Spec::Known(id) => Some(phoneme_display_symbol(id).to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn demo_symbol_id_suffix(character: char) -> String {
-    format!("u{:x}", character as u32)
-}
-
-fn phoneme_token(id: String, default_phone: String) -> PhonemeToken {
-    PhonemeToken {
-        phoneme: Spec::Known(PhonemeId(id)),
-        span: None,
-        realized_as: vec![phone_token(default_phone)],
-        confidence: 1.0,
-        provenance: provenance(),
-    }
-}
-
-fn phone_token(id: String) -> PhoneToken {
-    PhoneToken {
-        phone: Spec::Known(PhoneId(id)),
-        span: None,
-        features: FeatureBundle::default(),
-        acoustic_evidence: Vec::new(),
-        confidence: 1.0,
-        provenance: provenance(),
-    }
-}
-
-fn provenance() -> EvidenceProvenance {
-    EvidenceProvenance {
-        source: EvidenceSource::Manual,
-        method: "mortar-sea speak smoke test".into(),
-        version: None,
-    }
+fn format_phones(output: &PhonemicizeOutput) -> String {
+    output
+        .phones
+        .iter()
+        .filter_map(|token| match &token.phone {
+            Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn write_wav_mono_f32(path: &PathBuf, sample_rate_hz: u32, samples: &[f32]) -> Result<()> {
@@ -182,4 +186,39 @@ fn write_wav_mono_f32(path: &PathBuf, sample_rate_hz: u32, samples: &[f32]) -> R
 
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speak_plan_lowers_phonemes_not_grapheme_characters() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "hello world".into(),
+                variant: VariantId("en-US".into()),
+            })
+            .expect("phonemicize");
+        let plan = utterance_plan_from_phonemicized(&phonemicized);
+        let lowered = styletts2_en_us_symbol_set()
+            .lower(&plan)
+            .expect("lower symbols");
+        let symbols = lowered
+            .tokens
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(symbols, ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D"]);
+        assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
+    }
+
+    #[test]
+    fn missing_styletts2_assets_message_is_actionable() {
+        assert_eq!(
+            missing_model_assets_message("styletts2-en-us"),
+            "missing model assets for styletts2-en-us; run: cargo run models fetch styletts2-en-us"
+        );
+    }
 }

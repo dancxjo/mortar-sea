@@ -86,6 +86,42 @@ There is also an ignored live-backend test for this path:
 cargo test -p face live_qdrant_neo4j -- --ignored
 ```
 
+## Speech Preparation
+
+Text is not speech in Mortar-Sea. The `speak` command first builds a linguistic
+utterance plan, then lowers that plan into backend-specific StyleTTS2 symbols:
+
+```text
+text
+  -> variant-aware phonemicization
+  -> speech-spine phoneme and phone tokens
+  -> StyleTTS2 synthesis request
+  -> backend symbols
+  -> waveform
+```
+
+The default backend is still the deterministic mock backend, but it now consumes
+the phonemicized `UtterancePlan` rather than raw grapheme characters:
+
+```sh
+cargo run speak --variant en-US "hello world"
+```
+
+Useful model commands:
+
+```sh
+cargo run models list
+cargo run models path styletts2-en-us
+cargo run models fetch styletts2-en-us
+cargo run speak --backend mock "hello world"
+cargo run speak --backend styletts2 "hello world"
+```
+
+`styletts2-en-us` registers public StyleTTS2 ONNX assets plus Mortar-Sea's
+built-in en-US phonemicizer and seed lexicon markers. Native StyleTTS2 inference
+is intentionally still behind the backend adapter; if assets are missing, the
+CLI reports the exact `models fetch` command to run.
+
 ### `occurred_at` vs `observed_at`
 
 Every cognitive event carries two timestamps:

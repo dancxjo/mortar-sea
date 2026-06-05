@@ -3,6 +3,9 @@ pub enum ModelKind {
     Llm,
     Face,
     Asr,
+    StyleTts2,
+    Lexicon,
+    Phonemicizer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -12,8 +15,10 @@ pub struct ModelAsset {
     pub relative_path: &'static str,
     pub url: &'static str,
     pub sha256: Option<&'static str>,
+    pub size_bytes: Option<u64>,
     pub license: Option<&'static str>,
     pub source: Option<&'static str>,
+    pub notes: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +34,7 @@ pub struct ModelBundle {
 pub const DEFAULT_LLM_MODEL_ID: &str = "gemma-4-e4b-it-q4-k-m";
 pub const DEFAULT_FACE_MODEL_ID: &str = "face-insightface-buffalo-l";
 pub const DEFAULT_ASR_MODEL_ID: &str = "whisper-base-en";
+pub const DEFAULT_STYLETTS2_MODEL_ID: &str = "styletts2-en-us";
 
 pub const MODEL_ASSETS: &[ModelAsset] = &[
     ModelAsset {
@@ -37,8 +43,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/gemma/gemma-4-E4B-it-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf",
         sha256: None,
+        size_bytes: None,
         license: Some("LicenseRef-Gemma"),
         source: Some("https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF"),
+        notes: None,
     },
     ModelAsset {
         id: "gemma-4-e4b-it-mmproj-bf16",
@@ -46,8 +54,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/gemma/mmproj-BF16.gguf",
         url: "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-BF16.gguf",
         sha256: Some("ee01cba03fd9c71ea2ea722225d24a84f72e7197714367e550ef705ef8851bc6"),
+        size_bytes: None,
         license: Some("LicenseRef-Gemma"),
         source: Some("https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF"),
+        notes: None,
     },
     ModelAsset {
         id: "gemma-3-4b-it-q4-k-m",
@@ -55,8 +65,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/gemma/gemma-3-4b-it-Q4_K_M.gguf",
         url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
         sha256: None,
+        size_bytes: None,
         license: Some("LicenseRef-Gemma"),
         source: Some("https://huggingface.co/unsloth/gemma-3-4b-it-GGUF"),
+        notes: None,
     },
     ModelAsset {
         id: "face-scrfd-34g-gnkps",
@@ -64,8 +76,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/face/scrfd/34g_gnkps.onnx",
         url: "https://huggingface.co/RuteNL/SCRFD-face-detection-ONNX/resolve/main/34g_gnkps.onnx",
         sha256: None,
+        size_bytes: None,
         license: None,
         source: Some("https://huggingface.co/RuteNL/SCRFD-face-detection-ONNX"),
+        notes: None,
     },
     ModelAsset {
         id: "face-buffalo-l-w600k-r50",
@@ -73,8 +87,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/face/buffalo_l/w600k_r50.onnx",
         url: "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/w600k_r50.onnx",
         sha256: None,
+        size_bytes: None,
         license: None,
         source: Some("https://huggingface.co/public-data/insightface"),
+        notes: None,
     },
     ModelAsset {
         id: "face-buffalo-l-genderage",
@@ -82,8 +98,10 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/face/buffalo_l/genderage.onnx",
         url: "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/genderage.onnx",
         sha256: None,
+        size_bytes: None,
         license: None,
         source: Some("https://huggingface.co/public-data/insightface"),
+        notes: None,
     },
     ModelAsset {
         id: "whisper-base-en",
@@ -91,8 +109,84 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
         relative_path: "models/whisper/ggml-base.en.bin",
         url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         sha256: None,
+        size_bytes: None,
         license: Some("MIT"),
         source: Some("https://huggingface.co/ggerganov/whisper.cpp"),
+        notes: None,
+    },
+    ModelAsset {
+        id: "phonemicizer-en-us-builtin",
+        filename: "phonemicizer-en-us-builtin.json",
+        relative_path: "models/speech/en-us/phonemicizer-en-us-builtin.json",
+        url: "builtin://mortar-sea/en-us-phonemicizer",
+        sha256: None,
+        size_bytes: None,
+        license: Some("MIT"),
+        source: Some("speech::EnglishPhonemicizer"),
+        notes: Some("Built-in CMUdict-style seed lexicon plus explicit unknown-word fallback."),
+    },
+    ModelAsset {
+        id: "lexicon-en-us-builtin",
+        filename: "lexicon-en-us-builtin.json",
+        relative_path: "models/speech/en-us/lexicon-en-us-builtin.json",
+        url: "builtin://mortar-sea/en-us-lexicon",
+        sha256: None,
+        size_bytes: None,
+        license: Some("MIT"),
+        source: Some("speech::EnglishPhonemicizer"),
+        notes: Some("Small deterministic built-in lexicon used by default tests and smoke runs."),
+    },
+    ModelAsset {
+        id: "styletts2-en-us-onnx-14b6dd",
+        filename: "14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
+        relative_path: "models/styletts2/en-us/14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
+        url: "https://huggingface.co/hexgrad/styletts2/resolve/main/14b6dd78237d223f172f8af702ed8aeb4a2c51fd0ff7e3ca03a4967d33fa13bc.onnx",
+        sha256: None,
+        size_bytes: Some(102_000_000),
+        license: Some("MIT"),
+        source: Some("https://huggingface.co/hexgrad/styletts2"),
+        notes: Some(
+            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+        ),
+    },
+    ModelAsset {
+        id: "styletts2-en-us-onnx-4612a9",
+        filename: "4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
+        relative_path: "models/styletts2/en-us/4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
+        url: "https://huggingface.co/hexgrad/styletts2/resolve/main/4612a9dc0c0e142468f361e8e901bdccfdca45a2ae1145e5452bc98c7915302d.onnx",
+        sha256: None,
+        size_bytes: Some(238_000_000),
+        license: Some("MIT"),
+        source: Some("https://huggingface.co/hexgrad/styletts2"),
+        notes: Some(
+            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+        ),
+    },
+    ModelAsset {
+        id: "styletts2-en-us-onnx-91473d",
+        filename: "91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
+        relative_path: "models/styletts2/en-us/91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
+        url: "https://huggingface.co/hexgrad/styletts2/resolve/main/91473db52725b0c3b8387537979a2f42f0da82836e50902503a877c610864ad6.onnx",
+        sha256: None,
+        size_bytes: Some(23_100_000),
+        license: Some("MIT"),
+        source: Some("https://huggingface.co/hexgrad/styletts2"),
+        notes: Some(
+            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+        ),
+    },
+    ModelAsset {
+        id: "styletts2-en-us-onnx-99e40b",
+        filename: "99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
+        relative_path: "models/styletts2/en-us/99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
+        url: "https://huggingface.co/hexgrad/styletts2/resolve/main/99e40b35027e96a247c8e1f359d2f99d3cd6e93afec2e0f4a15f72dd7b79d457.onnx",
+        sha256: None,
+        size_bytes: Some(307_000_000),
+        license: Some("MIT"),
+        source: Some("https://huggingface.co/hexgrad/styletts2"),
+        notes: Some(
+            "Public ONNX conversion of StyleTTS2-LibriTTS; native inference adapter is not wired yet.",
+        ),
     },
 ];
 
@@ -132,6 +226,37 @@ pub const MODEL_BUNDLES: &[ModelBundle] = &[
         primary_asset_id: "whisper-base-en",
         required_asset_ids: &["whisper-base-en"],
         aliases: &["asr", "whisper", "whisper-base", "base-en"],
+    },
+    ModelBundle {
+        id: "phonemicizer-en-us",
+        display_name: "Built-in en-US Phonemicizer",
+        kind: ModelKind::Phonemicizer,
+        primary_asset_id: "phonemicizer-en-us-builtin",
+        required_asset_ids: &["phonemicizer-en-us-builtin"],
+        aliases: &["phonemicizer", "g2p", "en-us-phonemicizer"],
+    },
+    ModelBundle {
+        id: "lexicon-en-us",
+        display_name: "Built-in en-US Lexicon",
+        kind: ModelKind::Lexicon,
+        primary_asset_id: "lexicon-en-us-builtin",
+        required_asset_ids: &["lexicon-en-us-builtin"],
+        aliases: &["lexicon", "en-us-lexicon"],
+    },
+    ModelBundle {
+        id: DEFAULT_STYLETTS2_MODEL_ID,
+        display_name: "StyleTTS2 en-US ONNX",
+        kind: ModelKind::StyleTts2,
+        primary_asset_id: "styletts2-en-us-onnx-14b6dd",
+        required_asset_ids: &[
+            "phonemicizer-en-us-builtin",
+            "lexicon-en-us-builtin",
+            "styletts2-en-us-onnx-14b6dd",
+            "styletts2-en-us-onnx-4612a9",
+            "styletts2-en-us-onnx-91473d",
+            "styletts2-en-us-onnx-99e40b",
+        ],
+        aliases: &["styletts2", "styletts2-en", "tts", "speech"],
     },
 ];
 
@@ -215,6 +340,22 @@ mod tests {
                 .unwrap()
                 .id,
             "gemma-4-e4b-it-mmproj-bf16"
+        );
+    }
+
+    #[test]
+    fn registry_lists_styletts2_and_speech_assets() {
+        assert_eq!(
+            find_bundle("styletts2-en-us").unwrap().kind,
+            ModelKind::StyleTts2
+        );
+        assert_eq!(
+            find_bundle("phonemicizer-en-us").unwrap().kind,
+            ModelKind::Phonemicizer
+        );
+        assert_eq!(
+            find_bundle("lexicon-en-us").unwrap().kind,
+            ModelKind::Lexicon
         );
     }
 }

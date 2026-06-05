@@ -100,6 +100,16 @@ pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
     })
 }
 
+pub fn missing_model_asset_paths(model: &str) -> Result<Vec<PathBuf>> {
+    let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+    let home = resolve_mortar_home()?;
+    Ok(bundle_required_assets(bundle)?
+        .into_iter()
+        .map(|asset| asset_path(&home, asset))
+        .filter(|path| !is_non_empty_file(path))
+        .collect())
+}
+
 pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
     if let Some(model) = model {
         let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
@@ -178,6 +188,9 @@ fn ensure_asset_available(asset: &ModelAsset) -> Result<()> {
 fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
     let home = resolve_mortar_home()?;
     let path = asset_path(&home, asset);
+    if asset.url.starts_with("builtin://") {
+        return fetch_builtin_asset(asset, &path, force);
+    }
     let metadata = remote_metadata(asset).unwrap_or_default();
     let expected_sha256 = asset.sha256.map(str::to_string);
 
@@ -265,6 +278,25 @@ fn fetch_asset(asset: &ModelAsset, force: bool) -> Result<()> {
 
     println!("{} {}", "downloaded".green(), path.display());
     println!("{} {}", "sha256".cyan(), sha256);
+    Ok(())
+}
+
+fn fetch_builtin_asset(asset: &ModelAsset, path: &Path, force: bool) -> Result<()> {
+    if is_non_empty_file(path) && !force {
+        println!("{} {}", "already present".green(), path.display());
+        return Ok(());
+    }
+
+    fs::create_dir_all(path.parent().context("model path has no parent")?)?;
+    let body = serde_json::json!({
+        "id": asset.id,
+        "kind": "builtin",
+        "source": asset.source,
+        "license": asset.license,
+        "notes": asset.notes,
+    });
+    fs::write(path, serde_json::to_vec_pretty(&body)?)?;
+    println!("{} {}", "registered builtin".green(), path.display());
     Ok(())
 }
 

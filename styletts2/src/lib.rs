@@ -33,8 +33,8 @@ pub use config::{StyleTts2Config, StyleTts2ConfigError, StyleTts2ModelPaths};
 pub use mock::MockStyleTts2Backend;
 pub use request::StyleTts2SynthesisRequest;
 pub use symbols::{
-    StyleTts2SymbolSequence, StyleTts2SymbolSource, StyleTts2SymbolToken, SymbolLoweringError,
-    SymbolSet,
+    StyleTts2SymbolMapper, StyleTts2SymbolSequence, StyleTts2SymbolSource, StyleTts2SymbolToken,
+    SymbolLoweringError, SymbolSet, styletts2_en_us_symbol_set,
 };
 
 #[cfg(feature = "styletts2-onnx")]

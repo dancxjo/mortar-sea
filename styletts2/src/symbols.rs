@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use speech::{PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, Spec};
+use speech::{PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, Spec, UtterancePlan};
 use thiserror::Error;
+
+use crate::backend::StyleTts2Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SymbolSet {
@@ -38,6 +40,16 @@ pub enum SymbolLoweringError {
     },
     #[error("StyleTTS2 symbol alias `{alias}` points to unknown symbol `{symbol}`")]
     AliasTargetMissing { alias: String, symbol: String },
+}
+
+pub trait StyleTts2SymbolMapper {
+    fn lower(&self, plan: &UtterancePlan) -> Result<StyleTts2SymbolSequence, StyleTts2Error>;
+}
+
+impl StyleTts2SymbolMapper for SymbolSet {
+    fn lower(&self, plan: &UtterancePlan) -> Result<StyleTts2SymbolSequence, StyleTts2Error> {
+        Ok(self.lower_request_tokens(&plan.intended_phonemes, &plan.target_phones)?)
+    }
 }
 
 impl SymbolSet {
@@ -167,6 +179,26 @@ impl SymbolSet {
             token_id: token_id.to_string(),
         })
     }
+}
+
+pub fn styletts2_en_us_symbol_set() -> SymbolSet {
+    let symbols = [
+        "AA", "AE", "AH", "AO", "AW", "AY", "B", "CH", "D", "DH", "EH", "ER", "EY", "F", "G", "HH",
+        "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
+        "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
+    ];
+    let mut set = SymbolSet::new(symbols);
+
+    for symbol in symbols {
+        set = set
+            .with_alias(format!("en-US.arpabet.{symbol}"), symbol)
+            .with_alias(format!("en-US.arpabet-phone.{symbol}"), symbol);
+        for stress in ["0", "1", "2"] {
+            set = set.with_alias(format!("en-US.arpabet.{symbol}{stress}"), symbol);
+        }
+    }
+
+    set.with_alias("boundary.word", "|")
 }
 
 fn parse_symbol_array(values: &[Value]) -> Result<SymbolSet, String> {

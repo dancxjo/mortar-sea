@@ -19,7 +19,7 @@ pub enum ModelsCommand {
     #[command(about = "List known model bundles")]
     List,
     #[command(about = "Print model paths and current selection")]
-    Path,
+    Path(ModelsPathCommand),
     #[command(about = "Show selected model and file presence")]
     Status,
     #[command(about = "Select the active LLM model")]
@@ -41,11 +41,16 @@ pub struct ModelsFetchCommand {
     force: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ModelsPathCommand {
+    model: Option<String>,
+}
+
 pub fn run(command: Option<ModelsCommand>) -> Result<()> {
     match command.unwrap_or(ModelsCommand::Menu) {
         ModelsCommand::Menu => model_menu(),
         ModelsCommand::List => list_models(),
-        ModelsCommand::Path => print_paths(),
+        ModelsCommand::Path(command) => print_paths(command.model.as_deref()),
         ModelsCommand::Status => print_status(),
         ModelsCommand::Use(command) => select_model(&command.model),
         ModelsCommand::Fetch(command) => {
@@ -134,7 +139,7 @@ fn list_models() -> Result<()> {
     Ok(())
 }
 
-fn print_paths() -> Result<()> {
+fn print_paths(model: Option<&str>) -> Result<()> {
     let home = resolve_mortar_home()?;
     println!("{}={}", "mortar_home".cyan(), home.display());
     println!("{}={}", "models_dir".cyan(), home.join("models").display());
@@ -143,8 +148,21 @@ fn print_paths() -> Result<()> {
         "selection".cyan(),
         model_selection_path()?.display()
     );
-    for asset in MODEL_ASSETS {
-        println!("{}={}", asset.id.cyan(), asset_path(&home, asset).display());
+    if let Some(model) = model {
+        let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+        println!(
+            "{}={} ({})",
+            "bundle".cyan(),
+            bundle.id,
+            bundle.display_name
+        );
+        for asset in bundle_required_assets(bundle)? {
+            println!("{}={}", asset.id.cyan(), asset_path(&home, asset).display());
+        }
+    } else {
+        for asset in MODEL_ASSETS {
+            println!("{}={}", asset.id.cyan(), asset_path(&home, asset).display());
+        }
     }
     Ok(())
 }
@@ -207,6 +225,35 @@ fn print_status() -> Result<()> {
             println!("{} cargo run models fetch asr", "fetch with:".dimmed());
         }
     }
+
+    println!();
+    println!("{}", "Speech".bold());
+    for bundle in MODEL_BUNDLES.iter().filter(|bundle| {
+        matches!(
+            bundle.kind,
+            ModelKind::StyleTts2 | ModelKind::Lexicon | ModelKind::Phonemicizer
+        )
+    }) {
+        let state = if bundle_present(bundle)? {
+            "present".green().to_string()
+        } else {
+            "missing".red().to_string()
+        };
+        println!(
+            "{} {:<12} {} ({})",
+            state,
+            model_kind_label(bundle.kind),
+            bundle.display_name.bold(),
+            bundle.id
+        );
+        if !bundle_present(bundle)? {
+            println!(
+                "{} cargo run models fetch {}",
+                "fetch with:".dimmed(),
+                bundle.id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -225,5 +272,8 @@ fn model_kind_label(kind: ModelKind) -> &'static str {
         ModelKind::Llm => "llm",
         ModelKind::Face => "face",
         ModelKind::Asr => "asr",
+        ModelKind::StyleTts2 => "styletts2",
+        ModelKind::Lexicon => "lexicon",
+        ModelKind::Phonemicizer => "phonemicizer",
     }
 }
