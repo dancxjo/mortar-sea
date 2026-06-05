@@ -156,8 +156,8 @@ struct EarResponse {
 
 impl Ear {
     fn spawn(model_path: &std::path::Path) -> anyhow::Result<Self> {
-        let worker = std::env::var_os("MORTAR_EAR")
-            .or_else(|| std::env::var_os("MORTAR_ASR_WORKER"));
+        let worker =
+            std::env::var_os("MORTAR_EAR").or_else(|| std::env::var_os("MORTAR_ASR_WORKER"));
         let mut command = if let Some(worker) = worker {
             let mut command = Command::new(worker);
             command.arg(model_path);
@@ -190,10 +190,7 @@ impl Ear {
         samples: Vec<f32>,
         duration_ms: u64,
     ) -> anyhow::Result<Vec<SentenceTranscript>> {
-        self.next_id = self
-            .next_id
-            .checked_add(1)
-            .context("ear id overflow")?;
+        self.next_id = self.next_id.checked_add(1).context("ear id overflow")?;
         let id = self.next_id;
         let request = EarRequest {
             id,

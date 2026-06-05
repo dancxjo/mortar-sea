@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -14,7 +14,7 @@ use styletts2::{
     styletts2_en_us_symbol_set,
 };
 
-use crate::models::{DEFAULT_STYLETTS2_MODEL_ID, missing_model_asset_paths};
+use crate::models::ensure_styletts2_model_available;
 
 #[derive(Debug, Args)]
 pub struct SpeakCommand {
@@ -36,6 +36,23 @@ pub enum SpeakBackend {
     Styletts2,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpeechSynthesisArtifact {
+    pub path: PathBuf,
+    pub sample_rate_hz: u32,
+    pub samples: usize,
+}
+
+impl SpeechSynthesisArtifact {
+    pub(crate) fn duration_ms(&self) -> u64 {
+        if self.sample_rate_hz == 0 {
+            return 0;
+        }
+
+        ((self.samples as u128 * 1000) / self.sample_rate_hz as u128) as u64
+    }
+}
+
 pub fn run(command: SpeakCommand) -> Result<()> {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
@@ -49,38 +66,18 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
 
     if command.backend == SpeakBackend::Styletts2 {
-        let missing = missing_model_asset_paths(DEFAULT_STYLETTS2_MODEL_ID)?;
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "{}",
-                missing_model_assets_message(DEFAULT_STYLETTS2_MODEL_ID)
-            );
-        }
+        ensure_styletts2_model_available()?;
         anyhow::bail!(
             "native StyleTTS2 inference is not wired yet; assets are registered, use `--backend mock` to exercise the phonemicized pipeline"
         );
     }
 
-    let request = StyleTts2SynthesisRequest::from_plan(plan);
-    let mut backend = MockStyleTts2Backend::new(command.sample_rate_hz);
-    let output = backend
-        .synthesize(&request)
-        .context("mock StyleTTS2 synthesis failed")?;
-
-    write_wav_mono_f32(&command.output, output.sample_rate_hz, &output.pcm_mono_f32)
-        .with_context(|| format!("failed to write WAV to {}", command.output.display()))?;
+    let artifact = synthesize_plan_with_mock_to_wav(plan, &command.output, command.sample_rate_hz)?;
 
     println!("Mortar speech synthesis plan");
     println!("backend: mock");
-    println!("variant: {}", request.utterance_plan.variant.0);
-    println!(
-        "text: {}",
-        request
-            .utterance_plan
-            .intended_text
-            .as_deref()
-            .unwrap_or("")
-    );
+    println!("variant: {}", phonemicized.variant.0);
+    println!("text: {}", phonemicized.text);
     println!("phonemes: {}", format_phonemes(&phonemicized));
     println!("phones: {}", format_phones(&phonemicized));
     println!(
@@ -92,18 +89,14 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    println!("sample_rate_hz: {}", output.sample_rate_hz);
-    println!("samples: {}", output.pcm_mono_f32.len());
-    println!("wav: {}", command.output.display());
+    println!("sample_rate_hz: {}", artifact.sample_rate_hz);
+    println!("samples: {}", artifact.samples);
+    println!("wav: {}", artifact.path.display());
 
     Ok(())
 }
 
-fn missing_model_assets_message(model: &str) -> String {
-    format!("missing model assets for {model}; run: cargo run models fetch {model}")
-}
-
-fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
+pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
     UtterancePlan {
         id: UtteranceId("styletts2.demo.utterance".into()),
         variant: output.variant.clone(),
@@ -121,6 +114,31 @@ fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan
             version: Some("0.1".into()),
         },
     }
+}
+
+pub(crate) fn synthesize_plan_with_mock_to_wav(
+    plan: UtterancePlan,
+    output_path: &Path,
+    sample_rate_hz: u32,
+) -> Result<SpeechSynthesisArtifact> {
+    styletts2_en_us_symbol_set()
+        .lower(&plan)
+        .context("failed to lower speech spine tokens into StyleTTS2 symbols")?;
+
+    let request = StyleTts2SynthesisRequest::from_plan(plan);
+    let mut backend = MockStyleTts2Backend::new(sample_rate_hz);
+    let output = backend
+        .synthesize(&request)
+        .context("mock StyleTTS2 synthesis failed")?;
+
+    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+        .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
+
+    Ok(SpeechSynthesisArtifact {
+        path: output_path.to_path_buf(),
+        sample_rate_hz: output.sample_rate_hz,
+        samples: output.pcm_mono_f32.len(),
+    })
 }
 
 fn format_phonemes(output: &PhonemicizeOutput) -> String {
@@ -147,7 +165,7 @@ fn format_phones(output: &PhonemicizeOutput) -> String {
         .join(" ")
 }
 
-fn write_wav_mono_f32(path: &PathBuf, sample_rate_hz: u32, samples: &[f32]) -> Result<()> {
+fn write_wav_mono_f32(path: &Path, sample_rate_hz: u32, samples: &[f32]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -212,13 +230,5 @@ mod tests {
 
         assert_eq!(symbols, ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D"]);
         assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
-    }
-
-    #[test]
-    fn missing_styletts2_assets_message_is_actionable() {
-        assert_eq!(
-            missing_model_assets_message("styletts2-en-us"),
-            "missing model assets for styletts2-en-us; run: cargo run models fetch styletts2-en-us"
-        );
     }
 }

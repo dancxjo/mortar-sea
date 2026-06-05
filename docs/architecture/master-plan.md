@@ -739,6 +739,42 @@ inside <say> = speaking
 
 Prosody is only required inside `<say>`.
 
+## Implemented Voice-to-Mouth mock path
+
+The first concrete path is deliberately synchronous and narrow:
+
+```text
+Voice stream
+  -> parse internal text and <say> regions
+  -> MouthGate inhibits internal text
+  -> MouthGate accepts non-empty BreathGroups
+  -> BreathGroupPlanner builds an UtterancePlan
+  -> speech synthesis line lowers the plan to StyleTTS2 symbols
+  -> mock backend writes a WAV artifact
+```
+
+Example:
+
+```xml
+I should answer carefully.
+
+<say boundary="continuing" tone="thoughtful" pace="medium">
+I think the speech line is ready,
+</say>
+
+but I should not say this part aloud.
+
+<say boundary="final" tone="settled">
+so I will send this through Mouth now.
+</say>
+```
+
+The internal text remains observable but inhibited. The two `<say>` blocks become
+breath groups and are synthesized in order. Boundary, tone, pace, act, and raw
+attributes are carried into the breath group; the planner attaches those hints to
+the utterance plan as style/prosody metadata so they are not lost before the TTS
+adapter.
+
 ## Self-hearing
 
 For practical implementation, TTS sits behind the Mouth gate.

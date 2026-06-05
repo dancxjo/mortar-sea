@@ -24,7 +24,7 @@ pub enum ModelsCommand {
     Status,
     #[command(about = "Select the active LLM model")]
     Use(ModelsUseCommand),
-    #[command(about = "Fetch the selected model, or a named model")]
+    #[command(about = "Fetch default runtime models, or a named model")]
     Fetch(ModelsFetchCommand),
 }
 

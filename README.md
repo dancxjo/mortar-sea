@@ -112,15 +112,42 @@ Useful model commands:
 ```sh
 cargo run models list
 cargo run models path styletts2-en-us
-cargo run models fetch styletts2-en-us
+cargo run models fetch
 cargo run speak --backend mock "hello world"
 cargo run speak --backend styletts2 "hello world"
 ```
 
 `styletts2-en-us` registers public StyleTTS2 ONNX assets plus Mortar-Sea's
 built-in en-US phonemicizer and seed lexicon markers. Native StyleTTS2 inference
-is intentionally still behind the backend adapter; if assets are missing, the
-CLI reports the exact `models fetch` command to run.
+is intentionally still behind the backend adapter; missing assets are ensured
+through the same model fetch path as the rest of the runtime.
+
+## Voice To Mouth
+
+Voice output is a stream. Text outside `<say>` is preserved as internal speech
+and inhibited by Mouth. Completed `<say>` regions become breath groups, and only
+those breath groups are eligible for audible synthesis:
+
+```text
+Voice stream
+  -> internal text is inhibited
+  -> <say> text becomes BreathGroup
+  -> Mouth accepts or rejects the BreathGroup
+  -> BreathGroup becomes UtterancePlan
+  -> shared speech synthesis line writes WAV
+```
+
+The mock-backed CLI path demonstrates the first working pipeline without model
+downloads:
+
+```sh
+cargo run mouth 'I should not say this. <say boundary="final" tone="warm">hello world</say>'
+```
+
+The command prints the internal versus say regions, emits inhibited/accepted
+Mouth events, and writes one WAV per accepted breath group under `target/mouth`.
+Mouth is the expression gate; StyleTTS2 remains only a downstream synthesis
+adapter.
 
 ### `occurred_at` vs `observed_at`
 
@@ -417,8 +444,8 @@ By default it listens at <http://127.0.0.1:3030>.
 
 On startup, the Face ensures the selected local LLM is present. If the selected
 Gemma GGUF is missing, it downloads it before binding the server, following the
-same "selected model just works" shape as Listenbury. To preflight the selected
-model download without launching the browser server, run:
+same "selected model just works" shape as Listenbury. To preflight runtime model
+downloads without launching the browser server, run:
 
 ```sh
 cargo run models fetch

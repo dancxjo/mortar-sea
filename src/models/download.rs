@@ -9,8 +9,8 @@ use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
 use crate::models::manifest::{
-    DEFAULT_ASR_MODEL_ID, DEFAULT_FACE_MODEL_ID, ModelAsset, ModelBundle, ModelKind,
-    bundle_primary_asset, bundle_required_assets, find_asset, find_bundle,
+    DEFAULT_ASR_MODEL_ID, DEFAULT_FACE_MODEL_ID, DEFAULT_STYLETTS2_MODEL_ID, ModelAsset,
+    ModelBundle, ModelKind, bundle_primary_asset, bundle_required_assets, find_asset, find_bundle,
 };
 use crate::models::selection::{
     asset_path, is_non_empty_file, resolve_mortar_home, selected_bundle, selected_llm_model_path,
@@ -92,6 +92,17 @@ pub fn ensure_asr_whisper_model_available() -> Result<PathBuf> {
     Ok(asset_path(&resolve_mortar_home()?, primary))
 }
 
+pub fn ensure_styletts2_model_available() -> Result<PathBuf> {
+    ensure_model_available(DEFAULT_STYLETTS2_MODEL_ID)
+}
+
+pub fn ensure_model_available(model: &str) -> Result<PathBuf> {
+    let bundle = find_bundle(model).with_context(|| format!("unknown model `{model}`"))?;
+    ensure_bundle_available(bundle)?;
+    let primary = bundle_primary_asset(bundle)?;
+    Ok(asset_path(&resolve_mortar_home()?, primary))
+}
+
 pub fn ensure_runtime_models_available() -> Result<RuntimeModelPaths> {
     Ok(RuntimeModelPaths {
         llm: ensure_selected_llm_available()?,
@@ -131,17 +142,21 @@ pub fn fetch_model(model: Option<&str>, force: bool) -> Result<PathBuf> {
 }
 
 fn fetch_all_runtime_bundles(force: bool) -> Result<()> {
-    fetch_bundle(selected_bundle()?, force)?;
-    fetch_bundle(
+    for bundle in default_runtime_bundles()? {
+        fetch_bundle(bundle, force)?;
+    }
+    Ok(())
+}
+
+fn default_runtime_bundles() -> Result<Vec<&'static ModelBundle>> {
+    Ok(vec![
+        selected_bundle()?,
         find_bundle(DEFAULT_FACE_MODEL_ID)
             .context("default face model bundle is not registered")?,
-        force,
-    )?;
-    fetch_bundle(
         find_bundle(DEFAULT_ASR_MODEL_ID).context("default ASR model bundle is not registered")?,
-        force,
-    )?;
-    Ok(())
+        find_bundle(DEFAULT_STYLETTS2_MODEL_ID)
+            .context("default StyleTTS2 model bundle is not registered")?,
+    ])
 }
 
 fn fetch_bundle(bundle: &ModelBundle, force: bool) -> Result<()> {
@@ -398,4 +413,20 @@ fn print_progress(downloaded: u64, total: Option<u64>) {
         _ => print!("\r{} {downloaded} bytes", "downloading".cyan()),
     }
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_runtime_fetch_includes_styletts2_bundle() {
+        let ids = default_runtime_bundles()
+            .expect("default runtime bundles")
+            .into_iter()
+            .map(|bundle| bundle.id)
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&DEFAULT_STYLETTS2_MODEL_ID));
+    }
 }

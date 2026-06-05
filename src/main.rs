@@ -21,6 +21,8 @@ enum Command {
     LlmTest(mortar_sea::llm_test::LlmTestCommand),
     #[command(about = "Smoke-test the StyleTTS2 speech seam with the mock backend")]
     Speak(mortar_sea::speak::SpeakCommand),
+    #[command(about = "Gate Voice <say> regions through Mouth into mock WAV output")]
+    Mouth(mortar_sea::mouth::MouthCommand),
 }
 
 fn main() -> Result<()> {
@@ -30,6 +32,7 @@ fn main() -> Result<()> {
         Some(Command::Models { command }) => mortar_sea::models::run(command),
         Some(Command::LlmTest(command)) => mortar_sea::llm_test::run(command),
         Some(Command::Speak(command)) => mortar_sea::speak::run(command),
+        Some(Command::Mouth(command)) => mortar_sea::mouth::run(command),
         None => mortar_sea::models::run(Some(mortar_sea::models::ModelsCommand::Status)),
     }
 }
