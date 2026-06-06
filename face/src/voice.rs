@@ -1378,7 +1378,7 @@ fn start_voice_generation(
         ),
         images: Vec::new(),
         max_tokens: Some(VOICE_MAX_TOKENS_PER_TURN),
-        stop: Vec::new(),
+        stop: voice_llm_stop_markers(),
     };
 
     let scheduler = state
@@ -1603,12 +1603,37 @@ fn format_voice_speech_feedback(feedback: &VoiceSpeechFeedback) -> String {
 }
 
 fn remember_recent_voice_turn(turns: &mut VecDeque<String>, text: String) {
-    let mut turn = text.trim().to_string();
+    let mut turn = truncate_at_chat_template_marker(text.trim()).to_string();
     if turn.is_empty() {
         return;
     }
     trim_to_last_chars(&mut turn, VOICE_TURN_MAX_CHARS);
     push_limited(turns, turn, RECENT_VOICE_TURN_LIMIT);
+}
+
+fn voice_llm_stop_markers() -> Vec<String> {
+    vec![
+        "<|im_end|>".to_string(),
+        "<|im_start|>user".to_string(),
+        "<end_of_turn>".to_string(),
+        "<start_of_turn>user".to_string(),
+        "<turn|>".to_string(),
+    ]
+}
+
+fn truncate_at_chat_template_marker(text: &str) -> &str {
+    let first_marker = [
+        "<|im_end|>",
+        "<|im_start|>user",
+        "<end_of_turn>",
+        "<start_of_turn>user",
+        "<turn|>",
+    ]
+    .iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+    .unwrap_or(text.len());
+    text[..first_marker].trim()
 }
 
 fn trim_to_last_chars(text: &mut String, max_chars: usize) {
@@ -2346,6 +2371,29 @@ mod tests {
 
         assert!(prompt.contains("I am thinking."));
         assert!(prompt.contains("<say>I should be spoken now.</say>"));
+    }
+
+    #[test]
+    fn recent_voice_turns_drop_leaked_chat_template_tail() {
+        let mut turns = VecDeque::new();
+        remember_recent_voice_turn(
+            &mut turns,
+            "<say>I am here.</say><|im_end|>\n<|im_start|>user\n<say>not me</say>".to_string(),
+        );
+
+        assert_eq!(
+            turns.front().map(String::as_str),
+            Some("<say>I am here.</say>")
+        );
+    }
+
+    #[test]
+    fn voice_requests_stop_at_chat_template_boundaries() {
+        let stops = voice_llm_stop_markers();
+
+        assert!(stops.contains(&"<|im_end|>".to_string()));
+        assert!(stops.contains(&"<|im_start|>user".to_string()));
+        assert!(stops.contains(&"<end_of_turn>".to_string()));
     }
 
     #[test]

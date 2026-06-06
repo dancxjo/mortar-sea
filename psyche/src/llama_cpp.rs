@@ -377,7 +377,9 @@ impl LlamaGenerationWorker {
             self.config.top_k,
         );
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut stop_detector = StopDetector::new(self.request.stop);
+        let mut stop_markers = self.request.stop.clone();
+        extend_unique(&mut stop_markers, prompt.stop.clone());
+        let mut stop_detector = StopDetector::new(stop_markers);
         let mut paused = false;
         let mut emitted_chars = 0usize;
         let mut leading_control_tokens = 0usize;
@@ -604,6 +606,7 @@ fn context_size_attempts(requested_context_size: NonZeroU32) -> Vec<NonZeroU32> 
 struct ResolvedPrompt {
     text: String,
     add_bos: AddBos,
+    stop: Vec<String>,
 }
 
 fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<ResolvedPrompt> {
@@ -615,10 +618,12 @@ fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<Res
         return Ok(ResolvedPrompt {
             text: prompt,
             add_bos: AddBos::Always,
+            stop: Vec::new(),
         });
     }
 
     let request_messages = messages_with_media_markers(&request.messages, request.images.len());
+    let template_stops = infer_chat_template_stop_markers(model, &request_messages);
     let messages = request_messages
         .iter()
         .map(|message| LlamaChatMessage::new(message.role.clone(), message.content.clone()))
@@ -633,7 +638,68 @@ fn resolve_prompt(model: &LlamaModel, request: &GenerationRequest) -> Result<Res
     Ok(ResolvedPrompt {
         text,
         add_bos: AddBos::Never,
+        stop: template_stops,
     })
+}
+
+fn infer_chat_template_stop_markers(
+    model: &LlamaModel,
+    messages: &[crate::llm::ChatMessage],
+) -> Vec<String> {
+    let sentinel = "__MORTAR_SEA_ASSISTANT_TEMPLATE_STOP__";
+    let mut probe = messages.to_vec();
+    probe.push(crate::llm::ChatMessage::new("assistant", sentinel));
+    let Ok(probe_messages) = probe
+        .iter()
+        .map(|message| LlamaChatMessage::new(message.role.clone(), message.content.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+    else {
+        return fallback_chat_template_stop_markers();
+    };
+    let Ok(rendered) = model.apply_chat_template(None, &probe_messages, false) else {
+        return fallback_chat_template_stop_markers();
+    };
+
+    let mut stops = chat_template_stop_markers_from_rendered(&rendered, sentinel);
+    extend_unique(&mut stops, fallback_chat_template_stop_markers());
+    stops
+}
+
+fn chat_template_stop_markers_from_rendered(rendered: &str, sentinel: &str) -> Vec<String> {
+    let Some((_, suffix)) = rendered.split_once(sentinel) else {
+        return Vec::new();
+    };
+
+    let mut stops = Vec::new();
+    push_unique_nonempty(&mut stops, suffix.to_string());
+    push_unique_nonempty(
+        &mut stops,
+        suffix.trim_end_matches(['\r', '\n']).to_string(),
+    );
+    stops
+}
+
+fn fallback_chat_template_stop_markers() -> Vec<String> {
+    vec![
+        "<|im_end|>".to_string(),
+        "<|im_start|>user".to_string(),
+        "<end_of_turn>".to_string(),
+        "<start_of_turn>user".to_string(),
+        "<turn|>".to_string(),
+    ]
+}
+
+fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
+    for value in values {
+        push_unique_nonempty(target, value);
+    }
+}
+
+fn push_unique_nonempty(target: &mut Vec<String>, value: String) {
+    if value.is_empty() || target.iter().any(|existing| existing == &value) {
+        return;
+    }
+    target.push(value);
 }
 
 fn messages_with_media_markers(
@@ -1225,5 +1291,18 @@ mod tests {
         assert_eq!(messages[1].content, "first");
         assert_eq!(messages[2].content, "ok");
         assert_eq!(messages[3].content, format!("second\n{marker}"));
+    }
+
+    #[test]
+    fn chat_template_stop_markers_include_trimmed_assistant_suffix() {
+        let stops = chat_template_stop_markers_from_rendered(
+            "<|im_start|>assistant\n__MORTAR_SEA_ASSISTANT_TEMPLATE_STOP__<|im_end|>\n",
+            "__MORTAR_SEA_ASSISTANT_TEMPLATE_STOP__",
+        );
+
+        assert_eq!(
+            stops,
+            vec!["<|im_end|>\n".to_string(), "<|im_end|>".to_string()]
+        );
     }
 }

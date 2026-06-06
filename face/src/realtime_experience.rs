@@ -20,6 +20,8 @@ use crate::messages::{
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
 const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
 const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 12;
+const MAX_PROMPT_IMPRESSION_TEXT_CHARS: usize = 700;
+const MAX_PROMPT_PAYLOAD_STRING_CHARS: usize = 180;
 const CONTEXT_FRAME_MAX_TOKENS: usize = 220;
 const REALTIME_EXPERIENCE_MAX_TOKENS: usize = 1024;
 const MAX_CONTEXT_FRAME_TEXT_CHARS: usize = 140;
@@ -317,7 +319,7 @@ fn build_timeline_frame_from_records(
                 "media": record.media,
                 "data_sha256": record.data_sha256,
                 "data_bytes": record.data_bytes,
-                "detail": record.detail.clone()
+                "detail": prompt_limited_value(&record.detail)
             }),
         };
 
@@ -327,21 +329,24 @@ fn build_timeline_frame_from_records(
             .find(|impression| impression.sensation_id == sensation.id)
             .map(|impression| Impression {
                 id: impression.id,
-                text: impression.text.clone(),
+                text: prompt_limited_text(&impression.text, MAX_PROMPT_IMPRESSION_TEXT_CHARS),
                 kind: impression.kind.clone(),
                 occurred_at: impression.occurred_at,
                 observed_at: impression.observed_at,
                 faculty: impression.faculty.clone(),
                 about: vec![sensation.id],
                 confidence: impression.confidence,
-                payload: impression.payload.clone(),
+                payload: prompt_limited_value(&impression.payload),
             })
             .unwrap_or_else(|| {
                 let mut impression = Impression::new(
                     vec![sensation.id],
                     sensation.occurred_at,
                     sensation.observed_at,
-                    fallback_impression_for_record(record),
+                    prompt_limited_text(
+                        &fallback_impression_for_record(record),
+                        MAX_PROMPT_IMPRESSION_TEXT_CHARS,
+                    ),
                 );
                 impression.kind = fallback_impression_kind(record).to_string();
                 impression.faculty = fallback_impression_faculty(record).to_string();
@@ -836,16 +841,6 @@ fn select_records_for_experience_prompt<'a>(
     let mut selected_ids = HashSet::new();
     let mut selected = Vec::new();
 
-    for record in records
-        .iter()
-        .rev()
-        .take(RECENT_SENSATION_PROMPT_LIMIT)
-        .rev()
-    {
-        selected_ids.insert(record.id);
-        selected.push(record);
-    }
-
     let referenced_impression_ids = impressions
         .iter()
         .rev()
@@ -855,19 +850,68 @@ fn select_records_for_experience_prompt<'a>(
 
     let mut referenced_records = records
         .iter()
-        .filter(|record| {
-            referenced_impression_ids.contains(&record.id) && !selected_ids.contains(&record.id)
-        })
+        .filter(|record| referenced_impression_ids.contains(&record.id))
         .collect::<Vec<_>>();
     referenced_records.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
 
     for record in referenced_records {
         selected_ids.insert(record.id);
         selected.push(record);
+        if selected.len() == RECENT_SENSATION_PROMPT_LIMIT {
+            break;
+        }
+    }
+
+    if selected.len() < RECENT_SENSATION_PROMPT_LIMIT {
+        for record in records.iter().rev() {
+            if selected_ids.contains(&record.id) {
+                continue;
+            }
+            selected_ids.insert(record.id);
+            selected.push(record);
+            if selected.len() == RECENT_SENSATION_PROMPT_LIMIT {
+                break;
+            }
+        }
     }
 
     selected.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
     selected
+}
+
+fn prompt_limited_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for (index, ch) in compact.chars().enumerate() {
+        if index == max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn prompt_limited_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(prompt_limited_text(text, MAX_PROMPT_PAYLOAD_STRING_CHARS))
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .take(8)
+                .map(prompt_limited_value)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .take(12)
+                .map(|(key, value)| (key.clone(), prompt_limited_value(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn fallback_impression_for_record(record: &SensationRecord) -> String {
@@ -1220,6 +1264,7 @@ mod tests {
 
         let selected = select_records_for_experience_prompt(&records, &impressions);
         assert!(selected.iter().any(|record| record.id == original_id));
+        assert_eq!(selected.len(), RECENT_SENSATION_PROMPT_LIMIT);
 
         let prompt = build_prompt_from_records(&records, &impressions);
         assert!(prompt.contains(&format!("SENSATION vision.frame id={original_id}")));
@@ -1229,6 +1274,78 @@ mod tests {
         assert!(prompt.contains("Write as first-person lived experience"));
         assert!(prompt.contains("what I see, where I am, and what seems present"));
         assert!(!prompt.contains("{\"experiences\""));
+    }
+
+    #[test]
+    fn prompt_selection_prioritizes_referenced_records_within_budget() {
+        let t0 = chrono::Utc::now();
+        let referenced = (0..RECENT_VISION_IMPRESSION_PROMPT_LIMIT)
+            .map(|sequence| {
+                let id = Uuid::new_v4();
+                sensation_record(
+                    id,
+                    sequence as u64,
+                    t0 + ChronoDuration::seconds(sequence as i64),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut records = referenced.clone();
+        for sequence in 0..RECENT_SENSATION_PROMPT_LIMIT + 5 {
+            records.push(sensation_record(
+                Uuid::new_v4(),
+                (100 + sequence) as u64,
+                t0 + ChronoDuration::minutes(1) + ChronoDuration::seconds(sequence as i64),
+            ));
+        }
+        let impressions = referenced
+            .iter()
+            .map(|record| {
+                vision_impression(
+                    record.id,
+                    record.occurred_at,
+                    &format!("Referenced impression for sequence {}.", record.sequence),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let selected = select_records_for_experience_prompt(&records, &impressions);
+
+        assert_eq!(selected.len(), RECENT_SENSATION_PROMPT_LIMIT);
+        for record in &referenced {
+            assert!(selected.iter().any(|selected| selected.id == record.id));
+        }
+
+        let prompt = build_prompt_from_records(&records, &impressions);
+        assert_eq!(
+            prompt.matches("\n  IMPRESSION ").count(),
+            RECENT_SENSATION_PROMPT_LIMIT
+        );
+        assert!(!prompt.contains("sequence 100"));
+    }
+
+    #[test]
+    fn prompt_compacts_long_impression_text_and_payload() {
+        let t0 = chrono::Utc::now();
+        let id = Uuid::new_v4();
+        let records = vec![sensation_record(id, 1, t0)];
+        let long_text = format!(
+            "{} tail-that-should-not-enter-the-prompt",
+            "word ".repeat(300)
+        );
+        let mut impression = vision_impression(id, t0, &long_text);
+        impression.payload = json!({
+            "raw": format!(
+                "{} payload-tail-that-should-not-enter-the-prompt",
+                "payload ".repeat(120)
+            )
+        });
+
+        let prompt = build_prompt_from_records(&records, &[impression]);
+
+        assert!(prompt.contains("word word word"));
+        assert!(prompt.contains('…'));
+        assert!(!prompt.contains("tail-that-should-not-enter-the-prompt"));
+        assert!(!prompt.contains("payload-tail-that-should-not-enter-the-prompt"));
     }
 
     #[test]
