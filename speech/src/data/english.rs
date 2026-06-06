@@ -14,8 +14,9 @@ use crate::rules::{
 use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
 use crate::variant::{
-    LinguisticVariant, VariantImplementationStatus, VariantStatus, WeakFormFollowingContext,
-    WeakFormRule, WeakFormStyleContext,
+    LinguisticVariant, OrthographicUnitKind, OrthographicUnitPronunciation,
+    VariantImplementationStatus, VariantStatus, WeakFormFollowingContext, WeakFormRule,
+    WeakFormStyleContext,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +206,7 @@ pub fn variant(id: &str) -> LinguisticVariant {
         allophone_rules: allophone_rules(row.id),
         epenthesis_rules: epenthesis_rules(),
         weak_forms: weak_forms(row.id),
+        orthographic_unit_pronunciations: orthographic_unit_pronunciations(row.id),
         phonotactics: Some(phonotactics(row.singing)),
         orthography: Some(Orthography {
             name: "English Latin orthography".into(),
@@ -223,6 +225,80 @@ pub fn variant(id: &str) -> LinguisticVariant {
                 VariantImplementationStatus::PermissiveProfile
             }
         },
+    }
+}
+
+fn orthographic_unit_pronunciations(variant_id: &str) -> Vec<OrthographicUnitPronunciation> {
+    let letters: &[(char, &[&str])] = &[
+        ('A', &["EY1"]),
+        ('B', &["B", "IY1"]),
+        ('C', &["S", "IY1"]),
+        ('D', &["D", "IY1"]),
+        ('E', &["IY1"]),
+        ('F', &["EH1", "F"]),
+        ('G', &["JH", "IY1"]),
+        ('H', &["EY1", "CH"]),
+        ('I', &["AY1"]),
+        ('J', &["JH", "EY1"]),
+        ('K', &["K", "EY1"]),
+        ('L', &["EH1", "L"]),
+        ('M', &["EH1", "M"]),
+        ('N', &["EH1", "N"]),
+        ('O', &["OW1"]),
+        ('P', &["P", "IY1"]),
+        ('Q', &["K", "Y", "UW1"]),
+        ('R', &["AA1", "R"]),
+        ('S', &["EH1", "S"]),
+        ('T', &["T", "IY1"]),
+        ('U', &["Y", "UW1"]),
+        ('V', &["V", "IY1"]),
+        ('W', &["D", "AH1", "B", "AH0", "L", "Y", "UW0"]),
+        ('X', &["EH1", "K", "S"]),
+        ('Y', &["W", "AY1"]),
+        ('Z', &["Z", "IY1"]),
+    ];
+    let digits: &[(char, &[&str])] = &[
+        ('0', &["Z", "IH1", "R", "OW0"]),
+        ('1', &["W", "AH1", "N"]),
+        ('2', &["T", "UW1"]),
+        ('3', &["TH", "R", "IY1"]),
+        ('4', &["F", "AO1", "R"]),
+        ('5', &["F", "AY1", "V"]),
+        ('6', &["S", "IH1", "K", "S"]),
+        ('7', &["S", "EH1", "V", "AH0", "N"]),
+        ('8', &["EY1", "T"]),
+        ('9', &["N", "AY1", "N"]),
+    ];
+
+    letters
+        .iter()
+        .map(|(letter, symbols)| {
+            orthographic_unit(
+                variant_id,
+                OrthographicUnitKind::LetterName,
+                *letter,
+                symbols,
+            )
+        })
+        .chain(digits.iter().map(|(digit, symbols)| {
+            orthographic_unit(variant_id, OrthographicUnitKind::DigitName, *digit, symbols)
+        }))
+        .collect()
+}
+
+fn orthographic_unit(
+    variant_id: &str,
+    kind: OrthographicUnitKind,
+    unit: char,
+    symbols: &[&str],
+) -> OrthographicUnitPronunciation {
+    OrthographicUnitPronunciation {
+        kind,
+        unit: unit.to_string(),
+        pronunciation: symbols
+            .iter()
+            .map(|symbol| arpabet::phoneme_id(variant_id, symbol))
+            .collect(),
     }
 }
 
@@ -373,7 +449,6 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
                 after: vec![SegmentMatcher::FeatureBundle(feature_bundle(&[(
                     "major", "vowel",
                 )]))],
-                word_position: Spec::Known(crate::segment::WordPosition::Medial),
                 ..Default::default()
             },
             conditions: vec![
@@ -651,6 +726,7 @@ mod tests {
                 .conditions
                 .contains(&RuleCondition::NotCarefulStyle)
         );
+        assert_eq!(flapping.environment.word_position, Spec::Unspecified);
         assert_eq!(flapping.environment.prosodic_context, Spec::Unspecified);
     }
 

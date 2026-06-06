@@ -34,7 +34,8 @@ pub use config::{StyleTts2Config, StyleTts2ConfigError, StyleTts2ModelPaths};
 pub use mock::MockStyleTts2Backend;
 pub use plan::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, StyleTts2PlanOptions, SynthesisChunk,
-    prepare_styletts2_plan, styletts2_text_for_symbols, validate_styletts2_plan,
+    prepare_styletts2_plan, styletts2_text_for_symbols, styletts2_text_to_ids,
+    validate_styletts2_plan,
 };
 pub use request::StyleTts2SynthesisRequest;
 pub use symbols::{

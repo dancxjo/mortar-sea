@@ -993,7 +993,6 @@ mod tests {
         .expect("token ids");
 
         assert_eq!(ids[0], 0);
-        assert_eq!(ids.last(), Some(&0));
         assert!(ids.iter().all(|id| (0..178).contains(id)));
         assert!(ids.len() > 9);
         assert!(ids.contains(&styletts2_character_id('ɜ').expect("rhotic vowel id")));
@@ -1008,7 +1007,6 @@ mod tests {
         .expect("token ids");
 
         assert_eq!(ids[0], 0);
-        assert_eq!(ids.last(), Some(&0));
         assert!(ids.contains(&styletts2_character_id('!').expect("punctuation id")));
     }
 
@@ -1027,7 +1025,7 @@ mod tests {
             .map(|character| styletts2_character_id(character).expect("character id"))
             .collect::<Vec<_>>();
 
-        assert_eq!(&ids[1..ids.len() - 1], expected_inner.as_slice());
+        assert_eq!(&ids[1..], expected_inner.as_slice());
         assert!(!ids.contains(&styletts2_character_id('ʧ').expect("ligature CH id")));
         assert!(!ids.contains(&styletts2_character_id('ʤ').expect("ligature JH id")));
     }

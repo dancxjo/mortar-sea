@@ -127,6 +127,7 @@ pub fn variant() -> LinguisticVariant {
         allophone_rules: Vec::new(),
         epenthesis_rules: Vec::new(),
         weak_forms: Vec::new(),
+        orthographic_unit_pronunciations: Vec::new(),
         phonotactics: Some(Phonotactics {
             allowed_syllable_shapes: vec![
                 SyllableShape {

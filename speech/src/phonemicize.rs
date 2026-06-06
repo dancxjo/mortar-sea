@@ -11,13 +11,17 @@ use crate::ids::{FeatureId, GraphemeId, PhoneId, PhonemeId, VariantId};
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::Syllable;
-use crate::realize::{PhoneDecompositionPolicy, RealizationOptions, realize_phonemes};
+use crate::realize::{
+    PhoneDecompositionPolicy, RealizationOptions, epenthetic_phones_after, realize_phoneme_at,
+    realize_phonemes,
+};
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
 use crate::syllabify::syllabify_phones;
 use crate::time::TextSpan;
 use crate::variant::{
-    LinguisticVariant, WeakFormFollowingContext, WeakFormRule, WeakFormStyleContext,
+    LinguisticVariant, OrthographicUnitKind, WeakFormFollowingContext, WeakFormRule,
+    WeakFormStyleContext,
 };
 
 const WORD_BOUNDARY_ID: &str = "boundary.word";
@@ -144,10 +148,6 @@ pub trait PronunciationPipeline {
             .is_some_and(|style| style.careful_style);
 
         for (word_index, word) in words.iter().enumerate() {
-            if word_index > 0 {
-                phones.push(boundary_phone_token());
-            }
-
             graphemes.push(GraphemeToken {
                 grapheme: Spec::Known(GraphemeId(format!(
                     "{}.word.{}",
@@ -171,6 +171,26 @@ pub trait PronunciationPipeline {
             let mut word_phones = self.phone_realizer(&variant, &word_phonemes, careful_style);
 
             assign_realized_phones(&mut word_phonemes, &word_phones);
+            if word_index > 0 {
+                let has_pause_boundary = has_pause_boundary_after_word(&boundaries, word_index - 1);
+                if !has_pause_boundary {
+                    realize_connected_allophone_before_word(
+                        &variant,
+                        &mut phonemes,
+                        &mut phones,
+                        word_phonemes.first(),
+                        careful_style,
+                    );
+                }
+                phones.push(boundary_phone_token());
+                if !has_pause_boundary {
+                    phones.extend(epenthetic_phones_between_words(
+                        &variant,
+                        phonemes.last(),
+                        word_phonemes.first(),
+                    ));
+                }
+            }
             phonemes.extend(word_phonemes);
 
             insert_letter_boundaries(&mut word_phones, &pronunciation.letter_break_offsets);
@@ -363,13 +383,27 @@ impl PronunciationPipeline for EnglishPhonemicizer {
                 .text
                 .chars()
                 .find(|character| character.is_alphabetic())
-                .map(letter_name_pronunciation)
+                .map(|character| {
+                    orthographic_unit_candidate(
+                        &character.to_ascii_uppercase().to_string(),
+                        variant,
+                        OrthographicUnitKind::LetterName,
+                    )
+                })
                 .unwrap_or_default(),
-            OrthographicTokenKind::MixedAlphaNumeric => mixed_alphanumeric_pronunciation(word)
-                .candidates
-                .first()
-                .cloned()
-                .unwrap_or_default(),
+            OrthographicTokenKind::MixedAlphaNumeric => {
+                mixed_alphanumeric_pronunciation(word, variant)
+                    .candidates
+                    .first()
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            OrthographicTokenKind::LetterName => {
+                orthographic_unit_candidate(&word.text, variant, OrthographicUnitKind::LetterName)
+            }
+            OrthographicTokenKind::DigitName => {
+                orthographic_unit_candidate(&word.text, variant, OrthographicUnitKind::DigitName)
+            }
             OrthographicTokenKind::Word | OrthographicTokenKind::Hyphenated(_) => self
                 .token_classifier(
                     word,
@@ -403,6 +437,8 @@ pub enum OrthographicTokenKind {
     Word,
     Acronym,
     MixedAlphaNumeric,
+    LetterName,
+    DigitName,
     Hyphenated(Vec<OrthographicToken>),
 }
 
@@ -430,6 +466,7 @@ fn tokenize_words(text: &str) -> Vec<WordToken> {
         push_word_chunk(text, start_byte, text.len(), &mut words);
     }
 
+    mark_spaced_letter_name_runs(&mut words);
     words
 }
 
@@ -495,6 +532,11 @@ fn should_split_camelcase_part(
 
 fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<WordToken>) {
     let surface = &text[start_byte..end_byte];
+    if should_split_mixed_surface_into_units(surface) {
+        push_orthographic_unit_words(text, start_byte, end_byte, words);
+        return;
+    }
+
     let start_char = text[..start_byte].chars().count();
     let end_char = start_char + surface.chars().count();
     let normalized = normalize_surface_word(surface);
@@ -511,6 +553,46 @@ fn push_word(text: &str, start_byte: usize, end_byte: usize, words: &mut Vec<Wor
             end_char,
         },
     });
+}
+
+fn should_split_mixed_surface_into_units(surface: &str) -> bool {
+    let has_alpha = surface.chars().any(char::is_alphabetic);
+    let has_digit = surface.chars().any(|character| character.is_ascii_digit());
+    has_alpha
+        && has_digit
+        && surface
+            .chars()
+            .filter(|character| character.is_alphabetic())
+            .all(|character| character.is_uppercase())
+}
+
+fn push_orthographic_unit_words(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    words: &mut Vec<WordToken>,
+) {
+    for (offset, character) in text[start_byte..end_byte].char_indices() {
+        if !character.is_alphanumeric() {
+            continue;
+        }
+        let byte_index = start_byte + offset;
+        let start_char = text[..byte_index].chars().count();
+        let kind = if character.is_ascii_digit() {
+            OrthographicTokenKind::DigitName
+        } else {
+            OrthographicTokenKind::LetterName
+        };
+        words.push(WordToken {
+            text: character.to_string(),
+            normalized: character.to_lowercase().collect(),
+            kind,
+            span: TextSpan {
+                start_char,
+                end_char: start_char + 1,
+            },
+        });
+    }
 }
 
 fn normalize_surface_word(surface: &str) -> String {
@@ -630,6 +712,40 @@ fn classify_surface_word(surface: &str) -> OrthographicTokenKind {
     }
 }
 
+fn mark_spaced_letter_name_runs(words: &mut [WordToken]) {
+    let mut index = 0;
+    while index < words.len() {
+        if !is_uppercase_single_letter_word(&words[index]) {
+            index += 1;
+            continue;
+        }
+
+        let run_start = index;
+        while index < words.len() && is_uppercase_single_letter_word(&words[index]) {
+            index += 1;
+        }
+
+        if index - run_start < 2 {
+            continue;
+        }
+
+        for word in &mut words[run_start..index] {
+            word.kind = OrthographicTokenKind::LetterName;
+        }
+    }
+}
+
+fn is_uppercase_single_letter_word(word: &WordToken) -> bool {
+    if !matches!(word.kind, OrthographicTokenKind::Word) {
+        return false;
+    }
+    let mut characters = word.text.chars();
+    let Some(character) = characters.next() else {
+        return false;
+    };
+    characters.next().is_none() && character.is_alphabetic() && character.is_uppercase()
+}
+
 #[derive(Debug, Clone)]
 pub struct WordPronunciation {
     pub candidates: Vec<Vec<CmuPhoneme>>,
@@ -658,10 +774,26 @@ fn pronunciation_for_word(
 
     match &word.kind {
         OrthographicTokenKind::Acronym => {
-            return acronym_pronunciation(word.text.as_str());
+            return acronym_pronunciation(word.text.as_str(), variant);
         }
         OrthographicTokenKind::MixedAlphaNumeric => {
-            return mixed_alphanumeric_pronunciation(word);
+            return mixed_alphanumeric_pronunciation(word, variant);
+        }
+        OrthographicTokenKind::LetterName => {
+            return orthographic_unit_pronunciation(
+                word,
+                variant,
+                OrthographicUnitKind::LetterName,
+                Some(0),
+            );
+        }
+        OrthographicTokenKind::DigitName => {
+            return orthographic_unit_pronunciation(
+                word,
+                variant,
+                OrthographicUnitKind::DigitName,
+                None,
+            );
         }
         OrthographicTokenKind::Word | OrthographicTokenKind::Hyphenated(_) => {}
     }
@@ -755,8 +887,9 @@ fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciat
     }
 }
 
-fn acronym_pronunciation(surface: &str) -> WordPronunciation {
-    let (candidate, letter_break_offsets, letter_indices) = letter_name_sequence(surface.chars());
+fn acronym_pronunciation(surface: &str, variant: &LinguisticVariant) -> WordPronunciation {
+    let (candidate, letter_break_offsets, letter_indices) =
+        letter_name_sequence(surface.chars(), variant);
     WordPronunciation {
         candidates: vec![candidate.clone()],
         status: PronunciationStatus::Exact,
@@ -782,7 +915,10 @@ fn acronym_pronunciation(surface: &str) -> WordPronunciation {
     }
 }
 
-fn mixed_alphanumeric_pronunciation(word: &WordToken) -> WordPronunciation {
+fn mixed_alphanumeric_pronunciation(
+    word: &WordToken,
+    variant: &LinguisticVariant,
+) -> WordPronunciation {
     let mut candidate = Vec::new();
     let alpha = word
         .text
@@ -791,7 +927,7 @@ fn mixed_alphanumeric_pronunciation(word: &WordToken) -> WordPronunciation {
         .collect::<String>();
     if alpha.len() > 1 && alpha.chars().all(|character| character.is_uppercase()) {
         let (sequence, letter_break_offsets, letter_indices) =
-            mixed_alphanumeric_sequence(word.text.chars());
+            mixed_alphanumeric_sequence(word.text.chars(), variant);
         candidate.extend(sequence);
         return WordPronunciation {
             candidates: vec![candidate],
@@ -832,6 +968,7 @@ fn mixed_alphanumeric_pronunciation(word: &WordToken) -> WordPronunciation {
 
 fn mixed_alphanumeric_sequence(
     characters: impl IntoIterator<Item = char>,
+    variant: &LinguisticVariant,
 ) -> (Vec<CmuPhoneme>, Vec<usize>, Vec<usize>) {
     let mut candidate = Vec::new();
     let mut break_offsets = Vec::new();
@@ -844,9 +981,17 @@ fn mixed_alphanumeric_sequence(
 
     for (index, character) in units.iter().enumerate() {
         let pronunciation = if character.is_ascii_digit() {
-            digit_name_pronunciation(*character)
+            orthographic_unit_candidate(
+                &character.to_string(),
+                variant,
+                OrthographicUnitKind::DigitName,
+            )
         } else if character.is_alphabetic() {
-            letter_name_pronunciation(*character)
+            orthographic_unit_candidate(
+                &character.to_ascii_uppercase().to_string(),
+                variant,
+                OrthographicUnitKind::LetterName,
+            )
         } else {
             Vec::new()
         };
@@ -869,6 +1014,7 @@ fn mixed_alphanumeric_sequence(
 
 fn letter_name_sequence(
     characters: impl IntoIterator<Item = char>,
+    variant: &LinguisticVariant,
 ) -> (Vec<CmuPhoneme>, Vec<usize>, Vec<usize>) {
     let mut candidate = Vec::new();
     let mut break_offsets = Vec::new();
@@ -878,7 +1024,11 @@ fn letter_name_sequence(
         .filter(|character| character.is_alphabetic())
         .collect::<Vec<_>>();
     for (index, character) in letters.iter().enumerate() {
-        let letter_name = letter_name_pronunciation(*character);
+        let letter_name = orthographic_unit_candidate(
+            &character.to_ascii_uppercase().to_string(),
+            variant,
+            OrthographicUnitKind::LetterName,
+        );
         letter_indices.extend(std::iter::repeat(index).take(letter_name.len()));
         candidate.extend(letter_name);
         if index + 1 < letters.len() {
@@ -888,60 +1038,53 @@ fn letter_name_sequence(
     (candidate, break_offsets, letter_indices)
 }
 
-fn letter_name_pronunciation(character: char) -> Vec<CmuPhoneme> {
-    let symbols: &[&str] = match character.to_ascii_uppercase() {
-        'A' => &["EY1"],
-        'B' => &["B", "IY1"],
-        'C' => &["S", "IY1"],
-        'D' => &["D", "IY1"],
-        'E' => &["IY1"],
-        'F' => &["EH1", "F"],
-        'G' => &["JH", "IY1"],
-        'H' => &["EY1", "CH"],
-        'I' => &["AY1"],
-        'J' => &["JH", "EY1"],
-        'K' => &["K", "EY1"],
-        'L' => &["EH1", "L"],
-        'M' => &["EH1", "M"],
-        'N' => &["EH1", "N"],
-        'O' => &["OW1"],
-        'P' => &["P", "IY1"],
-        'Q' => &["K", "Y", "UW1"],
-        'R' => &["AA1", "R"],
-        'S' => &["EH1", "S"],
-        'T' => &["T", "IY1"],
-        'U' => &["Y", "UW1"],
-        'V' => &["V", "IY1"],
-        'W' => &["D", "AH1", "B", "AH0", "L", "Y", "UW0"],
-        'X' => &["EH1", "K", "S"],
-        'Y' => &["W", "AY1"],
-        'Z' => &["Z", "IY1"],
-        _ => &[],
-    };
-    symbols
-        .iter()
-        .map(|symbol| CmuPhoneme::parse(symbol))
-        .collect()
+fn orthographic_unit_pronunciation(
+    word: &WordToken,
+    variant: &LinguisticVariant,
+    kind: OrthographicUnitKind,
+    letter_index: Option<usize>,
+) -> WordPronunciation {
+    let candidate = orthographic_unit_candidate(&word.text, variant, kind);
+    let letter_indices = letter_index
+        .map(|index| std::iter::repeat_n(index, candidate.len()).collect())
+        .unwrap_or_default();
+    WordPronunciation {
+        candidates: vec![candidate.clone()],
+        status: PronunciationStatus::Exact,
+        provenance: EvidenceProvenance {
+            source: EvidenceSource::Rule,
+            method: "variant orthographic-unit pronunciation".into(),
+            version: Some("0.1".into()),
+        },
+        warnings: Vec::new(),
+        letter_break_offsets: Vec::new(),
+        letter_indices,
+    }
 }
 
-fn digit_name_pronunciation(character: char) -> Vec<CmuPhoneme> {
-    let symbols: &[&str] = match character {
-        '0' => &["Z", "IH1", "R", "OW0"],
-        '1' => &["W", "AH1", "N"],
-        '2' => &["T", "UW1"],
-        '3' => &["TH", "R", "IY1"],
-        '4' => &["F", "AO1", "R"],
-        '5' => &["F", "AY1", "V"],
-        '6' => &["S", "IH1", "K", "S"],
-        '7' => &["S", "EH1", "V", "AH0", "N"],
-        '8' => &["EY1", "T"],
-        '9' => &["N", "AY1", "N"],
-        _ => &[],
+fn orthographic_unit_candidate(
+    unit: &str,
+    variant: &LinguisticVariant,
+    kind: OrthographicUnitKind,
+) -> Vec<CmuPhoneme> {
+    let normalized = if kind == OrthographicUnitKind::LetterName {
+        unit.to_uppercase()
+    } else {
+        unit.to_string()
     };
-    symbols
+    variant
+        .orthographic_unit_pronunciations
         .iter()
-        .map(|symbol| CmuPhoneme::parse(symbol))
-        .collect()
+        .find(|entry| entry.kind == kind && entry.unit == normalized)
+        .map(|entry| {
+            entry
+                .pronunciation
+                .iter()
+                .map(phoneme_display_symbol)
+                .map(CmuPhoneme::parse)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn guess_pronunciation(word: &str) -> Vec<CmuPhoneme> {
@@ -1010,6 +1153,64 @@ fn insert_letter_boundaries(phones: &mut Vec<PhoneToken>, break_offsets: &[usize
         let index = phone_insert_index_for_phoneme_offset(phones, *offset);
         phones.insert(index, letter_boundary_phone_token());
     }
+}
+
+fn epenthetic_phones_between_words(
+    variant: &LinguisticVariant,
+    previous: Option<&PhonemeToken>,
+    next: Option<&PhonemeToken>,
+) -> Vec<PhoneToken> {
+    let (Some(previous), Some(next)) = (previous, next) else {
+        return Vec::new();
+    };
+    epenthetic_phones_after(variant, &[previous.clone(), next.clone()], 0)
+}
+
+fn has_pause_boundary_after_word(boundaries: &[SpeechBoundaryToken], word_index: usize) -> bool {
+    boundaries.iter().any(|boundary| {
+        boundary.after_grapheme_index == word_index
+            && (boundary.pause.is_some() || boundary.terminal.is_some())
+    })
+}
+
+fn realize_connected_allophone_before_word(
+    variant: &LinguisticVariant,
+    phonemes: &mut [PhonemeToken],
+    phones: &mut [PhoneToken],
+    next: Option<&PhonemeToken>,
+    careful_style: bool,
+) {
+    let Some(next) = next else {
+        return;
+    };
+    if phonemes.len() < 2 {
+        return;
+    }
+
+    let target_index = phonemes.len() - 1;
+    let context = [
+        phonemes[target_index - 1].clone(),
+        phonemes[target_index].clone(),
+        next.clone(),
+    ];
+    let realized = realize_phoneme_at(
+        variant,
+        &context,
+        1,
+        &RealizationOptions {
+            careful_style,
+            phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+        },
+    );
+    let Some(phone_index) = phones
+        .iter()
+        .rposition(|phone| !is_boundary_phone(phone) && !phone.provenance.method.contains("epenthesis rule"))
+    else {
+        return;
+    };
+
+    phones[phone_index] = realized.clone();
+    phonemes[target_index].realized_as = vec![realized];
 }
 
 fn phone_insert_index_for_phoneme_offset(phones: &[PhoneToken], offset: usize) -> usize {
@@ -1230,11 +1431,14 @@ mod tests {
                 .iter()
                 .map(|token| token.text.as_str())
                 .collect::<Vec<_>>(),
-            ["speech", "to", "Style", "TTS2"]
+            ["speech", "to", "Style", "T", "T", "S", "2"]
         );
-        assert!(output.warnings.iter().any(|warning| {
-            warning.kind == PronunciationWarningKind::MixedAlphaNumeric && warning.token == "TTS2"
-        }));
+        assert!(
+            output
+                .warnings
+                .iter()
+                .all(|warning| warning.kind != PronunciationWarningKind::MixedAlphaNumeric)
+        );
     }
 
     #[test]
@@ -1298,19 +1502,34 @@ mod tests {
             warning.kind == PronunciationWarningKind::AcronymExpanded && warning.token == "IR"
         }));
 
+        let spaced_ir = EnglishPhonemicizer
+            .phonemicize(&request("I R", "en-US"))
+            .expect("spaced IR");
+        assert_eq!(phoneme_symbols(&spaced_ir), ["AY1", "AA1", "R"]);
+        assert_eq!(phone_symbols(&spaced_ir), ["aɪ", "|", "j", "ɑ", "ɹ"]);
+
+        let paused_ir = EnglishPhonemicizer
+            .phonemicize(&request("I, R", "en-US"))
+            .expect("paused IR");
+        assert_eq!(phoneme_symbols(&paused_ir), ["AY1", "AA1", "R"]);
+        assert_eq!(phone_symbols(&paused_ir), ["aɪ", "|", "ɑ", "ɹ"]);
+
         let styletts2 = EnglishPhonemicizer
             .phonemicize(&request("StyleTTS2", "en-US"))
             .expect("StyleTTS2");
-        assert!(styletts2.warnings.iter().any(|warning| {
-            warning.kind == PronunciationWarningKind::MixedAlphaNumeric && warning.token == "TTS2"
-        }));
         assert_eq!(
             styletts2
                 .graphemes
                 .iter()
                 .map(|token| token.text.as_str())
                 .collect::<Vec<_>>(),
-            ["Style", "TTS2"]
+            ["Style", "T", "T", "S", "2"]
+        );
+        assert!(
+            styletts2
+                .warnings
+                .iter()
+                .all(|warning| warning.kind != PronunciationWarningKind::MixedAlphaNumeric)
         );
     }
 
@@ -1320,6 +1539,27 @@ mod tests {
             .phonemicize(&request("water", "en-US-GA"))
             .expect("water");
         assert!(phone_symbols(&output).contains(&"ɾ".into()));
+        let flapped_t = output
+            .phonemes
+            .iter()
+            .find(|token| {
+                matches!(
+                    &token.phoneme,
+                    Spec::Known(id) if phoneme_display_symbol(id) == "T"
+                )
+            })
+            .expect("T phoneme");
+        assert_eq!(
+            flapped_t
+                .realized_as
+                .iter()
+                .filter_map(|phone| match &phone.phone {
+                    Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["ɾ"]
+        );
 
         let careful = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {

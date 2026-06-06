@@ -7,7 +7,7 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 #[cfg(feature = "piper-onnx")]
 use ort::value::{DynTensorValueType, Tensor, TensorElementType};
 use serde_json::Value;
-use speech::{Spec, UtterancePlan, phoneme_display_symbol};
+use speech::{PhoneToken, Spec, UtterancePlan, phoneme_display_symbol};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PiperVoiceConfig {
@@ -23,6 +23,12 @@ pub struct PiperVoiceConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiperPhonemeSequence {
     pub symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiperSynthesisChunk {
+    pub sequence: PiperPhonemeSequence,
+    pub pause_after_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,22 +149,25 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             .unwrap_or_default();
         let mut word_index = 0;
         let mut in_word = false;
-        for token in &plan.target_phones {
+        for (token_index, token) in plan.target_phones.iter().enumerate() {
             let Spec::Known(phone_id) = &token.phone else {
                 continue;
             };
             if phone_id.0 == "boundary.word" {
                 if in_word {
-                    push_symbol(
-                        &mut symbols,
-                        punctuation_after_words
-                            .get(word_index)
-                            .and_then(|symbol| *symbol)
-                            .unwrap_or(" "),
-                    );
+                    let boundary_symbol = punctuation_after_words
+                        .get(word_index)
+                        .and_then(|symbol| *symbol);
+                    if boundary_symbol.is_some()
+                        || !next_phone_is_epenthetic_linker(&plan.target_phones[token_index + 1..])
+                    {
+                        push_boundary_symbols(&mut symbols, boundary_symbol.unwrap_or(" "));
+                    }
                     word_index += 1;
                     in_word = false;
                 }
+            } else if phone_id.0 == "boundary.letter" {
+                continue;
             } else {
                 push_symbol(&mut symbols, piper_symbol_for_phone_id(&phone_id.0));
                 in_word = true;
@@ -182,6 +191,60 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
     }
     append_default_terminal_symbol(&mut symbols);
     PiperPhonemeSequence { symbols }
+}
+
+pub fn piper_synthesis_chunks_from_plan(plan: &UtterancePlan) -> Vec<PiperSynthesisChunk> {
+    piper_synthesis_chunks_from_sequence(piper_sequence_from_plan(plan))
+}
+
+fn piper_synthesis_chunks_from_sequence(
+    sequence: PiperPhonemeSequence,
+) -> Vec<PiperSynthesisChunk> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    let mut pending_pause_after_ms = None;
+    let mut skip_leading_spaces = false;
+
+    for symbol in sequence.symbols {
+        if skip_leading_spaces && symbol == " " {
+            continue;
+        }
+        skip_leading_spaces = false;
+
+        let pause_after_ms = piper_pause_after_ms(&symbol);
+        current.push(symbol);
+        if let Some(pause_after_ms) = pause_after_ms {
+            chunks.push(PiperSynthesisChunk {
+                sequence: PiperPhonemeSequence {
+                    symbols: std::mem::take(&mut current),
+                },
+                pause_after_ms: 0,
+            });
+            pending_pause_after_ms = Some(pause_after_ms);
+            skip_leading_spaces = true;
+        } else if let Some(pause_after_ms) = pending_pause_after_ms.take() {
+            if let Some(previous) = chunks.last_mut() {
+                previous.pause_after_ms = pause_after_ms;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(PiperSynthesisChunk {
+            sequence: PiperPhonemeSequence { symbols: current },
+            pause_after_ms: 0,
+        });
+    }
+
+    chunks
+}
+
+fn piper_pause_after_ms(symbol: &str) -> Option<u32> {
+    match symbol {
+        "," | ";" | ":" => Some(220),
+        "." | "!" | "?" => Some(380),
+        _ => None,
+    }
 }
 
 fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
@@ -364,6 +427,19 @@ fn punctuation_symbol(text: &str) -> Option<&'static str> {
 }
 
 impl PiperPhonemeSequence {
+    pub fn to_symbols_compatible(&self, config: &PiperVoiceConfig) -> Result<Self> {
+        let text_sequence = self.with_utterance_termination(config);
+        if text_sequence
+            .symbols
+            .iter()
+            .all(|symbol| config.phoneme_id_map.contains_key(symbol))
+        {
+            return Ok(text_sequence);
+        }
+
+        text_sequence.to_espeak_compatible(config)
+    }
+
     pub fn to_text_ids_compatible(&self, config: &PiperVoiceConfig) -> Result<PiperIdSequence> {
         let text_sequence = self.with_utterance_termination(config);
         if config_has_piper_framing(config) {
@@ -471,11 +547,25 @@ impl PiperOnnxBackend {
     }
 
     pub fn synthesize_plan(&mut self, plan: &UtterancePlan) -> Result<PiperSynthesisOutput> {
-        let sequence = piper_sequence_from_plan(plan);
-        let ids = sequence
-            .to_text_ids_compatible(&self.config)
-            .context("failed to map Mortar speech plan to Piper phoneme IDs")?;
-        self.synthesize_ids(&ids)
+        let chunks = piper_synthesis_chunks_from_plan(plan);
+        let mut pcm_mono_f32 = Vec::new();
+        for chunk in chunks {
+            let ids = chunk
+                .sequence
+                .to_text_ids_compatible(&self.config)
+                .context("failed to map Mortar speech plan to Piper phoneme IDs")?;
+            let output = self.synthesize_ids(&ids)?;
+            pcm_mono_f32.extend(output.pcm_mono_f32);
+            pcm_mono_f32.extend(std::iter::repeat_n(
+                0.0,
+                pause_sample_count(self.config.sample_rate_hz, chunk.pause_after_ms),
+            ));
+        }
+
+        Ok(PiperSynthesisOutput {
+            sample_rate_hz: self.config.sample_rate_hz,
+            pcm_mono_f32,
+        })
     }
 
     pub fn synthesize_ids(&mut self, ids: &PiperIdSequence) -> Result<PiperSynthesisOutput> {
@@ -621,6 +711,35 @@ fn push_symbol(symbols: &mut Vec<String>, symbol: &str) {
         return;
     }
     symbols.push(symbol.to_string());
+}
+
+fn pause_sample_count(sample_rate_hz: u32, pause_ms: u32) -> usize {
+    ((sample_rate_hz as u128 * pause_ms as u128) / 1000) as usize
+}
+
+fn push_boundary_symbols(symbols: &mut Vec<String>, symbol: &str) {
+    push_symbol(symbols, symbol);
+    if is_clause_pause_symbol(symbol) {
+        push_symbol(symbols, " ");
+    }
+}
+
+fn is_clause_pause_symbol(symbol: &str) -> bool {
+    matches!(symbol, "," | ";" | ":")
+}
+
+fn next_phone_is_epenthetic_linker(tokens: &[PhoneToken]) -> bool {
+    for token in tokens {
+        if matches!(&token.phone, Spec::Known(id) if id.as_str().starts_with("boundary.")) {
+            continue;
+        }
+        return is_epenthetic_phone(token);
+    }
+    false
+}
+
+fn is_epenthetic_phone(token: &PhoneToken) -> bool {
+    token.provenance.method.contains("epenthesis rule")
 }
 
 fn find_value<'a>(root: &'a Value, paths: &[&[&str]]) -> Option<&'a Value> {
@@ -1191,7 +1310,7 @@ mod tests {
         let sequence = piper_sequence_from_plan(&plan);
         assert_eq!(
             sequence.symbols,
-            vec!["HH", "AH", "L", "OW", " ", "W", "ER", "L", "D", "."]
+            vec!["HH", "ə", "L", "OW", " ", "W", "ER", "L", "D", "."]
         );
     }
 
@@ -1255,9 +1374,146 @@ mod tests {
         assert_eq!(
             sequence.symbols,
             vec![
-                "HH", "AH", "L", "OW", " ", "W", "ER", "L", "D", ",", "OW", "K", "EY", "."
+                "HH", "ə", "L", "OW", " ", "W", "ER", "L", "D", ",", " ", "OW", "K", "EY", "."
             ]
         );
+    }
+
+    #[test]
+    fn piper_sequence_lowers_letter_boundaries_as_structure_and_keeps_linking_yod() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "IR".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(sequence.symbols, vec!["AY", "Y", "AA", "R", "."]);
+
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "I R".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(sequence.symbols, vec!["AY", "Y", "AA", "R", "."]);
+    }
+
+    #[test]
+    fn piper_sequence_preserves_schwa_for_word_initial_reduced_vowels() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "a adjacent current phonological".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(
+            sequence.symbols,
+            vec![
+                "ə", " ", "ə", "JH", "EY", "S", "ə", "N", "T", " ", "K", "ER", "ə", "N", "T", " ",
+                "F", "OW", "N", "ə", "L", "AA", "JH", "IH", "K", "ə", "L", "."
+            ]
+        );
+    }
+
+    #[test]
+    fn piper_synthesis_chunks_insert_audio_pauses_after_internal_punctuation() {
+        let chunks = piper_synthesis_chunks_from_sequence(PiperPhonemeSequence {
+            symbols: vec![
+                "HH".into(),
+                "ə".into(),
+                ",".into(),
+                " ".into(),
+                "OW".into(),
+                "K".into(),
+                ".".into(),
+                "N".into(),
+                "OW".into(),
+                "?".into(),
+            ],
+        });
+
+        assert_eq!(
+            chunks,
+            vec![
+                PiperSynthesisChunk {
+                    sequence: PiperPhonemeSequence {
+                        symbols: vec!["HH".into(), "ə".into(), ",".into()]
+                    },
+                    pause_after_ms: 220,
+                },
+                PiperSynthesisChunk {
+                    sequence: PiperPhonemeSequence {
+                        symbols: vec!["OW".into(), "K".into(), ".".into()]
+                    },
+                    pause_after_ms: 380,
+                },
+                PiperSynthesisChunk {
+                    sequence: PiperPhonemeSequence {
+                        symbols: vec!["N".into(), "OW".into(), "?".into()]
+                    },
+                    pause_after_ms: 0,
+                },
+            ]
+        );
+        assert_eq!(pause_sample_count(22_050, 220), 4_851);
+        assert_eq!(pause_sample_count(22_050, 380), 8_379);
     }
 
     #[test]
@@ -1288,6 +1544,36 @@ mod tests {
         .expect("ids");
 
         assert_eq!(ids.ids, vec![1, 2, 6, 2, 7, 2, 4, 2, 8, 2, 9, 2, 5, 2, 3]);
+    }
+
+    #[test]
+    fn compatible_symbols_show_actual_espeak_lowering_for_piper() {
+        let config = config_from_json(
+            r#"
+            {
+              "audio": { "sample_rate": 22050 },
+              "phoneme_id_map": {
+                "^": [1],
+                "_": [2],
+                "$": [3],
+                " ": [4],
+                ".": [5],
+                "ð": [6],
+                "æ": [7],
+                "t": [8],
+                "ə": [9]
+              }
+            }
+            "#,
+        );
+
+        let sequence = PiperPhonemeSequence {
+            symbols: vec!["DH".into(), "AE".into(), "T".into(), " ".into(), "ə".into()],
+        }
+        .to_symbols_compatible(&config)
+        .expect("compatible symbols");
+
+        assert_eq!(sequence.symbols, vec!["ð", "æ", "t", " ", "ə", "."]);
     }
 
     #[test]

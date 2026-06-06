@@ -31,6 +31,8 @@ pub struct LinguisticVariant {
     pub epenthesis_rules: Vec<EpenthesisRule>,
     #[serde(default)]
     pub weak_forms: Vec<WeakFormRule>,
+    #[serde(default)]
+    pub orthographic_unit_pronunciations: Vec<OrthographicUnitPronunciation>,
     pub phonotactics: Option<Phonotactics>,
     pub orthography: Option<Orthography>,
     pub morphology: Option<Morphology>,
@@ -68,6 +70,20 @@ pub struct WeakFormRule {
     pub following: WeakFormFollowingContext,
     #[serde(default)]
     pub style: WeakFormStyleContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrthographicUnitPronunciation {
+    pub kind: OrthographicUnitKind,
+    pub unit: String,
+    pub pronunciation: Vec<PhonemeId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrthographicUnitKind {
+    LetterName,
+    DigitName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

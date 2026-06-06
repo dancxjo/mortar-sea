@@ -39,20 +39,29 @@ pub fn realize_phonemes(
 ) -> Vec<PhoneToken> {
     let mut phones = Vec::new();
     for (index, token) in phonemes.iter().enumerate() {
-        let default_phone = default_phone_token(variant, token);
-        let phone = if let Some(rule) = variant
-            .allophone_rules
-            .iter()
-            .find(|rule| rule_applies(rule, variant, phonemes, index, options))
-        {
-            phone_from_rule(variant, token, &default_phone, rule)
-        } else {
-            default_phone
-        };
-        phones.push(phone);
+        phones.push(realize_phoneme_at(variant, phonemes, index, options));
         phones.extend(epenthetic_phones_after(variant, phonemes, index));
     }
     phones
+}
+
+pub fn realize_phoneme_at(
+    variant: &LinguisticVariant,
+    phonemes: &[PhonemeToken],
+    index: usize,
+    options: &RealizationOptions,
+) -> PhoneToken {
+    let token = &phonemes[index];
+    let default_phone = default_phone_token(variant, token);
+    if let Some(rule) = variant
+        .allophone_rules
+        .iter()
+        .find(|rule| rule_applies(rule, variant, phonemes, index, options))
+    {
+        phone_from_rule(variant, token, &default_phone, rule)
+    } else {
+        default_phone
+    }
 }
 
 pub fn epenthetic_phones_after(
@@ -306,7 +315,7 @@ fn phone_from_rule(
         confidence: token.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: format!("{} epenthesis rule {}", variant.id.0, rule.id),
+            method: format!("{} allophone rule {}", variant.id.0, rule.id),
             version: Some("0.1".into()),
         },
     }

@@ -393,18 +393,18 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 #[test]
 fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
     for (input, expected) in [
-        ("I R", "ˈaɪ ˈɑɹ"),
+        ("I R", "ˈaɪ ˈɑːɹ"),
         (
             "I’ll inspect the current English rule.",
-            "ˈaɪl ˌɪnˈspɛkt ðə ˈkɝɹənt ˈɪŋɡlɪʃ ˈɹul.",
+            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl .",
         ),
-        ("StyleTTS2", "ˈstaɪl ˈtiˈtiˈjɛˈstu"),
-        ("current", "ˈkɝɹənt"),
-        ("derived", "dɚɹˈaɪvd"),
-        ("surface", "ˈsɝɹfəs"),
+        ("StyleTTS2", "stˈaɪl tˈiː tˈiː ˈɛs tˈuː"),
+        ("current", "kˈɜːɹənt"),
+        ("derived", "dᵻɹˈaɪvd"),
+        ("surface", "sˈɜːɹfəs"),
         (
             "That points to a real phonological rule.",
-            "ˈðæt ˈpɔɪnts ˈtu ə ˈɹil ˌfoʊnəˈlɑdʒɪkəl ˈɹul.",
+            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːl fˌoʊnəlˈɑːdʒɪkəl ɹˈuːl .",
         ),
     ] {
         let actual = styletts2_text_from_english(input);

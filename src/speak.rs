@@ -125,6 +125,10 @@ pub fn run(command: SpeakCommand) -> Result<()> {
         ),
         SpeakBackend::Piper => None,
     };
+    let piper_voice_model = match command.backend {
+        SpeakBackend::Piper => Some(ensure_piper_voice_model_available()?),
+        _ => None,
+    };
     let backend_symbols = match command.backend {
         SpeakBackend::Mock | SpeakBackend::Styletts2 => styletts2_plan
             .as_ref()
@@ -137,7 +141,17 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             .collect::<Result<Vec<_>, _>>()
             .context("failed to format StyleTTS2 backend symbols")?
             .join(" || "),
-        SpeakBackend::Piper => piper_sequence_from_plan(&plan).symbols.join(" "),
+        SpeakBackend::Piper => {
+            let voice_model = piper_voice_model
+                .as_ref()
+                .expect("Piper voice model should be available");
+            let config = PiperVoiceConfig::from_json_file(piper_voice_config_path(voice_model))?;
+            piper_sequence_from_plan(&plan)
+                .to_symbols_compatible(&config)
+                .context("failed to format Piper backend symbols")?
+                .symbols
+                .join(" ")
+        }
     };
     let artifact = match command.backend {
         SpeakBackend::Mock => synthesize_backend_plan_with_mock_to_wav(
@@ -160,8 +174,10 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             )?
         }
         SpeakBackend::Piper => {
-            let voice_model = ensure_piper_voice_model_available()?;
-            synthesize_plan_with_piper_to_wav(plan, &voice_model, &command.output)?
+            let voice_model = piper_voice_model
+                .as_ref()
+                .expect("Piper voice model should be available");
+            synthesize_plan_with_piper_to_wav(plan, voice_model, &command.output)?
         }
     };
 

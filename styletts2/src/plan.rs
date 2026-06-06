@@ -117,6 +117,11 @@ pub fn styletts2_token_ids_for_symbols(
 ) -> Result<Vec<i64>, StyleTts2Error> {
     let text = styletts2_text_for_symbols(symbols)?;
     let text = text.trim();
+    styletts2_text_to_ids(text)
+}
+
+pub fn styletts2_text_to_ids(styletts2_text: &str) -> Result<Vec<i64>, StyleTts2Error> {
+    let text = styletts2_text.trim();
     if text.is_empty() {
         return Ok(Vec::new());
     }
@@ -131,7 +136,6 @@ pub fn styletts2_token_ids_for_symbols(
         })?;
         ids.push(id);
     }
-    ids.push(0);
     Ok(ids)
 }
 
@@ -147,10 +151,10 @@ pub fn styletts2_text_for_symbols(
 
 pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2Error> {
     let text = match symbol {
-        "AA" => "ɑ",
+        "AA" => "ɑː",
         "AE" => "æ",
         "AH" => "ə",
-        "AO" => "ɔ",
+        "AO" => "ɔː",
         "AW" => "aʊ",
         "AY" => "aɪ",
         "B" => "b",
@@ -164,7 +168,7 @@ pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2
         "G" => "ɡ",
         "HH" => "h",
         "IH" => "ɪ",
-        "IY" => "i",
+        "IY" => "iː",
         "JH" => "dʒ",
         "K" => "k",
         "L" => "l",
@@ -180,7 +184,7 @@ pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2
         "T" => "t",
         "TH" => "θ",
         "UH" => "ʊ",
-        "UW" => "u",
+        "UW" => "uː",
         "V" => "v",
         "W" => "w",
         "Y" => "j",
@@ -188,15 +192,16 @@ pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2
         "ZH" => "ʒ",
         "ə" => "ə",
         "ʌ" => "ʌ",
-        "ɚ" => "ɚ",
-        "ɝ" => "ɝ",
+        "ɚ" => "ᵻ",
+        "ɝ" => "ɜː",
+        "ɾ" => "ɾ",
         "|" => " ",
-        "." => ". ",
-        "!" => "! ",
-        "?" => "? ",
-        "," => ", ",
-        ";" => "; ",
-        ":" => ": ",
+        "." => " .",
+        "!" => " !",
+        "?" => " ?",
+        "," => " ,",
+        ";" => " ;",
+        ":" => " :",
         "ˈ" => "ˈ",
         "ˌ" => "ˌ",
         _ => {

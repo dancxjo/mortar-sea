@@ -337,15 +337,23 @@ impl SymbolSet {
                 }
             }
 
-            if let Some(marker) = stress_marker(syllable_stress(syllable)) {
-                self.push_boundary_symbol(&mut lowered, marker, StyleTts2SymbolSource::Boundary);
-            }
-            for phone in &syllable.phones {
+            let stress_marker = stress_marker(syllable_stress(syllable));
+            let nucleus_index = syllable.nucleus_index;
+            for (phone_index, phone) in syllable.phones.iter().enumerate() {
                 let Some(token_id) = spec_token_id(&phone.phone) else {
                     continue;
                 };
                 if token_id.starts_with("boundary.") {
                     continue;
+                }
+                if nucleus_index == Some(phone_index)
+                    && let Some(marker) = stress_marker
+                {
+                    self.push_boundary_symbol(
+                        &mut lowered,
+                        marker,
+                        StyleTts2SymbolSource::Boundary,
+                    );
                 }
                 lowered.push(StyleTts2SymbolToken {
                     symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
@@ -446,7 +454,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
-    let reduced_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ"];
+    let reduced_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ", "ɾ"];
     let stress_symbols = ["ˈ", "ˌ"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
@@ -527,7 +535,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.s", "S"),
         ("ipa.phone.ʃ", "SH"),
         ("ipa.phone.t", "T"),
-        ("ipa.phone.ɾ", "T"),
+        ("ipa.phone.ɾ", "ɾ"),
         ("ipa.phone.θ", "TH"),
         ("ipa.phone.ʊ", "UH"),
         ("ipa.phone.uː", "UW"),
