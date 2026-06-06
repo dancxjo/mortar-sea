@@ -2,7 +2,7 @@
 
 An experiment in cognition and meaning-making.
 
-Mortar-Sea is the cognitive substrate beneath Pete.
+Pete Mortar-Sea is the cognitive substrate beneath Pete.
 
 The goal is not to build a chatbot. The goal is to model how observations become understanding, how understanding becomes memory, and how memory participates in future understanding.
 
@@ -32,7 +32,7 @@ Memory is not a separate pathway.
 
 ## Local Memory Services
 
-Mortar-Sea uses the same local persistence stack as Listenbury for memory
+Pete Mortar-Sea uses the same local persistence stack as Listenbury for memory
 backend development:
 
 - Qdrant for vector search on `127.0.0.1:6333`
@@ -120,7 +120,7 @@ cargo test -p face live_qdrant_neo4j -- --ignored
 
 ## Speech Preparation
 
-Text is not speech in Mortar-Sea. The `speak` command first builds a linguistic
+Text is not speech in Pete Mortar-Sea. The `speak` command first builds a linguistic
 utterance plan, then lowers that plan into backend-specific StyleTTS2 symbols:
 
 ```text
@@ -150,7 +150,7 @@ cargo run speak --backend styletts2 "hello world"
 cargo run speak --backend styletts2 --voice-wav samples/voice.wav --style-wav samples/style.wav "hello world"
 ```
 
-`styletts2-en-us` registers public StyleTTS2 ONNX assets plus Mortar-Sea's
+`styletts2-en-us` registers public StyleTTS2 ONNX assets plus Pete Mortar-Sea's
 built-in en-US phonemicizer and seed lexicon markers. `--backend styletts2`
 loads the native ONNX token encoder and decoder through the backend adapter;
 missing assets are ensured through the same model fetch path as the rest of the
@@ -158,7 +158,7 @@ runtime.
 
 The StyleTTS2 path also fetches a small LibriTTS-derived reference-audio archive
 from the upstream StyleTTS2 LibriTTS demo. If no `--voice-wav` or `--style-wav`
-is passed, Mortar-Sea uses a neutral default voice reference and a warm default
+is passed, Pete Mortar-Sea uses a neutral default voice reference and a warm default
 intonation reference from that archive. Passing only `--voice-wav` uses the same
 clip for both speaker and style; passing both separates who is speaking from how
 they are speaking. The reference clips are registered as CC-BY-4.0 assets; the
@@ -473,7 +473,7 @@ This repository intentionally does not yet provide concrete implementations for:
 
 Those capabilities belong in higher-level crates built on top of the same cognitive model.
 
-The long-term Mortar-Sea vision includes many of these systems.
+The long-term Pete Mortar-Sea vision includes many of these systems.
 
 ## Face frontend
 
@@ -525,7 +525,7 @@ without blocking other Faculty sockets.
 
 ## Relationship to Pete
 
-Mortar-Sea defines the cognitive model.
+Pete Mortar-Sea defines the cognitive model.
 
 Pete is expected to provide:
 

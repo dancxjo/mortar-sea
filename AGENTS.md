@@ -2,7 +2,7 @@
 
 ## Repository shape
 
-Mortar-Sea is a Rust workspace for cognition, memory, speech, and embodiment experiments. The root crate is `mortar-sea`; workspace members include `psyche`, `speech`, `styletts2`, `face`, and `ear`.
+Pete Mortar-Sea is a Rust workspace for cognition, memory, speech, and embodiment experiments. The root crate is `mortar-sea`; workspace members include `psyche`, `speech`, `styletts2`, `face`, and `ear`.
 
 Core references:
 

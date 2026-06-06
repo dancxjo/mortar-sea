@@ -86,7 +86,7 @@ impl LlmJobKind {
 }
 
 type TokenSink = Box<dyn FnMut(String) + Send + 'static>;
-const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
+const DEFAULT_LLM_CONTEXT_SIZE: u32 = 8_192;
 const DEFAULT_VOICE_WORDS_PER_MINUTE: f64 = 190.0;
 const AVERAGE_SPOKEN_WORD_CHARS: f64 = 5.2;
 const VOICE_PUNCTUATION_PAUSE: Duration = Duration::from_millis(90);
@@ -347,9 +347,30 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LlmJobKind, LlmStreamControl, request_prompt_preview, run_generation,
-        voice_llm_cpu_only_from_env,
+        DEFAULT_LLM_CONTEXT_SIZE, LlmJobKind, LlmStreamControl, llm_context_size_from_value,
+        request_prompt_preview, run_generation, voice_llm_cpu_only_from_env,
     };
+
+    #[test]
+    fn default_llm_context_size_is_runtime_safe() {
+        assert_eq!(DEFAULT_LLM_CONTEXT_SIZE, 8_192);
+    }
+
+    #[test]
+    fn llm_context_size_parser_rejects_invalid_values() {
+        assert_eq!(
+            llm_context_size_from_value("TEST_CONTEXT", "4096", 8_192),
+            4096
+        );
+        assert_eq!(
+            llm_context_size_from_value("TEST_CONTEXT", "0", 8_192),
+            8_192
+        );
+        assert_eq!(
+            llm_context_size_from_value("TEST_CONTEXT", "not-a-number", 8_192),
+            8_192
+        );
+    }
 
     #[test]
     fn prompt_preview_does_not_abbreviate_timeline_entries_with_ellipses() {
@@ -708,11 +729,33 @@ fn pop_next_command(pending: &mut VecDeque<SchedulerCommand>) -> Option<Schedule
 }
 
 fn llm_context_size(env_key: &str, default: u32) -> u32 {
-    std::env::var(env_key)
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    match std::env::var(env_key) {
+        Ok(value) => llm_context_size_from_value(env_key, &value, default),
+        Err(_) => default,
+    }
+}
+
+fn llm_context_size_from_value(env_key: &str, value: &str, default: u32) -> u32 {
+    match value.parse::<u32>() {
+        Ok(size) if size > 0 => size,
+        Ok(_) => {
+            warn!(
+                env_key,
+                default, "LLM context size must be greater than zero; using default"
+            );
+            default
+        }
+        Err(err) => {
+            warn!(
+                env_key,
+                value,
+                default,
+                %err,
+                "invalid LLM context size; using default"
+            );
+            default
+        }
+    }
 }
 
 fn voice_llm_model_path() -> Option<PathBuf> {

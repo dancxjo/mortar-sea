@@ -1,6 +1,6 @@
-# Mortar-Sea Master Architecture Plan
+# Pete Mortar-Sea Master Architecture Plan
 
-This document is the current architectural north star for Mortar-Sea. It describes the cognitive pipeline, the core vocabulary, the Face frontend, the Quick Wit, memory-as-sensation, and the long-term Voice/Mouth/prosody direction.
+This document is the current architectural north star for Pete Mortar-Sea. It describes the cognitive pipeline, the core vocabulary, the Face frontend, the Quick Wit, memory-as-sensation, and the long-term Voice/Mouth/prosody direction.
 
 ## Core cognitive loop
 
@@ -271,7 +271,7 @@ Distillation asks:
 What matters here?
 ```
 
-This is one of the central distinctions. Mortar-Sea is doing natural-language compression toward significance, not plain summarization.
+This is one of the central distinctions. Pete Mortar-Sea is doing natural-language compression toward significance, not plain summarization.
 
 ## Timeline-first comprehension
 
@@ -610,7 +610,7 @@ Pete should perceive the present, not drown in old frames.
 
 ## Parallel LLM execution
 
-Mortar-Sea should support multiple concurrent LLM-backed Wits.
+Pete Mortar-Sea should support multiple concurrent LLM-backed Wits.
 
 Use the low-level `llama-cpp-sys` style backend, as in Listenbury, rather than forcing a higher-level wrapper.
 
@@ -879,7 +879,7 @@ The LLM should decide breath group and prosody together for spoken material.
 
 ## Prosody and phonemicization
 
-Mortar-Sea should own phonemicization.
+Pete Mortar-Sea should own phonemicization.
 
 Modern TTS systems often want to own:
 
@@ -891,7 +891,7 @@ prosody
 audio
 ```
 
-But Mortar-Sea wants:
+But Pete Mortar-Sea wants:
 
 ```text
 verbal unit
@@ -945,7 +945,7 @@ Coqui TTS / XTTS
 Piper / VITS-derived models
 ```
 
-VITS means “Variational Inference with adversarial learning for end-to-end Text-to-Speech.” It is a neural architecture that learns to generate waveform-like speech from text with latent prosody/duration modeling. It tends to own prosody internally, which may conflict with Mortar-Sea’s desire to control prosody externally.
+VITS means “Variational Inference with adversarial learning for end-to-end Text-to-Speech.” It is a neural architecture that learns to generate waveform-like speech from text with latent prosody/duration modeling. It tends to own prosody internally, which may conflict with Pete Mortar-Sea’s desire to control prosody externally.
 
 FastSpeech2-style models are conceptually interesting because they explicitly model:
 
@@ -963,7 +963,7 @@ A major idea: use a **reference WAV database**.
 
 Human speech may work partly through remembered prosodic templates: “prosodic snowclones.”
 
-Instead of manually specifying every pitch contour, Pete/Mortar-Sea can maintain a store of speech patterns.
+Instead of manually specifying every pitch contour, Pete/Pete Mortar-Sea can maintain a store of speech patterns.
 
 Each prosodic memory may include:
 

@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 use crate::llm::{GenerationId, GenerationRequest, LlmEngine, LlmEvent};
 
+const CONTEXT_SIZE_FALLBACKS: &[u32] = &[16_384, 8_192, 4_096];
+
 static LLAMA_BACKEND: OnceLock<Arc<LlamaBackend>> = OnceLock::new();
 static LLAMA_BACKEND_INIT: Mutex<()> = Mutex::new(());
 static CUDA_AVAILABLE: OnceLock<bool> = OnceLock::new();
@@ -300,21 +302,7 @@ impl LlamaGenerationWorker {
 
         let thread_count =
             i32::try_from(self.config.threads).context("threads exceeds i32::MAX")?;
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(context_size))
-            .with_n_threads(thread_count)
-            .with_n_threads_batch(thread_count);
-        let ctx_params = if self.config.cpu_only {
-            ctx_params
-                .with_offload_kqv(false)
-                .with_flash_attention(false)
-        } else {
-            ctx_params
-        };
-        let mut ctx = self
-            .model
-            .new_context(&self.backend, ctx_params)
-            .context("failed to create llama.cpp context")?;
+        let mut ctx = self.create_context_with_fallback(context_size, thread_count)?;
 
         let n_ctx = ctx.n_ctx() as usize;
         let mut batch = LlamaBatch::new(n_ctx, 1);
@@ -541,6 +529,76 @@ impl LlamaGenerationWorker {
         );
         Ok(GenerationOutcome::Completed)
     }
+}
+
+impl LlamaGenerationWorker {
+    fn create_context_with_fallback(
+        &self,
+        requested_context_size: NonZeroU32,
+        thread_count: i32,
+    ) -> Result<LlamaContext<'_>> {
+        let mut last_error = None;
+        for context_size in context_size_attempts(requested_context_size) {
+            let ctx_params = llama_context_params(
+                context_size,
+                thread_count,
+                self.config.cpu_only || cpu_only_env_requested(),
+            );
+            match self.model.new_context(&self.backend, ctx_params) {
+                Ok(ctx) => {
+                    if context_size != requested_context_size {
+                        warn!(
+                            generation_id = %self.id.0,
+                            requested_context_size = requested_context_size.get(),
+                            context_size = context_size.get(),
+                            "llama.cpp context allocation recovered with smaller context"
+                        );
+                    }
+                    return Ok(ctx);
+                }
+                Err(err) => {
+                    warn!(
+                        generation_id = %self.id.0,
+                        context_size = context_size.get(),
+                        %err,
+                        "llama.cpp context allocation failed"
+                    );
+                    last_error = Some(anyhow::Error::new(err));
+                }
+            }
+        }
+
+        match last_error {
+            Some(err) => Err(err).context("failed to create llama.cpp context"),
+            None => bail!("failed to create llama.cpp context"),
+        }
+    }
+}
+
+fn llama_context_params(
+    context_size: NonZeroU32,
+    thread_count: i32,
+    cpu_only: bool,
+) -> LlamaContextParams {
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(Some(context_size))
+        .with_n_threads(thread_count)
+        .with_n_threads_batch(thread_count);
+    if cpu_only {
+        ctx_params
+            .with_offload_kqv(false)
+            .with_flash_attention(false)
+    } else {
+        ctx_params
+    }
+}
+
+fn context_size_attempts(requested_context_size: NonZeroU32) -> Vec<NonZeroU32> {
+    std::iter::once(requested_context_size)
+        .chain(CONTEXT_SIZE_FALLBACKS.iter().filter_map(|size| {
+            NonZeroU32::new(*size).filter(|fallback| *fallback < requested_context_size)
+        }))
+        .collect()
 }
 
 struct ResolvedPrompt {
@@ -1049,8 +1107,30 @@ fn is_terminal_event(event: &LlmEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
     use crate::llm::ChatMessage;
+
+    #[test]
+    fn context_size_attempts_try_requested_then_smaller_fallbacks() {
+        let attempts = context_size_attempts(NonZeroU32::new(65_536).unwrap())
+            .into_iter()
+            .map(NonZeroU32::get)
+            .collect::<Vec<_>>();
+
+        assert_eq!(attempts, vec![65_536, 16_384, 8_192, 4_096]);
+    }
+
+    #[test]
+    fn context_size_attempts_do_not_grow_requested_context() {
+        let attempts = context_size_attempts(NonZeroU32::new(8_192).unwrap())
+            .into_iter()
+            .map(NonZeroU32::get)
+            .collect::<Vec<_>>();
+
+        assert_eq!(attempts, vec![8_192, 4_096]);
+    }
 
     #[test]
     fn stop_detector_stops_before_marker_in_single_token() {

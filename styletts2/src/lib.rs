@@ -1,7 +1,7 @@
-//! StyleTTS2-native synthesis seam for Mortar-Sea.
+//! StyleTTS2-native synthesis seam for Pete Mortar-Sea.
 //!
 //! This crate owns the StyleTTS2-facing model/config/input-output contract
-//! without making StyleTTS2 the owner of speech inside Mortar-Sea. The intended
+//! without making StyleTTS2 the owner of speech inside Pete Mortar-Sea. The intended
 //! path is not text-to-speech first:
 //!
 //! ```text

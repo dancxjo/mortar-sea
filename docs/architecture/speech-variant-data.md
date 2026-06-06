@@ -1,6 +1,6 @@
 # Speech Variant Data
 
-Listenbury donated useful linguistic knowledge: ARPABET mappings, CMUdict lookup behavior, English phonotactic tables, implementation-status labels, and a small set of English allophone rules. Mortar-Sea stores those facts as typed speech data instead of carrying over Listenbury runtime architecture.
+Listenbury donated useful linguistic knowledge: ARPABET mappings, CMUdict lookup behavior, English phonotactic tables, implementation-status labels, and a small set of English allophone rules. Pete Mortar-Sea stores those facts as typed speech data instead of carrying over Listenbury runtime architecture.
 
 The selection boundary is the language variant code. Callers pass a BCP/ISO-style code such as `en-US`, `en-US-GA`, `en-US-singing`, `en-GB-RP`, `en-GB-ScotE`, `en-US-AAE`, or `eo`. `speech::data::canonical_variant_id` resolves aliases like `en-US -> en-US-GA`, and `speech::data::variant_by_code` returns the corresponding `LinguisticVariant`.
 
