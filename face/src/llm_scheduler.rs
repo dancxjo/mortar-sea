@@ -90,6 +90,7 @@ const DEFAULT_LLM_CONTEXT_SIZE: u32 = 65_536;
 const DEFAULT_VOICE_WORDS_PER_MINUTE: f64 = 190.0;
 const AVERAGE_SPOKEN_WORD_CHARS: f64 = 5.2;
 const VOICE_PUNCTUATION_PAUSE: Duration = Duration::from_millis(90);
+const LLM_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LlmStreamControl {
@@ -784,11 +785,23 @@ fn run_generation(
     };
     let mut generated = String::new();
     let mut token_events = 0usize;
+    let mut last_pause_progress_at = started_at;
 
     loop {
         let mut made_progress = false;
         if let Some(control) = &control {
             if control.is_paused() {
+                if last_pause_progress_at.elapsed() >= LLM_PROGRESS_HEARTBEAT {
+                    send_generation_progress(
+                        id,
+                        kind,
+                        started_at,
+                        &generated,
+                        token_events,
+                        events,
+                    );
+                    last_pause_progress_at = Instant::now();
+                }
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
@@ -969,6 +982,7 @@ fn handle_llm_events(
                 if let Some(token_sink) = token_sink.as_mut() {
                     token_sink(text.clone());
                 }
+                send_generation_progress(id, kind, started_at, generated, *token_events, events);
                 if matches!(kind, LlmJobKind::Voice) {
                     thread::sleep(voice_token_delay(&text));
                 }
@@ -1020,6 +1034,25 @@ fn handle_llm_events(
     }
 
     Ok(None)
+}
+
+fn send_generation_progress(
+    id: Uuid,
+    kind: LlmJobKind,
+    started_at: Instant,
+    generated: &str,
+    token_events: usize,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+) {
+    let _ = events.send(RealTimeExperienceEvent::LlmJobProgress {
+        job_id: id,
+        job_kind: kind.as_str().to_string(),
+        observed_at: chrono::Utc::now(),
+        response_chars: generated.chars().count(),
+        response: generated.to_owned(),
+        token_events,
+        elapsed_ms: duration_millis(started_at.elapsed()),
+    });
 }
 
 fn complete_generation(

@@ -318,6 +318,15 @@ pub(crate) enum RealTimeExperienceEvent {
         observed_at: DateTime<Utc>,
         queue_wait_ms: u64,
     },
+    LlmJobProgress {
+        job_id: Uuid,
+        job_kind: String,
+        observed_at: DateTime<Utc>,
+        response_chars: usize,
+        response: String,
+        token_events: usize,
+        elapsed_ms: u64,
+    },
     LlmJobCompleted {
         job_id: Uuid,
         job_kind: String,

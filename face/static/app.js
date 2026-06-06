@@ -580,6 +580,7 @@ window.faceApp = function faceApp() {
       return [
         'llm_job_queued',
         'llm_job_started',
+        'llm_job_progress',
         'llm_job_completed',
         'llm_job_failed',
       ].includes(type);
@@ -589,6 +590,7 @@ window.faceApp = function faceApp() {
       const phase = {
         llm_job_queued: 'queued',
         llm_job_started: 'running',
+        llm_job_progress: 'running',
         llm_job_completed: 'completed',
         llm_job_failed: 'failed',
       }[message.type];
@@ -613,6 +615,11 @@ window.faceApp = function faceApp() {
         next.promptPreview = message.prompt_preview;
       } else if (message.type === 'llm_job_started') {
         next.queueWaitMs = message.queue_wait_ms;
+      } else if (message.type === 'llm_job_progress') {
+        next.responseChars = message.response_chars;
+        next.response = message.response;
+        next.tokenEvents = message.token_events;
+        next.elapsedMs = message.elapsed_ms;
       } else if (message.type === 'llm_job_completed') {
         next.responseChars = message.response_chars;
         next.response = message.response;
