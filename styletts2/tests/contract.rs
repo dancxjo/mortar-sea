@@ -396,12 +396,15 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
         ("I R", "ˈaɪ ˈɑɹ"),
         (
             "I’ll inspect the current English rule.",
-            "ˈaɪl ˌɪnspˈɛkt ðə kˈɝənt ˈɪŋɡlɪʃ ɹˈul.",
+            "ˈaɪl ˌɪnˈspɛkt ðə ˈkɝɹənt ˈɪŋɡlɪʃ ˈɹul.",
         ),
-        ("StyleTTS2", "stˈaɪl tˈi tˈi jˈɛs tˈu"),
+        ("StyleTTS2", "ˈstaɪl ˈtiˈtiˈjɛˈstu"),
+        ("current", "ˈkɝɹənt"),
+        ("derived", "dɚɹˈaɪvd"),
+        ("surface", "ˈsɝɹfəs"),
         (
             "That points to a real phonological rule.",
-            "ðˈæt pˈɔɪnts tˈu ə ɹˈil fˌoʊnəlˈɑdʒɪkəl ɹˈul.",
+            "ˈðæt ˈpɔɪnts ˈtu ə ˈɹil ˌfoʊnəˈlɑdʒɪkəl ˈɹul.",
         ),
     ] {
         let actual = styletts2_text_from_english(input);

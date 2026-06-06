@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
     BoundaryKind, FeatureId, FeatureValue, LinguisticVariant, PauseKind, PhoneInventory,
-    PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, Stress,
+    PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, Stress, Syllable,
     TerminalPunctuation, UtterancePlan, epenthetic_phones_after, variant_by_code,
 };
 use thiserror::Error;
@@ -135,6 +135,10 @@ impl SymbolSet {
         &self,
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        if !plan.target_syllables.is_empty() {
+            return self.lower_syllables_with_boundaries(&plan.target_syllables, &plan.boundaries);
+        }
+
         if !plan.target_phones.is_empty() {
             return self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries);
         }
@@ -149,6 +153,13 @@ impl SymbolSet {
         }
 
         Ok(StyleTts2SymbolSequence { tokens: Vec::new() })
+    }
+
+    pub fn lower_syllables(
+        &self,
+        syllables: &[Syllable],
+    ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        self.lower_syllables_with_boundaries(syllables, &[])
     }
 
     pub fn lower_phoneme_tokens(
@@ -227,7 +238,6 @@ impl SymbolSet {
                 }
             }
 
-            self.push_stress_marker_for_phoneme(&mut lowered, token);
             lowered.push(StyleTts2SymbolToken {
                 symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)?,
                 source: StyleTts2SymbolSource::Phoneme,
@@ -294,7 +304,6 @@ impl SymbolSet {
                 continue;
             }
 
-            self.push_stress_marker_for_phone(&mut lowered, token);
             lowered.push(StyleTts2SymbolToken {
                 symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
                 source: StyleTts2SymbolSource::Phone,
@@ -305,6 +314,50 @@ impl SymbolSet {
         if in_word {
             self.push_boundary_after_word(&mut lowered, boundaries, word_index);
             self.append_final_punctuation_if_missing(&mut lowered);
+        }
+
+        Ok(StyleTts2SymbolSequence { tokens: lowered })
+    }
+
+    fn lower_syllables_with_boundaries(
+        &self,
+        syllables: &[Syllable],
+        boundaries: &[SpeechBoundaryToken],
+    ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        let mut lowered = Vec::new();
+        let mut previous_word_index = None;
+
+        for syllable in syllables {
+            let word_index = syllable_word_index(syllable);
+            if let (Some(previous), Some(current)) = (previous_word_index, word_index)
+                && current != previous
+            {
+                if !self.push_boundary_after_word(&mut lowered, boundaries, previous) {
+                    self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
+                }
+            }
+
+            if let Some(marker) = stress_marker(syllable_stress(syllable)) {
+                self.push_boundary_symbol(&mut lowered, marker, StyleTts2SymbolSource::Boundary);
+            }
+            for phone in &syllable.phones {
+                let Some(token_id) = spec_token_id(&phone.phone) else {
+                    continue;
+                };
+                if token_id.starts_with("boundary.") {
+                    continue;
+                }
+                lowered.push(StyleTts2SymbolToken {
+                    symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
+                    source: StyleTts2SymbolSource::Phone,
+                });
+            }
+
+            previous_word_index = word_index.or(previous_word_index);
+        }
+
+        if let Some(word_index) = previous_word_index {
+            self.push_boundary_after_word(&mut lowered, boundaries, word_index);
         }
 
         Ok(StyleTts2SymbolSequence { tokens: lowered })
@@ -359,32 +412,6 @@ impl SymbolSet {
             source,
         });
         true
-    }
-
-    fn push_stress_marker_for_phone(
-        &self,
-        lowered: &mut Vec<StyleTts2SymbolToken>,
-        token: &PhoneToken,
-    ) {
-        if !phone_is_syllabic(token) {
-            return;
-        }
-        if let Some(marker) = stress_marker(phone_stress(&token.features)) {
-            self.push_boundary_symbol(lowered, marker, StyleTts2SymbolSource::Boundary);
-        }
-    }
-
-    fn push_stress_marker_for_phoneme(
-        &self,
-        lowered: &mut Vec<StyleTts2SymbolToken>,
-        token: &PhonemeToken,
-    ) {
-        if !phoneme_is_syllabic(token) {
-            return;
-        }
-        if let Some(marker) = stress_marker(phone_stress(&token.features)) {
-            self.push_boundary_symbol(lowered, marker, StyleTts2SymbolSource::Boundary);
-        }
     }
 
     fn resolve_symbol(
@@ -558,20 +585,27 @@ fn phoneme_usize_feature(token: &PhonemeToken, feature_id: &str) -> Option<usize
     }
 }
 
-fn phone_is_syllabic(token: &PhoneToken) -> bool {
-    feature_bool(&token.features, "syllabic") == Some(true)
+fn syllable_word_index(syllable: &Syllable) -> Option<usize> {
+    syllable
+        .phones
+        .iter()
+        .find_map(|phone| phone_usize_feature(phone, "orthography.word_index"))
 }
 
-fn phoneme_is_syllabic(token: &PhonemeToken) -> bool {
-    feature_bool(&token.features, "syllabic") == Some(true)
+fn phone_usize_feature(token: &PhoneToken, feature_id: &str) -> Option<usize> {
+    let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Number(index)) if *index >= 0.0 => Some(*index as usize),
+        _ => None,
+    }
 }
 
-fn phone_stress(features: &speech::FeatureBundle) -> Option<Stress> {
-    match feature_category(features, "stress") {
-        Some("primary") => Some(Stress::Primary),
-        Some("secondary") => Some(Stress::Secondary),
-        Some("unstressed") => Some(Stress::Unstressed),
-        Some("reduced") => Some(Stress::Reduced),
+fn syllable_stress(syllable: &Syllable) -> Option<Stress> {
+    match syllable.stress {
+        Spec::Known(Stress::Primary) => Some(Stress::Primary),
+        Spec::Known(Stress::Secondary) => Some(Stress::Secondary),
+        Spec::Known(Stress::Unstressed) => Some(Stress::Unstressed),
+        Spec::Known(Stress::Reduced) => Some(Stress::Reduced),
         _ => None,
     }
 }
@@ -580,28 +614,6 @@ fn stress_marker(stress: Option<Stress>) -> Option<&'static str> {
     match stress {
         Some(Stress::Primary) => Some("ˈ"),
         Some(Stress::Secondary) => Some("ˌ"),
-        _ => None,
-    }
-}
-
-fn feature_bool(features: &speech::FeatureBundle, name: &str) -> Option<bool> {
-    match features
-        .values
-        .get(&FeatureId(format!("phonology.{name}")))?
-    {
-        Spec::Known(FeatureValue::Bool(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn feature_category<'a>(features: &'a speech::FeatureBundle, name: &str) -> Option<&'a str> {
-    match features
-        .values
-        .get(&FeatureId(format!("phonology.{name}")))?
-    {
-        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
-            Some(value)
-        }
         _ => None,
     }
 }
