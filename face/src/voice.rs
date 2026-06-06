@@ -1426,18 +1426,19 @@ fn voice_system_prompt() -> &'static str {
      You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
      Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
+     When there is nothing useful to say aloud, contemplate your present situation, your surroundings, life in general, or your own existence. \
      Treat only the structured real-world context in this conversation as external fact. \
      Do not invent new external events, people, objects, or intentions. \
-     You may daydream or associate, but keep imagined material distinct from what is actually known. \
+     You may daydream, associate, or explore an idea, but keep imagined material distinct from what is actually known. \
      Constantly review what is happening against the latest real-world context. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM."
 }
 
 fn voice_mouth_guidance_prompt() -> &'static str {
     "\n\nMOUTH GUIDANCE:\n\
-    To speak aloud through Mouth, you must wrap one short speakable sentence in <say>...</say>. \
+    To speak aloud through Mouth, wrap one short speakable sentence in <say>...</say>. \
      Text outside <say> stays internal and will not be spoken aloud. \
-    Emit a <say> sentence quickly; do not wait many internal sentences before the next <say>. \
+     Use <say> only when there is a genuine sentence that should be heard out loud; if there is nothing useful to say aloud right now, keep the stream internal and omit <say>. \
      To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
      If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
      The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and include Mouth feedback in later structured context. \
@@ -1479,7 +1480,7 @@ fn build_voice_messages(
 
     messages.push(ChatMessage::new(
         "user",
-        "Continue the Voice stream now. Start with a short internal thought if useful, but emit one short spoken sentence as <say>...</say> early in this turn.",
+        "Continue the Voice stream now. If there is nothing useful to say aloud, stay internal and contemplate the present situation, surroundings, life in general, your own existence, or an idea worth exploring. Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud.",
     ));
     messages
 }
@@ -2586,12 +2587,22 @@ mod tests {
             &VecDeque::new(),
         );
 
-        assert!(prompt.contains("you must wrap"));
+        assert!(prompt.contains("wrap one short speakable sentence"));
         assert!(prompt.contains("<say>...</say>"));
         assert!(prompt.contains("Text outside <say> stays internal"));
-        assert!(prompt.contains("Emit a <say> sentence quickly"));
+        assert!(prompt.contains("Use <say> only when there is a genuine sentence"));
+        assert!(prompt.contains("if there is nothing useful to say aloud right now"));
+        assert!(prompt.contains("keep the stream internal and omit <say>"));
+        assert!(prompt.contains("If there is nothing useful to say aloud, stay internal"));
         assert!(prompt.contains("put the emoji inside <say> just before </say>"));
         assert!(prompt.contains("Use <say> only for the exact words to be spoken aloud"));
+        assert!(
+            prompt.contains(
+                "Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud"
+            )
+        );
+        assert!(!prompt.contains("Emit a <say> sentence quickly"));
+        assert!(!prompt.contains("early in this turn"));
     }
 
     #[test]
@@ -2606,7 +2617,10 @@ mod tests {
 
         assert!(prompt.contains("Treat only the structured real-world context"));
         assert!(prompt.contains("Do not invent new external events"));
-        assert!(prompt.contains("daydream"));
+        assert!(prompt.contains("contemplate your present situation"));
+        assert!(prompt.contains("life in general"));
+        assert!(prompt.contains("your own existence"));
+        assert!(prompt.contains("daydream, associate, or explore an idea"));
     }
 
     #[test]
