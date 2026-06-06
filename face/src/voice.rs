@@ -8,7 +8,7 @@ use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
 use mortar_sea::voice_stream::{
     BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser, parse_voice_stream,
 };
-use psyche::{ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
+use psyche::{ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
@@ -27,16 +27,15 @@ use crate::messages::{
 const RECENT_EXPERIENCE_LIMIT: usize = 12;
 const RECENT_FINALIZED_ASR_LIMIT: usize = 24;
 const RECENT_THOUGHT_LIMIT: usize = 10;
+const RECENT_VOICE_TURN_LIMIT: usize = 4;
 const RECENT_SPEECH_FEEDBACK_LIMIT: usize = 16;
-const VOICE_GENERATED_TAIL_MAX_CHARS: usize = 2_000;
+const VOICE_TURN_MAX_CHARS: usize = 1_600;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
 const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
-const VOICE_REALITY_REVIEW_INTERVAL: Duration = Duration::from_secs(15);
 const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
-const VOICE_SAY_NUDGE_MIN_CHARS: usize = 140;
-const VOICE_SAY_NUDGE_MIN_INTERVAL: Duration = Duration::from_secs(2);
+const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
 
 static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -226,8 +225,6 @@ struct ActiveVoiceGeneration {
     voice_stream: VoiceStreamParser,
     pending_breath_groups: VecDeque<BreathGroup>,
     experience_ids: Vec<Uuid>,
-    chars_since_last_say: usize,
-    last_say_nudge_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -278,8 +275,8 @@ async fn run_voice(state: AppState) {
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
     let mut recent_finalized_asr = VecDeque::<FinalizedAsrUpdate>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
+    let mut recent_voice_turns = VecDeque::<String>::new();
     let mut recent_speech_feedback = VecDeque::<VoiceSpeechFeedback>::new();
-    let mut generated_tail = String::new();
     let mut pending_speech = None::<PendingVoiceSpeech>;
     let mut last_experience_signature = None::<String>;
     sync_recent_experiences_from_state(
@@ -294,13 +291,10 @@ async fn run_voice(state: AppState) {
         &recent_experiences,
         &recent_finalized_asr,
         &recent_thoughts,
+        &recent_voice_turns,
         &recent_speech_feedback,
-        &generated_tail,
     ));
-    let mut reality_review = interval(VOICE_REALITY_REVIEW_INTERVAL);
     let mut mouth_feedback_watchdog = interval(VOICE_MOUTH_FEEDBACK_POLL_INTERVAL);
-    reality_review.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    reality_review.tick().await;
     mouth_feedback_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
     mouth_feedback_watchdog.tick().await;
 
@@ -336,15 +330,6 @@ async fn run_voice(state: AppState) {
                     }
                 }
             }
-            _ = reality_review.tick() => {
-                if let Some(current) = active.as_mut() {
-                    current.control.append_prompt(format!(
-                        "{}{}",
-                        voice_reality_review_prompt(),
-                        voice_mouth_guidance_prompt()
-                    ));
-                }
-            }
             event = experience_events.recv() => {
                 let event = match event {
                     Ok(event) => event,
@@ -378,8 +363,8 @@ async fn run_voice(state: AppState) {
                         }
 
                         if let Some(current) = active.as_mut() {
-                            append_voice_experience_updates(&state, current, &[experience]);
-                        } else {
+                            remember_voice_experience_ids(current, &[experience]);
+                        } else if pending_speech.is_none() {
                             sync_recent_experiences_from_state(
                                 &state,
                                 &mut recent_experiences,
@@ -392,8 +377,8 @@ async fn run_voice(state: AppState) {
                                 &recent_experiences,
                                 &recent_finalized_asr,
                                 &recent_thoughts,
+                                &recent_voice_turns,
                                 &recent_speech_feedback,
-                                &generated_tail,
                             ));
                         }
                     }
@@ -421,17 +406,15 @@ async fn run_voice(state: AppState) {
                             continue;
                         }
 
-                        if let Some(current) = active.as_mut() {
-                            append_voice_finalized_asr_updates(current, &[update]);
-                        } else {
+                        if active.is_none() && pending_speech.is_none() {
                             active = Some(start_voice_generation(
                                 &state,
                                 &generation_tx,
                                 &recent_experiences,
                                 &recent_finalized_asr,
                                 &recent_thoughts,
+                                &recent_voice_turns,
                                 &recent_speech_feedback,
-                                &generated_tail,
                             ));
                         }
                     }
@@ -459,9 +442,6 @@ async fn run_voice(state: AppState) {
                             },
                         );
                         current.chars_since_last_say = current
-                            .chars_since_last_say
-                            .saturating_add(text.chars().count());
-                        remember_generated_tail(&mut generated_tail, &text);
                         collect_voice_stream_events(
                             current.generation_id,
                             current.voice_stream.push_chunk(&text),
@@ -470,11 +450,7 @@ async fn run_voice(state: AppState) {
                         if pending_speech.is_none() {
                             if let Some(draft) = draft_next_voice_speech(&state, current) {
                                 current.control.pause();
-                                current.chars_since_last_say = 0;
-                                current.last_say_nudge_at = None;
                                 pending_speech = Some(draft);
-                            } else {
-                                maybe_nudge_voice_to_emit_say(current);
                             }
                         }
                     }
@@ -489,9 +465,7 @@ async fn run_voice(state: AppState) {
 
                         match result {
                             Ok(generated) => {
-                                if generated_tail.trim().is_empty() {
-                                    remember_generated_tail(&mut generated_tail, &generated);
-                                }
+                                remember_recent_voice_turn(&mut recent_voice_turns, generated.clone());
                                 collect_voice_stream_events(
                                     current.generation_id,
                                     current.voice_stream.finish(),
@@ -528,8 +502,8 @@ async fn run_voice(state: AppState) {
                                 &recent_experiences,
                                 &recent_finalized_asr,
                                 &recent_thoughts,
+                                &recent_voice_turns,
                                 &recent_speech_feedback,
-                                &generated_tail,
                             ));
                         }
                     }
@@ -554,8 +528,8 @@ async fn run_voice(state: AppState) {
                     &mut recent_experiences,
                     &mut recent_finalized_asr,
                     &mut recent_thoughts,
+                    &recent_voice_turns,
                     &mut recent_speech_feedback,
-                    &generated_tail,
                     &mut last_experience_signature,
                 ).await;
             }
