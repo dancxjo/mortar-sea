@@ -163,6 +163,7 @@ struct OpenSay {
 pub struct VoiceStreamParser {
     buffer: String,
     open_say: Option<OpenSay>,
+    recent_internal: String,
 }
 
 impl VoiceStreamParser {
@@ -195,8 +196,8 @@ impl VoiceStreamParser {
         }
 
         if !self.buffer.is_empty() {
-            push_internal(&self.buffer, &mut events);
-            self.buffer.clear();
+            let text = std::mem::take(&mut self.buffer);
+            self.push_internal(&text, &mut events);
         }
 
         events
@@ -225,13 +226,13 @@ impl VoiceStreamParser {
     fn parse_outside_say(&mut self, stream_end: bool, events: &mut Vec<VoiceStreamEvent>) -> bool {
         let Some(tag_start) = self.buffer.find('<') else {
             let text = std::mem::take(&mut self.buffer);
-            push_internal(&text, events);
+            self.push_internal(&text, events);
             return false;
         };
 
         if tag_start > 0 {
             let internal = self.take_prefix(tag_start);
-            push_internal(&internal, events);
+            self.push_internal(&internal, events);
         }
 
         if self.buffer.starts_with("<say") {
@@ -241,7 +242,7 @@ impl VoiceStreamParser {
                         message: "malformed <say> tag".into(),
                     }));
                     let remaining = std::mem::take(&mut self.buffer);
-                    push_internal(&remaining, events);
+                    self.push_internal(&remaining, events);
                     return false;
                 }
                 return false;
@@ -261,9 +262,12 @@ impl VoiceStreamParser {
 
         if self.buffer.starts_with("</say>") {
             events.push(VoiceStreamEvent::ParseWarning(VoiceParseWarning {
-                message: "unexpected </say> while outside <say>".into(),
+                message:
+                    "unexpected </say> while outside <say>; trying to recover previous sentence"
+                        .into(),
             }));
             self.take_prefix("</say>".len());
+            self.emit_orphan_say_recovery(events);
             return true;
         }
 
@@ -346,7 +350,7 @@ impl VoiceStreamParser {
                         open_say.text.push_str(&malformed);
                     }
                 } else {
-                    push_internal(&malformed, events);
+                    self.push_internal(&malformed, events);
                 }
                 return false;
             }
@@ -363,10 +367,40 @@ impl VoiceStreamParser {
                 open_say.text.push_str(&malformed);
             }
         } else {
-            push_internal(&malformed, events);
+            self.push_internal(&malformed, events);
         }
 
         true
+    }
+
+    fn push_internal(&mut self, text: &str, events: &mut Vec<VoiceStreamEvent>) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        self.recent_internal.push_str(trimmed);
+        self.recent_internal.push('\n');
+        trim_recent_internal(&mut self.recent_internal);
+
+        events.push(VoiceStreamEvent::InternalText(InternalText {
+            text: trimmed.to_string(),
+        }));
+    }
+
+    fn emit_orphan_say_recovery(&mut self, events: &mut Vec<VoiceStreamEvent>) {
+        let Some(text) = recoverable_orphan_say_text(&self.recent_internal) else {
+            return;
+        };
+
+        emit_breath_group(
+            OpenSay {
+                attributes: SayAttributes::from_raw(BTreeMap::new()),
+                text,
+            },
+            None,
+            events,
+        );
     }
 
     fn take_prefix(&mut self, bytes: usize) -> String {
@@ -405,15 +439,114 @@ fn emit_breath_group(
     }
 }
 
-fn push_internal(text: &str, events: &mut Vec<VoiceStreamEvent>) {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+fn trim_recent_internal(text: &mut String) {
+    const MAX_RECENT_INTERNAL_CHARS: usize = 2_000;
+    let char_count = text.chars().count();
+    if char_count <= MAX_RECENT_INTERNAL_CHARS {
         return;
     }
 
-    events.push(VoiceStreamEvent::InternalText(InternalText {
-        text: trimmed.to_string(),
-    }));
+    let keep_from = char_count.saturating_sub(MAX_RECENT_INTERNAL_CHARS);
+    let byte_index = text
+        .char_indices()
+        .nth(keep_from)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    text.drain(..byte_index);
+}
+
+fn recoverable_orphan_say_text(recent_internal: &str) -> Option<String> {
+    recent_internal
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find_map(recoverable_line_sentence)
+}
+
+fn recoverable_line_sentence(line: &str) -> Option<String> {
+    if line.is_empty() || looks_like_context_or_metadata(line) || looks_like_quoted_transcript(line)
+    {
+        return None;
+    }
+
+    let sentence = last_sentence_in_line(line)?;
+    if sentence.is_empty()
+        || looks_like_context_or_metadata(&sentence)
+        || looks_like_quoted_transcript(&sentence)
+        || !sentence.chars().any(char::is_alphanumeric)
+    {
+        return None;
+    }
+
+    Some(sentence)
+}
+
+fn last_sentence_in_line(line: &str) -> Option<String> {
+    let mut terminators = Vec::new();
+    for (index, ch) in line.char_indices() {
+        if matches!(ch, '.' | '?' | '!') {
+            terminators.push(index + ch.len_utf8());
+        }
+    }
+
+    let end = *terminators.last()?;
+    let start = terminators.iter().rev().nth(1).copied().unwrap_or(0);
+    Some(
+        line[start..trailing_sentence_suffix_end(line, end)]
+            .trim()
+            .to_string(),
+    )
+}
+
+fn trailing_sentence_suffix_end(line: &str, mut end: usize) -> usize {
+    for ch in line[end..].chars() {
+        if ch.is_whitespace() || is_emoji_or_text_modifier(ch) {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+fn is_emoji_or_text_modifier(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0xFE0E..=0xFE0F | 0x200D
+    )
+}
+
+fn looks_like_quoted_transcript(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('“') && trimmed.ends_with('”')))
+}
+
+fn looks_like_context_or_metadata(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("REAL-WORLD ")
+        || trimmed.starts_with("HEARD SPEECH CONTEXT")
+        || trimmed.starts_with("Transcript:")
+        || trimmed.starts_with("ContextFrame:")
+        || trimmed.starts_with("Timeline:")
+        || trimmed.starts_with("SENSATION ")
+        || trimmed.starts_with("IMPRESSION ")
+        || trimmed.starts_with("T+")
+        || trimmed.starts_with("observed_at=")
+        || trimmed.starts_with("sequence_start=")
+        || trimmed.starts_with("sequence_end=")
+        || trimmed.starts_with("sentence_index=")
+        || trimmed.starts_with("sentence_count=")
+        || trimmed.starts_with("WHO")
+        || trimmed.starts_with("WHAT")
+        || trimmed.starts_with("WHERE")
+        || trimmed.starts_with("WHEN")
+        || trimmed.starts_with("WHY")
+        || trimmed.starts_with("HOW")
+        || trimmed.starts_with("- ")
+        || trimmed.starts_with("You are ")
+        || trimmed.starts_with("Return only ")
 }
 
 fn parse_attributes(input: &str) -> BTreeMap<String, String> {
@@ -633,6 +766,33 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].text, "hello");
         assert_eq!(groups[0].boundary, SpeechBoundary::Interrupted);
+    }
+
+    #[test]
+    fn orphan_closing_say_recovers_previous_natural_sentence() {
+        let events = parse_voice_stream("I sense a sound approaching my awareness? 👂</say>");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            VoiceStreamEvent::ParseWarning(VoiceParseWarning { message })
+                if message.contains("unexpected </say>")
+        )));
+
+        let groups = breath_groups(&events);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].text,
+            "I sense a sound approaching my awareness? 👂"
+        );
+    }
+
+    #[test]
+    fn orphan_closing_say_does_not_recover_quoted_asr_transcript() {
+        let events =
+            parse_voice_stream("REAL-WORLD ASR UPDATE:\nTranscript:\n\"How are you?\"\n</say>");
+
+        let groups = breath_groups(&events);
+        assert!(groups.is_empty());
     }
 
     #[test]

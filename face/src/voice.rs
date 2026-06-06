@@ -1,9 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, mpsc as std_mpsc};
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 
-use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
 use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
 use mortar_sea::voice_stream::{
@@ -35,6 +34,7 @@ const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 const VOICE_REALITY_REVIEW_INTERVAL: Duration = Duration::from_secs(15);
 const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
+const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_SAY_NUDGE_MIN_CHARS: usize = 140;
 const VOICE_SAY_NUDGE_MIN_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -43,14 +43,29 @@ static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
 
 #[derive(Debug, Clone)]
 struct PiperSynthesisWorker {
+    id: Uuid,
     tx: std_mpsc::Sender<PiperSynthesisJob>,
 }
 
 #[derive(Debug)]
 struct PiperSynthesisJob {
+    utterance_id: Uuid,
+    generation_id: Uuid,
     text: String,
     output_path: PathBuf,
     response_tx: std_mpsc::Sender<anyhow::Result<SpeechSynthesisArtifact>>,
+}
+
+pub(crate) fn mouth_audio_dir() -> PathBuf {
+    PathBuf::from("target/face-mouth")
+}
+
+fn mouth_audio_filename(utterance_id: Uuid) -> String {
+    format!("voice-{utterance_id}.wav")
+}
+
+fn mouth_audio_url(utterance_id: Uuid) -> String {
+    format!("/mouth-audio/{}", mouth_audio_filename(utterance_id))
 }
 
 impl PiperSynthesisWorker {
@@ -67,27 +82,41 @@ impl PiperSynthesisWorker {
             .name("mortar-piper-synthesis".to_string())
             .spawn(move || run_piper_synthesis_worker(rx))
             .map_err(|error| anyhow::anyhow!("failed to spawn Piper synthesis worker: {error}"))?;
-        let created = Self { tx };
+        let created = Self {
+            id: Uuid::new_v4(),
+            tx,
+        };
         *worker = Some(created.clone());
         Ok(created)
     }
 
     fn synthesize_text_to_wav(
         &self,
+        utterance_id: Uuid,
+        generation_id: Uuid,
         text: String,
         output_path: PathBuf,
     ) -> anyhow::Result<SpeechSynthesisArtifact> {
         let (response_tx, response_rx) = std_mpsc::channel();
         self.tx
             .send(PiperSynthesisJob {
+                utterance_id,
+                generation_id,
                 text,
                 output_path,
                 response_tx,
             })
             .map_err(|error| anyhow::anyhow!("failed to queue Piper synthesis job: {error}"))?;
-        response_rx
-            .recv()
-            .map_err(|error| anyhow::anyhow!("Piper synthesis worker stopped: {error}"))?
+        match response_rx.recv_timeout(VOICE_PIPER_SYNTHESIS_TIMEOUT) {
+            Ok(result) => result,
+            Err(error) => {
+                drop_stale_piper_worker(self.id);
+                Err(anyhow::anyhow!(
+                    "Piper synthesis worker did not return within {} ms: {error}",
+                    VOICE_PIPER_SYNTHESIS_TIMEOUT.as_millis()
+                ))
+            }
+        }
     }
 }
 
@@ -95,18 +124,48 @@ fn run_piper_synthesis_worker(rx: std_mpsc::Receiver<PiperSynthesisJob>) {
     let mut synthesizer = None::<PiperTextSynthesizer>;
     for job in rx {
         let result = (|| -> anyhow::Result<SpeechSynthesisArtifact> {
+            info!(
+                utterance_id = %job.utterance_id,
+                generation_id = %job.generation_id,
+                output_path = %job.output_path.display(),
+                text_chars = job.text.chars().count(),
+                "Piper synthesis worker started job"
+            );
             if synthesizer.is_none() {
                 info!("loading warm Piper ONNX voice session");
                 synthesizer = Some(PiperTextSynthesizer::load_selected()?);
                 info!("warm Piper ONNX voice session ready");
             }
 
-            synthesizer
+            let artifact = synthesizer
                 .as_mut()
                 .expect("Piper synthesizer initialized")
-                .synthesize_text_to_wav(job.text, "en-US", &job.output_path)
+                .synthesize_text_to_wav(job.text, "en-US", &job.output_path)?;
+            info!(
+                utterance_id = %job.utterance_id,
+                generation_id = %job.generation_id,
+                path = %artifact.path.display(),
+                sample_rate_hz = artifact.sample_rate_hz,
+                samples = artifact.samples,
+                duration_ms = artifact.duration_ms(),
+                "Piper synthesis worker completed job"
+            );
+            Ok(artifact)
         })();
         let _ = job.response_tx.send(result);
+    }
+}
+
+fn drop_stale_piper_worker(worker_id: Uuid) {
+    let mut worker = PIPER_SYNTHESIS_WORKER
+        .lock()
+        .expect("piper synthesis worker lock poisoned");
+    if worker.as_ref().is_some_and(|worker| worker.id == worker_id) {
+        *worker = None;
+        warn!(
+            %worker_id,
+            "discarded stale Piper synthesis worker; next utterance will create a fresh worker"
+        );
     }
 }
 
@@ -1022,21 +1081,25 @@ fn synthesize_voice_speech_audio(
             text: text.clone(),
         });
         let text_for_task = text.clone();
+        let synthesis_started_at = Instant::now();
         let wav = tokio::task::spawn_blocking(move || {
             let result = (|| -> anyhow::Result<_> {
-                let output_path =
-                    PathBuf::from("target/face-mouth").join(format!("voice-{utterance_id}.wav"));
-                let artifact = PiperSynthesisWorker::shared()?
-                    .synthesize_text_to_wav(text_for_task, output_path)?;
-                let bytes = std::fs::read(&artifact.path)?;
-                Ok((bytes, artifact))
+                let output_path = mouth_audio_dir().join(mouth_audio_filename(utterance_id));
+                let artifact = PiperSynthesisWorker::shared()?.synthesize_text_to_wav(
+                    utterance_id,
+                    generation_id,
+                    text_for_task,
+                    output_path,
+                )?;
+                let byte_len = std::fs::metadata(&artifact.path)?.len();
+                Ok((byte_len, artifact))
             })();
             result
         })
         .await;
 
         match wav {
-            Ok(Ok((bytes, artifact))) => {
+            Ok(Ok((byte_len, artifact))) => {
                 info!(
                     %utterance_id,
                     %generation_id,
@@ -1044,20 +1107,30 @@ fn synthesize_voice_speech_audio(
                     sample_rate_hz = artifact.sample_rate_hz,
                     samples = artifact.samples,
                     duration_ms = artifact.duration_ms(),
-                    bytes = bytes.len(),
+                    bytes = byte_len,
+                    synthesis_elapsed_ms = synthesis_started_at.elapsed().as_millis(),
                     "Mouth synthesized Piper WAV for browser playback"
                 );
-                let _ = events.send(RealTimeExperienceEvent::VoiceSpeechAudio {
+                let receiver_count = events.send(RealTimeExperienceEvent::VoiceSpeechAudio {
                     utterance_id,
                     generation_id,
                     observed_at: chrono::Utc::now(),
                     text,
                     mime: "audio/wav".to_string(),
+                    audio_url: Some(mouth_audio_url(utterance_id)),
                     sample_rate_hz: artifact.sample_rate_hz,
                     samples: artifact.samples,
                     duration_ms: artifact.duration_ms(),
-                    data: general_purpose::STANDARD.encode(bytes),
+                    data: None,
                 });
+                if let Err(error) = receiver_count {
+                    warn!(
+                        %utterance_id,
+                        %generation_id,
+                        %error,
+                        "Mouth synthesized audio but no browser received it"
+                    );
+                }
             }
             Ok(Err(error)) => {
                 warn!(%utterance_id, %generation_id, error = %format!("{error:#}"), "Mouth Piper synthesis failed");
@@ -1421,20 +1494,22 @@ fn format_voice_sensory_input(
 
 fn format_voice_finalized_asr_update(update: &FinalizedAsrUpdate) -> String {
     let mut prompt = format!(
-        "\n\nREAL-WORLD ASR UPDATE:\nThis is finalized speech heard in the real world.\nobserved_at={}\nsequence_start={}\nsequence_end={}\n",
+        "\n\nHEARD SPEECH CONTEXT, do not copy this line into Voice output: observed_at={} sequence_start={} sequence_end={}",
         update.observed_at.to_rfc3339(),
         update.sequence_start,
         update.sequence_end,
     );
     if let Some(sentence_index) = update.sentence_index {
-        prompt.push_str(&format!("sentence_index={sentence_index}\n"));
+        prompt.push_str(&format!(" sentence_index={sentence_index}"));
     }
     if let Some(sentence_count) = update.sentence_count {
-        prompt.push_str(&format!("sentence_count={sentence_count}\n"));
+        prompt.push_str(&format!(" sentence_count={sentence_count}"));
     }
-    prompt.push_str("Transcript:\n");
+    prompt.push_str(" heard_text=");
     prompt.push_str(&prompt_json_string(update.text.trim()));
-    prompt.push('\n');
+    prompt.push_str(
+        ". Treat it as external speech to respond to or reflect on, without quoting metadata.\n",
+    );
     prompt
 }
 
@@ -2283,11 +2358,11 @@ mod tests {
 
         let prompt = format_voice_finalized_asr_update(&update);
 
-        assert!(prompt.contains("REAL-WORLD ASR UPDATE"));
-        assert!(prompt.contains("finalized speech heard in the real world"));
+        assert!(prompt.contains("HEARD SPEECH CONTEXT"));
+        assert!(prompt.contains("do not copy this line into Voice output"));
         assert!(prompt.contains("sequence_start=4"));
         assert!(prompt.contains("sentence_index=1"));
-        assert!(prompt.contains("\"please look at this\""));
+        assert!(prompt.contains("heard_text=\"please look at this\""));
     }
 
     #[test]

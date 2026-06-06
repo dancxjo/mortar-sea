@@ -245,10 +245,13 @@ pub(crate) enum RealTimeExperienceEvent {
         observed_at: DateTime<Utc>,
         text: String,
         mime: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audio_url: Option<String>,
         sample_rate_hz: u32,
         samples: usize,
         duration_ms: u64,
-        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
     },
     VoiceSpeechStarted {
         utterance_id: Uuid,

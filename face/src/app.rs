@@ -147,6 +147,7 @@ pub async fn run() -> anyhow::Result<()> {
     voice::spawn_voice(state.clone());
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
+    let mouth_audio_dir = voice::mouth_audio_dir();
     let app = Router::new()
         .route("/", get(index))
         .route("/api/sensations", get(recent_sensations))
@@ -156,6 +157,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/ws/asr", get(asr_ws))
         .route("/ws/realtime-experience", get(realtime_experience_ws))
         .nest_service("/static", ServeDir::new(static_dir))
+        .nest_service("/mouth-audio", ServeDir::new(mouth_audio_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

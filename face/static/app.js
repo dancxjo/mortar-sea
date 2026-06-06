@@ -64,7 +64,7 @@ window.faceApp = function faceApp() {
     voiceCurrentDraft: null,
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
-    browserSpeechFallbackEnabled: false,
+    browserSpeechFallbackEnabled: true,
     voiceAwaitingServerAudioTimer: null,
     voiceActiveSpeechUtterance: null,
     voicePlaybackResumeAfterGesture: null,
@@ -80,6 +80,7 @@ window.faceApp = function faceApp() {
     audioContext: null,
     audioSource: null,
     audioProcessor: null,
+    audioWorkletNode: null,
     audioSink: null,
     targetWidth: 160,
     timer: null,
@@ -166,6 +167,7 @@ window.faceApp = function faceApp() {
       if (!this.voiceAudio) {
         this.voiceAudio = new Audio();
         this.voiceAudio.preload = 'auto';
+        this.voiceAudio.playsInline = true;
       }
       this.voicePlaybackDetail = 'HTML audio playback ready';
     },
@@ -398,7 +400,7 @@ window.faceApp = function faceApp() {
       );
     },
 
-    armBrowserSpeechFallback(draft, delayMs = 2400, detail = null) {
+    armBrowserSpeechFallback(draft, delayMs = 8000, detail = null) {
       this.clearVoiceAudioFallbackTimer();
       if (!this.canUseBrowserSpeechFallback(draft)) {
         return false;
@@ -477,15 +479,19 @@ window.faceApp = function faceApp() {
       }
 
       const encodedAudio = audioMessage.data || '';
-      const audioBytes = this.base64ToArrayBuffer(encodedAudio);
+      const audioUrl = audioMessage.audio_url || '';
       const durationMs = audioMessage.duration_ms;
       const samples = audioMessage.samples;
-      this.voicePlaybackDetail = `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples, ${audioBytes.byteLength} bytes`;
+      const audioBytes = encodedAudio ? this.base64ToArrayBuffer(encodedAudio) : null;
+      this.voicePlaybackDetail = audioBytes
+        ? `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples, ${audioBytes.byteLength} bytes`
+        : `Server audio ready: ${durationMs ?? '?'} ms, ${samples ?? '?'} samples`;
       console.info('Mortar voice WAV ready', {
         utterance_id: draft.utterance_id,
         duration_ms: durationMs,
         samples,
-        bytes: audioBytes.byteLength,
+        bytes: audioBytes?.byteLength,
+        audio_url: audioUrl || undefined,
       });
 
       if (this.voiceCurrentDraft !== draft) return;
@@ -497,8 +503,16 @@ window.faceApp = function faceApp() {
 
       const audio = this.voiceAudio;
       const mime = audioMessage.mime || 'audio/wav';
-      this.voiceAudioUrl = this.audioObjectUrl(audioBytes, mime)
-        || `data:${mime};base64,${encodedAudio}`;
+      const playbackUrl = audioBytes
+        ? (this.audioObjectUrl(audioBytes, mime) || `data:${mime};base64,${encodedAudio}`)
+        : audioUrl;
+
+      if (!playbackUrl) {
+        this.failVoicePlaybackOrFallback(draft, 'Server audio message did not include audio data or a URL');
+        return;
+      }
+
+      this.voiceAudioUrl = audioBytes ? playbackUrl : null;
 
       const onEnded = () => {
         audio.removeEventListener('ended', onEnded);
@@ -522,7 +536,7 @@ window.faceApp = function faceApp() {
       };
 
       audio.pause();
-      audio.src = this.voiceAudioUrl;
+      audio.src = playbackUrl;
       audio.addEventListener('ended', onEnded, { once: true });
       audio.addEventListener('error', onError, { once: true });
 
@@ -946,9 +960,31 @@ window.faceApp = function faceApp() {
       await this.audioContext.resume();
       this.asr.sampleRate = this.audioContext.sampleRate;
       this.audioSource = this.audioContext.createMediaStreamSource(this.stream);
-      this.audioProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
       this.audioSink = this.audioContext.createGain();
       this.audioSink.gain.value = 0;
+      if (this.audioContext.audioWorklet) {
+        try {
+          await this.audioContext.audioWorklet.addModule('/static/asr-worklet.js');
+          this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'mortar-asr-capture');
+          this.audioWorkletNode.port.onmessage = (event) => {
+            if (!this.running || !(event.data instanceof Float32Array)) return;
+            this.collectAsrSamples(event.data);
+          };
+          this.audioSource.connect(this.audioWorkletNode);
+          this.audioWorkletNode.connect(this.audioSink);
+        } catch (error) {
+          console.warn('AudioWorklet ASR capture failed; using legacy processor', error);
+          this.asr.lastError = 'AudioWorklet unavailable; using legacy microphone capture';
+          this.startLegacyAsrProcessor();
+        }
+      } else {
+        this.startLegacyAsrProcessor();
+      }
+      this.audioSink.connect(this.audioContext.destination);
+    },
+
+    startLegacyAsrProcessor() {
+      this.audioProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
       this.audioProcessor.onaudioprocess = (event) => {
         if (!this.running) return;
         const input = event.inputBuffer.getChannelData(0);
@@ -956,10 +992,14 @@ window.faceApp = function faceApp() {
       };
       this.audioSource.connect(this.audioProcessor);
       this.audioProcessor.connect(this.audioSink);
-      this.audioSink.connect(this.audioContext.destination);
     },
 
     stopAsr() {
+      if (this.audioWorkletNode) {
+        this.audioWorkletNode.port.onmessage = null;
+        this.audioWorkletNode.disconnect();
+        this.audioWorkletNode = null;
+      }
       if (this.audioProcessor) {
         this.audioProcessor.disconnect();
         this.audioProcessor.onaudioprocess = null;
