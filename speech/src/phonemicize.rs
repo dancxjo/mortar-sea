@@ -1202,10 +1202,9 @@ fn realize_connected_allophone_before_word(
             phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
         },
     );
-    let Some(phone_index) = phones
-        .iter()
-        .rposition(|phone| !is_boundary_phone(phone) && !phone.provenance.method.contains("epenthesis rule"))
-    else {
+    let Some(phone_index) = phones.iter().rposition(|phone| {
+        !is_boundary_phone(phone) && !phone.provenance.method.contains("epenthesis rule")
+    }) else {
         return;
     };
 
@@ -1572,6 +1571,41 @@ mod tests {
             .expect("water careful");
         assert!(phone_symbols(&careful).contains(&"t".into()));
         assert!(!phone_symbols(&careful).contains(&"ɾ".into()));
+    }
+
+    #[test]
+    fn flapping_can_apply_across_unpaused_word_boundaries() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("not a", "en-US-GA"))
+            .expect("not a");
+        assert_eq!(phone_symbols(&output), ["n", "ɑ", "ɾ", "|", "ə"]);
+
+        let flapped_t = output
+            .phonemes
+            .iter()
+            .find(|token| {
+                matches!(
+                    &token.phoneme,
+                    Spec::Known(id) if phoneme_display_symbol(id) == "T"
+                )
+            })
+            .expect("T phoneme");
+        assert_eq!(
+            flapped_t
+                .realized_as
+                .iter()
+                .filter_map(|phone| match &phone.phone {
+                    Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["ɾ"]
+        );
+
+        let paused = EnglishPhonemicizer
+            .phonemicize(&request("not, a", "en-US-GA"))
+            .expect("not, a");
+        assert_eq!(phone_symbols(&paused), ["n", "ɑ", "t", "|", "ə"]);
     }
 
     #[test]
