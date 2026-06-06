@@ -126,6 +126,7 @@ pub fn variant() -> LinguisticVariant {
         phones: PhoneInventory { phones },
         allophone_rules: Vec::new(),
         epenthesis_rules: Vec::new(),
+        weak_forms: Vec::new(),
         phonotactics: Some(Phonotactics {
             allowed_syllable_shapes: vec![
                 SyllableShape {

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acoustics::AcousticProfile;
 use crate::feature::FeatureSystem;
-use crate::ids::{LanguageId, VariantId};
+use crate::ids::{LanguageId, PhonemeId, VariantId};
 use crate::morphology::Morphology;
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
@@ -29,6 +29,8 @@ pub struct LinguisticVariant {
     pub allophone_rules: Vec<AllophoneRule>,
     #[serde(default)]
     pub epenthesis_rules: Vec<EpenthesisRule>,
+    #[serde(default)]
+    pub weak_forms: Vec<WeakFormRule>,
     pub phonotactics: Option<Phonotactics>,
     pub orthography: Option<Orthography>,
     pub morphology: Option<Morphology>,
@@ -55,4 +57,32 @@ pub enum VariantImplementationStatus {
     Complete,
     StubDerivedFrom(VariantId),
     PermissiveProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeakFormRule {
+    pub id: String,
+    pub lexical_item: String,
+    pub pronunciation: Vec<PhonemeId>,
+    #[serde(default)]
+    pub following: WeakFormFollowingContext,
+    #[serde(default)]
+    pub style: WeakFormStyleContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeakFormFollowingContext {
+    #[default]
+    Any,
+    BeforeVowelish,
+    BeforeConsonantish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeakFormStyleContext {
+    #[default]
+    Any,
+    CasualOnly,
 }

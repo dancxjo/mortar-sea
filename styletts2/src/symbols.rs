@@ -135,6 +135,10 @@ impl SymbolSet {
         &self,
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
+        if !plan.target_phones.is_empty() {
+            return self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries);
+        }
+
         if !plan.intended_phonemes.is_empty() {
             let variant = variant_by_code(&plan.variant.0);
             return self.lower_phoneme_tokens_with_boundaries(
@@ -144,7 +148,7 @@ impl SymbolSet {
             );
         }
 
-        self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries)
+        Ok(StyleTts2SymbolSequence { tokens: Vec::new() })
     }
 
     pub fn lower_phoneme_tokens(

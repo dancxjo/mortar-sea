@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::data::arpabet::{self, ARPABET};
 use crate::feature::{FeatureBundle, FeatureSystem, FeatureValue};
-use crate::ids::{FeatureId, LanguageId, PhoneId, VariantId};
+use crate::ids::{FeatureId, LanguageId, PhoneId, PhonemeId, VariantId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
@@ -13,7 +13,10 @@ use crate::rules::{
 };
 use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
-use crate::variant::{LinguisticVariant, VariantImplementationStatus, VariantStatus};
+use crate::variant::{
+    LinguisticVariant, VariantImplementationStatus, VariantStatus, WeakFormFollowingContext,
+    WeakFormRule, WeakFormStyleContext,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct EnglishVariantRow {
@@ -201,6 +204,7 @@ pub fn variant(id: &str) -> LinguisticVariant {
         phones: phone_inventory(),
         allophone_rules: allophone_rules(row.id),
         epenthesis_rules: epenthesis_rules(),
+        weak_forms: weak_forms(row.id),
         phonotactics: Some(phonotactics(row.singing)),
         orthography: Some(Orthography {
             name: "English Latin orthography".into(),
@@ -219,6 +223,88 @@ pub fn variant(id: &str) -> LinguisticVariant {
                 VariantImplementationStatus::PermissiveProfile
             }
         },
+    }
+}
+
+fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
+    [
+        weak_form(
+            "english_weak_the_before_vowel",
+            "the",
+            &["DH", "IY0"],
+            WeakFormFollowingContext::BeforeVowelish,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_the_before_consonant",
+            "the",
+            &["DH", "AH0"],
+            WeakFormFollowingContext::BeforeConsonantish,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_and",
+            "and",
+            &["AH0", "N", "D"],
+            WeakFormFollowingContext::Any,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_a",
+            "a",
+            &["AH0"],
+            WeakFormFollowingContext::Any,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_an",
+            "an",
+            &["AH0", "N"],
+            WeakFormFollowingContext::Any,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_of",
+            "of",
+            &["AH0", "V"],
+            WeakFormFollowingContext::Any,
+            WeakFormStyleContext::Any,
+            variant_id,
+        ),
+        weak_form(
+            "english_weak_to_before_consonant",
+            "to",
+            &["T", "AH0"],
+            WeakFormFollowingContext::BeforeConsonantish,
+            WeakFormStyleContext::CasualOnly,
+            variant_id,
+        ),
+    ]
+    .into()
+}
+
+fn weak_form(
+    id: &str,
+    lexical_item: &str,
+    symbols: &[&str],
+    following: WeakFormFollowingContext,
+    style: WeakFormStyleContext,
+    variant_id: &str,
+) -> WeakFormRule {
+    WeakFormRule {
+        id: id.into(),
+        lexical_item: lexical_item.into(),
+        pronunciation: symbols
+            .iter()
+            .map(|symbol| PhonemeId(format!("{variant_id}.phoneme.{symbol}")))
+            .collect(),
+        following,
+        style,
     }
 }
 

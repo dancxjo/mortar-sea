@@ -355,7 +355,7 @@ fn en_us_phone_lowering_keeps_acronym_letter_boundaries() {
 }
 
 #[test]
-fn plan_lowering_prefers_phoneme_sequence_over_realized_phones() {
+fn plan_lowering_prefers_realized_phones_over_phonemes() {
     let plan = plan(
         None,
         None,
@@ -379,11 +379,11 @@ fn plan_lowering_prefers_phoneme_sequence_over_realized_phones() {
         .map(|token| token.source)
         .collect::<Vec<_>>();
 
-    assert_eq!(symbols, ["AH", "."]);
+    assert_eq!(symbols, ["ə", "."]);
     assert_eq!(
         sources,
         [
-            StyleTts2SymbolSource::Phoneme,
+            StyleTts2SymbolSource::Phone,
             StyleTts2SymbolSource::BoundaryPunctuation
         ]
     );

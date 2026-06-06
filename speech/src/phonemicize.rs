@@ -15,6 +15,9 @@ use crate::realize::{PhoneDecompositionPolicy, RealizationOptions, realize_phone
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
 use crate::time::TextSpan;
+use crate::variant::{
+    LinguisticVariant, WeakFormFollowingContext, WeakFormRule, WeakFormStyleContext,
+};
 
 const WORD_BOUNDARY_ID: &str = "boundary.word";
 const LETTER_BOUNDARY_ID: &str = "boundary.letter";
@@ -24,6 +27,204 @@ pub trait Phonemicizer {
         &self,
         input: &PhonemicizeRequest,
     ) -> Result<PhonemicizeOutput, PhonemicizeError>;
+}
+
+pub trait PronunciationPipeline {
+    fn canonical_variant_id(
+        &self,
+        requested_variant: &VariantId,
+    ) -> Result<VariantId, PhonemicizeError>;
+
+    fn variant(&self, canonical_variant: &VariantId)
+    -> Result<LinguisticVariant, PhonemicizeError>;
+
+    fn text_normalizer(&self, text: &str) -> String {
+        text.to_string()
+    }
+
+    fn orthographic_tokenizer(&self, text: &str) -> Vec<WordToken>;
+
+    fn boundary_extractor(&self, text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken>;
+
+    fn weak_form_resolver(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+        context: TokenPronunciationContext,
+    ) -> Option<WordPronunciation>;
+
+    fn token_classifier(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+        context: TokenPronunciationContext,
+    ) -> WordPronunciation;
+
+    fn phoneme_planner(
+        &self,
+        variant_id: &VariantId,
+        word_index: usize,
+        pronunciation: &WordPronunciation,
+    ) -> Vec<PhonemeToken> {
+        pronunciation
+            .candidates
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(phoneme_index, cmu)| {
+                let raw_symbol = cmu.raw_symbol();
+                let mut features = arpabet::cmu_token_features(cmu);
+                if let Some(letter_index) = pronunciation.letter_indices.get(phoneme_index).copied()
+                {
+                    add_letter_index_feature(&mut features, letter_index);
+                    add_letter_name_feature(&mut features);
+                }
+                add_word_index_feature(&mut features, word_index);
+                PhonemeToken {
+                    phoneme: Spec::Known(arpabet::phoneme_id(&variant_id.0, &raw_symbol)),
+                    span: None,
+                    features,
+                    realized_as: Vec::new(),
+                    confidence: confidence_for_status(pronunciation.status),
+                    provenance: pronunciation.provenance.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn phone_realizer(
+        &self,
+        variant: &LinguisticVariant,
+        phonemes: &[PhonemeToken],
+        careful_style: bool,
+    ) -> Vec<PhoneToken> {
+        realize_phonemes(
+            variant,
+            phonemes,
+            &RealizationOptions {
+                careful_style,
+                phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+            },
+        )
+    }
+
+    fn output_provenance(&self, canonical_variant: &VariantId) -> EvidenceProvenance {
+        EvidenceProvenance {
+            source: EvidenceSource::Rule,
+            method: format!(
+                "{} variant data + staged pronunciation pipeline",
+                canonical_variant.0
+            ),
+            version: Some("0.1".into()),
+        }
+    }
+
+    fn run(&self, input: &PhonemicizeRequest) -> Result<PhonemicizeOutput, PhonemicizeError> {
+        if input.text.trim().is_empty() {
+            return Err(PhonemicizeError::EmptyInput);
+        }
+
+        let canonical_variant = self.canonical_variant_id(&input.variant)?;
+        let variant = self.variant(&canonical_variant)?;
+        let normalized_text = self.text_normalizer(&input.text);
+        let words = self.orthographic_tokenizer(&normalized_text);
+        let boundaries = self.boundary_extractor(&normalized_text, &words);
+        let mut graphemes = Vec::with_capacity(words.len());
+        let mut phonemes = Vec::new();
+        let mut phones = Vec::new();
+        let mut syllables = Vec::new();
+        let mut warnings = Vec::new();
+        let careful_style = input
+            .style
+            .as_ref()
+            .is_some_and(|style| style.careful_style);
+
+        for (word_index, word) in words.iter().enumerate() {
+            if word_index > 0 {
+                phones.push(boundary_phone_token());
+            }
+
+            graphemes.push(GraphemeToken {
+                grapheme: Spec::Known(GraphemeId(format!(
+                    "{}.word.{}",
+                    canonical_variant.0, word.normalized
+                ))),
+                text: word.text.clone(),
+                span: Some(word.span),
+                confidence: 1.0,
+            });
+
+            let context = TokenPronunciationContext {
+                next_starts_with_vowelish: words
+                    .get(word_index + 1)
+                    .is_some_and(|next| self.next_word_starts_with_vowelish(next, &variant)),
+                careful_style,
+            };
+            let pronunciation = self.token_classifier(word, &variant, context);
+            warnings.extend(pronunciation.warnings.clone());
+            let candidate = pronunciation
+                .candidates
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let mut word_phonemes =
+                self.phoneme_planner(&canonical_variant, word_index, &pronunciation);
+            let mut word_phones = self.phone_realizer(&variant, &word_phonemes, careful_style);
+
+            assign_realized_phones(&mut word_phonemes, &word_phones);
+            phonemes.extend(word_phonemes);
+
+            if !word_phones.is_empty() {
+                syllables.push(Syllable {
+                    nucleus_index: candidate
+                        .iter()
+                        .position(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol())),
+                    stress: stress_for_candidate(&candidate),
+                    phones: word_phones.clone(),
+                    span: None,
+                });
+            }
+            insert_letter_boundaries(&mut word_phones, &pronunciation.letter_break_offsets);
+            phones.append(&mut word_phones);
+        }
+
+        Ok(PhonemicizeOutput {
+            text: input.text.clone(),
+            variant: input.variant.clone(),
+            graphemes,
+            phonemes,
+            phones,
+            syllables,
+            boundaries,
+            warnings,
+            provenance: self.output_provenance(&canonical_variant),
+        })
+    }
+
+    fn next_word_starts_with_vowelish(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+    ) -> bool {
+        let candidate = self
+            .token_classifier(
+                word,
+                variant,
+                TokenPronunciationContext {
+                    next_starts_with_vowelish: false,
+                    careful_style: true,
+                },
+            )
+            .candidates
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        candidate
+            .first()
+            .is_some_and(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,149 +302,116 @@ impl Phonemicizer for EnglishPhonemicizer {
         &self,
         input: &PhonemicizeRequest,
     ) -> Result<PhonemicizeOutput, PhonemicizeError> {
-        if input.text.trim().is_empty() {
-            return Err(PhonemicizeError::EmptyInput);
-        }
+        self.run(input)
+    }
+}
 
-        let canonical_variant = canonical_variant_id(&input.variant.0).ok_or_else(|| {
+impl PronunciationPipeline for EnglishPhonemicizer {
+    fn canonical_variant_id(
+        &self,
+        requested_variant: &VariantId,
+    ) -> Result<VariantId, PhonemicizeError> {
+        canonical_variant_id(&requested_variant.0).ok_or_else(|| {
             PhonemicizeError::UnsupportedVariant {
-                variant: input.variant.clone(),
+                variant: requested_variant.clone(),
             }
-        })?;
+        })
+    }
+
+    fn variant(
+        &self,
+        canonical_variant: &VariantId,
+    ) -> Result<LinguisticVariant, PhonemicizeError> {
         let variant = variant_by_code(&canonical_variant.0).ok_or_else(|| {
             PhonemicizeError::UnsupportedVariant {
-                variant: input.variant.clone(),
+                variant: canonical_variant.clone(),
             }
         })?;
         if variant.language.0 != "en" {
             return Err(PhonemicizeError::UnsupportedVariant {
-                variant: input.variant.clone(),
+                variant: canonical_variant.clone(),
             });
         }
+        Ok(variant)
+    }
 
-        let words = tokenize_words(&input.text);
-        let boundaries = boundary_tokens(&input.text, &words);
-        let mut graphemes = Vec::with_capacity(words.len());
-        let mut phonemes = Vec::new();
-        let mut phones = Vec::new();
-        let mut syllables = Vec::new();
-        let mut warnings = Vec::new();
-        let careful_style = input
-            .style
-            .as_ref()
-            .is_some_and(|style| style.careful_style);
+    fn orthographic_tokenizer(&self, text: &str) -> Vec<WordToken> {
+        tokenize_words(text)
+    }
 
-        for (word_index, word) in words.iter().enumerate() {
-            if word_index > 0 {
-                phones.push(boundary_phone_token());
-            }
+    fn boundary_extractor(&self, text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> {
+        boundary_tokens(text, words)
+    }
 
-            graphemes.push(GraphemeToken {
-                grapheme: Spec::Known(GraphemeId(format!(
-                    "{}.word.{}",
-                    canonical_variant.0, word.normalized
-                ))),
-                text: word.text.clone(),
-                span: Some(word.span),
-                confidence: 1.0,
-            });
+    fn weak_form_resolver(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+        context: TokenPronunciationContext,
+    ) -> Option<WordPronunciation> {
+        variant
+            .weak_forms
+            .iter()
+            .find(|rule| weak_form_rule_applies(rule, &word.normalized, context))
+            .map(|rule| weak_form_pronunciation(rule, word.text.as_str()))
+    }
 
-            let pronunciation = pronunciation_for_word(
-                word,
-                words
-                    .get(word_index + 1)
-                    .is_some_and(next_word_starts_with_vowelish),
-                careful_style,
-            );
-            warnings.extend(pronunciation.warnings.clone());
-            let candidate = pronunciation
+    fn token_classifier(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+        context: TokenPronunciationContext,
+    ) -> WordPronunciation {
+        pronunciation_for_word(self, word, variant, context)
+    }
+
+    fn next_word_starts_with_vowelish(
+        &self,
+        word: &WordToken,
+        variant: &LinguisticVariant,
+    ) -> bool {
+        let candidate = match &word.kind {
+            OrthographicTokenKind::Acronym => word
+                .text
+                .chars()
+                .find(|character| character.is_alphabetic())
+                .map(letter_name_pronunciation)
+                .unwrap_or_default(),
+            OrthographicTokenKind::MixedAlphaNumeric => mixed_alphanumeric_pronunciation(word)
                 .candidates
                 .first()
                 .cloned()
-                .unwrap_or_default();
-            let mut word_phonemes: Vec<_> = candidate
-                .iter()
-                .enumerate()
-                .map(|(phoneme_index, cmu)| {
-                    let raw_symbol = cmu.raw_symbol();
-                    let mut features = arpabet::cmu_token_features(cmu);
-                    if let Some(letter_index) =
-                        pronunciation.letter_indices.get(phoneme_index).copied()
-                    {
-                        add_letter_index_feature(&mut features, letter_index);
-                        add_letter_name_feature(&mut features);
-                    }
-                    add_word_index_feature(&mut features, word_index);
-                    PhonemeToken {
-                        phoneme: Spec::Known(arpabet::phoneme_id(
-                            &canonical_variant.0,
-                            &raw_symbol,
-                        )),
-                        span: None,
-                        features,
-                        realized_as: Vec::new(),
-                        confidence: confidence_for_status(pronunciation.status),
-                        provenance: pronunciation.provenance.clone(),
-                    }
-                })
-                .collect();
-            let mut word_phones = realize_phonemes(
-                &variant,
-                &word_phonemes,
-                &RealizationOptions {
-                    careful_style,
-                    phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
-                },
-            );
-
-            assign_realized_phones(&mut word_phonemes, &word_phones);
-            phonemes.extend(word_phonemes);
-
-            if !word_phones.is_empty() {
-                syllables.push(Syllable {
-                    nucleus_index: candidate
-                        .iter()
-                        .position(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol())),
-                    stress: stress_for_candidate(&candidate),
-                    phones: word_phones.clone(),
-                    span: None,
-                });
-            }
-            insert_letter_boundaries(&mut word_phones, &pronunciation.letter_break_offsets);
-            phones.append(&mut word_phones);
-        }
-
-        Ok(PhonemicizeOutput {
-            text: input.text.clone(),
-            variant: input.variant.clone(),
-            graphemes,
-            phonemes,
-            phones,
-            syllables,
-            boundaries,
-            warnings,
-            provenance: EvidenceProvenance {
-                source: EvidenceSource::Rule,
-                method: format!(
-                    "{} variant data + CMUdict lookup + explicit unknown-word fallback",
-                    canonical_variant.0
-                ),
-                version: Some("0.1".into()),
-            },
-        })
+                .unwrap_or_default(),
+            OrthographicTokenKind::Word | OrthographicTokenKind::Hyphenated(_) => self
+                .token_classifier(
+                    word,
+                    variant,
+                    TokenPronunciationContext {
+                        next_starts_with_vowelish: false,
+                        careful_style: true,
+                    },
+                )
+                .candidates
+                .first()
+                .cloned()
+                .unwrap_or_default(),
+        };
+        candidate
+            .first()
+            .is_some_and(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol()))
     }
 }
 
 #[derive(Debug, Clone)]
-struct WordToken {
-    text: String,
-    normalized: String,
-    kind: OrthographicTokenKind,
-    span: TextSpan,
+pub struct WordToken {
+    pub text: String,
+    pub normalized: String,
+    pub kind: OrthographicTokenKind,
+    pub span: TextSpan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OrthographicTokenKind {
+pub enum OrthographicTokenKind {
     Word,
     Acronym,
     MixedAlphaNumeric,
@@ -251,9 +419,9 @@ enum OrthographicTokenKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OrthographicToken {
-    text: String,
-    kind: Box<OrthographicTokenKind>,
+pub struct OrthographicToken {
+    pub text: String,
+    pub kind: Box<OrthographicTokenKind>,
 }
 
 fn tokenize_words(text: &str) -> Vec<WordToken> {
@@ -475,26 +643,28 @@ fn classify_surface_word(surface: &str) -> OrthographicTokenKind {
 }
 
 #[derive(Debug, Clone)]
-struct WordPronunciation {
-    candidates: Vec<Vec<CmuPhoneme>>,
-    status: PronunciationStatus,
-    provenance: EvidenceProvenance,
-    warnings: Vec<PronunciationWarning>,
-    letter_break_offsets: Vec<usize>,
-    letter_indices: Vec<usize>,
+pub struct WordPronunciation {
+    pub candidates: Vec<Vec<CmuPhoneme>>,
+    pub status: PronunciationStatus,
+    pub provenance: EvidenceProvenance,
+    pub warnings: Vec<PronunciationWarning>,
+    pub letter_break_offsets: Vec<usize>,
+    pub letter_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenPronunciationContext {
+    pub next_starts_with_vowelish: bool,
+    pub careful_style: bool,
 }
 
 fn pronunciation_for_word(
+    pipeline: &(impl PronunciationPipeline + ?Sized),
     word: &WordToken,
-    next_starts_with_vowelish: bool,
-    careful_style: bool,
+    variant: &LinguisticVariant,
+    context: TokenPronunciationContext,
 ) -> WordPronunciation {
-    if let Some(pronunciation) = weak_form_pronunciation(
-        &word.normalized,
-        word.text.as_str(),
-        next_starts_with_vowelish,
-        careful_style,
-    ) {
+    if let Some(pronunciation) = pipeline.weak_form_resolver(word, variant, context) {
         return pronunciation;
     }
 
@@ -550,36 +720,41 @@ fn pronunciation_for_word(
     }
 }
 
-fn weak_form_pronunciation(
+fn weak_form_rule_applies(
+    rule: &WeakFormRule,
     normalized: &str,
-    surface: &str,
-    next_starts_with_vowelish: bool,
-    careful_style: bool,
-) -> Option<WordPronunciation> {
-    let (method, symbols): (&str, &[&str]) = match normalized {
-        "the" if next_starts_with_vowelish => {
-            ("english weak form: the before vowel", &["DH", "IY0"])
-        }
-        "the" => ("english weak form: the before consonant", &["DH", "AH0"]),
-        "and" => ("english weak form: and", &["AH0", "N", "D"]),
-        "a" => ("english weak form: a", &["AH0"]),
-        "an" => ("english weak form: an", &["AH0", "N"]),
-        "of" => ("english weak form: of", &["AH0", "V"]),
-        "to" if !careful_style && !next_starts_with_vowelish => {
-            ("english weak form: to before consonant", &["T", "AH0"])
-        }
-        _ => return None,
-    };
+    context: TokenPronunciationContext,
+) -> bool {
+    if rule.lexical_item != normalized {
+        return false;
+    }
+    if rule.style == WeakFormStyleContext::CasualOnly && context.careful_style {
+        return false;
+    }
+    match rule.following {
+        WeakFormFollowingContext::Any => true,
+        WeakFormFollowingContext::BeforeVowelish => context.next_starts_with_vowelish,
+        WeakFormFollowingContext::BeforeConsonantish => !context.next_starts_with_vowelish,
+    }
+}
+
+fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciation {
+    let symbols = rule
+        .pronunciation
+        .iter()
+        .map(phoneme_display_symbol)
+        .collect::<Vec<_>>();
     let candidate = symbols
         .iter()
         .map(|symbol| CmuPhoneme::parse(symbol))
         .collect();
-    Some(WordPronunciation {
+    let method = format!("variant weak form: {}", rule.id.replace('_', " "));
+    WordPronunciation {
         candidates: vec![candidate],
         status: PronunciationStatus::Exact,
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: method.into(),
+            method: method.clone(),
             version: Some("0.1".into()),
         },
         warnings: vec![PronunciationWarning {
@@ -589,7 +764,7 @@ fn weak_form_pronunciation(
         }],
         letter_break_offsets: Vec::new(),
         letter_indices: Vec::new(),
-    })
+    }
 }
 
 fn acronym_pronunciation(surface: &str) -> WordPronunciation {
@@ -686,32 +861,6 @@ fn letter_name_sequence(
         }
     }
     (candidate, break_offsets, letter_indices)
-}
-
-fn next_word_starts_with_vowelish(word: &WordToken) -> bool {
-    let candidate = match &word.kind {
-        OrthographicTokenKind::Acronym => word
-            .text
-            .chars()
-            .find(|character| character.is_alphabetic())
-            .map(letter_name_pronunciation)
-            .unwrap_or_default(),
-        OrthographicTokenKind::MixedAlphaNumeric => mixed_alphanumeric_pronunciation(word)
-            .candidates
-            .first()
-            .cloned()
-            .unwrap_or_default(),
-        OrthographicTokenKind::Word | OrthographicTokenKind::Hyphenated(_) => {
-            pronunciation_for_word(word, false, true)
-                .candidates
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        }
-    };
-    candidate
-        .first()
-        .is_some_and(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol()))
 }
 
 fn letter_name_pronunciation(character: char) -> Vec<CmuPhoneme> {
