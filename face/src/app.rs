@@ -1,6 +1,6 @@
 use std::{
     collections::{HashSet, VecDeque},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     sync::{Arc, RwLock, atomic::AtomicBool},
 };
@@ -16,8 +16,21 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
+use rcgen::generate_simple_self_signed;
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::{
+    io,
+    net::{TcpListener, TcpStream},
+    sync::broadcast,
+    task::JoinHandle,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    },
+};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, trace, warn};
 use uuid::Uuid;
@@ -46,6 +59,8 @@ pub(crate) const MAX_RECORDED_VISION_IMPRESSIONS: usize = 80;
 pub(crate) const MAX_RECORDED_EXPERIENCES: usize = 80;
 pub(crate) const MAX_RECORDED_VOICE_OBSERVATIONS: usize = 80;
 const REALTIME_EXPERIENCE_WS_CAPACITY: usize = 256;
+const DEFAULT_FACE_ADDR: &str = "0.0.0.0:3030";
+const DEFAULT_FACE_HTTPS_ADDR: &str = "0.0.0.0:443";
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -74,6 +89,14 @@ pub(crate) struct AppState {
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    let addr = face_addr()?;
+    let https_addr = face_https_addr()?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind Face HTTP server to {addr}"))?;
+    info!("Face server reserved http://{addr}");
+    let https_listener = bind_https_proxy(https_addr).await?;
+
     let models = mortar_sea::models::ensure_runtime_models_available()?;
     info!(model = %models.llm.display(), "selected LLM model is available");
     if let Some(projector) = &models.llm_projector {
@@ -144,7 +167,7 @@ pub async fn run() -> anyhow::Result<()> {
         realtime_experience_pending: Arc::new(AtomicBool::new(false)),
         asr_backend,
     };
-    voice::spawn_voice(state.clone());
+    let voice_state = state.clone();
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let mouth_audio_dir = voice::mouth_audio_dir();
@@ -161,17 +184,193 @@ pub async fn run() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr: SocketAddr = std::env::var("FACE_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:3030".to_string())
-        .parse()
-        .expect("FACE_ADDR must be a valid socket address");
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("Face server listening on http://{addr}");
+    voice::spawn_voice(voice_state);
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let https_proxy = spawn_https_proxy(https_listener, proxy_backend_addr(addr));
+    let server = async {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    };
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => {
+            result.context("Face HTTP server failed")?;
+        }
+        result = wait_for_https_proxy(https_proxy) => {
+            result?;
+        }
+    }
+
+    Ok(())
+}
+
+fn face_addr() -> anyhow::Result<SocketAddr> {
+    std::env::var("FACE_ADDR")
+        .unwrap_or_else(|_| DEFAULT_FACE_ADDR.to_string())
+        .parse()
+        .context("FACE_ADDR must be a valid socket address")
+}
+
+fn face_https_addr() -> anyhow::Result<Option<SocketAddr>> {
+    let Ok(value) = std::env::var("FACE_HTTPS_ADDR") else {
+        return Ok(Some(
+            DEFAULT_FACE_HTTPS_ADDR
+                .parse()
+                .expect("default FACE_HTTPS_ADDR must be valid"),
+        ));
+    };
+    let trimmed = value.trim();
+    if matches!(
+        trimmed,
+        "" | "0" | "off" | "OFF" | "false" | "FALSE" | "no" | "NO"
+    ) {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .context("FACE_HTTPS_ADDR must be a valid socket address or off")
+}
+
+fn proxy_backend_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
+        }
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), addr.port())
+        }
+        addr => addr,
+    }
+}
+
+async fn bind_https_proxy(listen_addr: Option<SocketAddr>) -> anyhow::Result<Option<TcpListener>> {
+    let Some(listen_addr) = listen_addr else {
+        return Ok(None);
+    };
+    match TcpListener::bind(listen_addr).await {
+        Ok(listener) => {
+            info!("Face HTTPS proxy reserved https://{listen_addr}");
+            Ok(Some(listener))
+        }
+        Err(err) => {
+            warn!(%listen_addr, %err, "Face HTTPS proxy unavailable; continuing HTTP server");
+            Ok(None)
+        }
+    }
+}
+
+fn spawn_https_proxy(
+    listener: Option<TcpListener>,
+    backend_addr: SocketAddr,
+) -> Option<JoinHandle<anyhow::Result<()>>> {
+    listener.map(|listener| {
+        tokio::spawn(async move { serve_https_proxy(listener, backend_addr).await })
+    })
+}
+
+async fn wait_for_https_proxy(proxy: Option<JoinHandle<anyhow::Result<()>>>) -> anyhow::Result<()> {
+    if let Some(proxy) = proxy {
+        match proxy.await {
+            Ok(Ok(())) => warn!("Face HTTPS proxy stopped"),
+            Ok(Err(err)) => warn!(%err, "Face HTTPS proxy unavailable; continuing HTTP server"),
+            Err(err) => warn!(%err, "Face HTTPS proxy task failed; continuing HTTP server"),
+        }
+    };
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+async fn serve_https_proxy(listener: TcpListener, backend_addr: SocketAddr) -> anyhow::Result<()> {
+    let listen_addr = listener
+        .local_addr()
+        .context("failed to read Face HTTPS proxy address")?;
+    let acceptor = self_signed_tls_acceptor()?;
+    info!(
+        "Face HTTPS proxy listening on https://{listen_addr} and forwarding to http://{backend_addr}"
+    );
+
+    loop {
+        let (client, peer_addr) = listener
+            .accept()
+            .await
+            .context("failed to accept HTTPS proxy connection")?;
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            if let Err(err) = proxy_https_connection(acceptor, client, backend_addr).await {
+                warn!(%peer_addr, %err, "HTTPS proxy connection failed");
+            }
+        });
+    }
+}
+
+fn self_signed_tls_acceptor() -> anyhow::Result<TlsAcceptor> {
+    let cert = generate_simple_self_signed(certificate_subject_alt_names())
+        .context("failed to generate self-signed Face HTTPS certificate")?;
+    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .context("failed to configure Face HTTPS certificate")?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+fn certificate_subject_alt_names() -> Vec<String> {
+    let mut names = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if let Some(ip) = primary_lan_ip() {
+        names.push(ip.to_string());
+    }
+    if let Ok(extra_names) = std::env::var("FACE_HTTPS_CERT_NAMES") {
+        names.extend(
+            extra_names
+                .split([',', ' ', ';'])
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn primary_lan_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(IpAddr::V4(ip)),
+        IpAddr::V6(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(IpAddr::V6(ip)),
+        _ => None,
+    }
+}
+
+async fn proxy_https_connection(
+    acceptor: TlsAcceptor,
+    client: TcpStream,
+    backend_addr: SocketAddr,
+) -> anyhow::Result<()> {
+    let mut client = acceptor
+        .accept(client)
+        .await
+        .context("TLS handshake failed")?;
+    let mut backend = TcpStream::connect(backend_addr)
+        .await
+        .with_context(|| format!("failed to connect HTTPS proxy backend {backend_addr}"))?;
+    let (client_to_backend, backend_to_client) = io::copy_bidirectional(&mut client, &mut backend)
+        .await
+        .context("HTTPS proxy forwarding failed")?;
+    trace!(
+        client_to_backend,
+        backend_to_client, "HTTPS proxy connection closed"
+    );
     Ok(())
 }
 

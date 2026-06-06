@@ -483,12 +483,18 @@ The `face` crate hosts a browser UI called the Face:
 cargo run face
 ```
 
-By default it listens at <http://127.0.0.1:3030>.
+By default it binds HTTP on `0.0.0.0:3030` and starts a self-signed HTTPS proxy
+on `0.0.0.0:443` that forwards to the HTTP server. Open it with
+<https://localhost/> or the machine's LAN address. Override the HTTP listener
+with `FACE_ADDR`, and set `FACE_HTTPS_ADDR=off` to disable the HTTPS proxy or to
+another socket address to move it. The self-signed certificate includes
+localhost, loopback addresses, and the inferred primary LAN address; set
+`FACE_HTTPS_CERT_NAMES` to a comma-separated list to add more names or IPs.
 
-On startup, the Face ensures the selected local LLM is present. If the selected
-Gemma GGUF is missing, it downloads it before binding the server, following the
-same "selected model just works" shape as Listenbury. To preflight runtime model
-downloads without launching the browser server, run:
+On startup, the Face reserves the HTTP socket, then ensures the selected local
+LLM is present before serving requests. If the selected Gemma GGUF is missing, it
+downloads it following the same "selected model just works" shape as Listenbury.
+To preflight runtime model downloads without launching the browser server, run:
 
 ```sh
 cargo run models fetch

@@ -21,10 +21,12 @@ psyche = { path = "../psyche", default-features = false }
 mortar-sea = { path = "..", default-features = false, features = ["piper-onnx"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 reverse_geocoder = "4.1.1"
+rcgen = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
