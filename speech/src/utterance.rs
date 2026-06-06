@@ -37,6 +37,8 @@ pub struct UtterancePlan {
     pub intended_phonemes: Vec<PhonemeToken>,
     pub target_phones: Vec<PhoneToken>,
     #[serde(default)]
+    pub target_syllables: Vec<Syllable>,
+    #[serde(default)]
     pub boundaries: Vec<SpeechBoundaryToken>,
     pub target_prosody: ProsodyTrack,
     pub target_acoustics: Vec<AcousticFrame>,

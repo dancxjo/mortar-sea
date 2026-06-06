@@ -1,13 +1,14 @@
 use speech::{
-    BoundaryKind, EvidenceProvenance, EvidenceSource, FeatureBundle, PauseKind, PhoneId,
-    PhoneToken, PhonemeId, PhonemeToken, ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken,
-    StyleRef, StyleSource, TerminalPunctuation, TextSpan, UtteranceId, UtterancePlan, VariantId,
+    BoundaryKind, EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, FeatureBundle,
+    PauseKind, PhoneId, PhoneToken, PhonemeId, PhonemeToken, PhonemicizeRequest, Phonemicizer,
+    ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken, StyleRef, StyleSource, TerminalPunctuation,
+    TextSpan, UtteranceId, UtterancePlan, VariantId,
 };
 use styletts2::{
     BackendSynthesisPlan, MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config,
     StyleTts2PlanOptions, StyleTts2SymbolSource, StyleTts2SymbolToken, StyleTts2SynthesisRequest,
     SymbolLoweringError, SymbolSet, SynthesisChunk, prepare_styletts2_plan,
-    styletts2_en_us_symbol_set, validate_styletts2_plan,
+    styletts2_en_us_symbol_set, styletts2_text_for_symbols, validate_styletts2_plan,
 };
 
 #[test]
@@ -174,7 +175,7 @@ fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
 }
 
 #[test]
-fn lower_plan_tokens_defaults_unpunctuated_text_to_final_period() {
+fn lower_plan_tokens_does_not_invent_final_punctuation() {
     let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variant.phone.a", "alpha");
     let plan = plan(
         None,
@@ -194,7 +195,7 @@ fn lower_plan_tokens_defaults_unpunctuated_text_to_final_period() {
         .map(|token| token.symbol.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(symbols, ["alpha", "."]);
+    assert_eq!(symbols, ["alpha"]);
 }
 
 #[test]
@@ -390,6 +391,31 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 }
 
 #[test]
+fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
+    for (input, expected) in [
+        ("I R", "ˈaɪ ˈɑɹ"),
+        (
+            "I’ll inspect the current English rule.",
+            "ˈaɪl ˌɪnspˈɛkt ðə kˈɝənt ˈɪŋɡlɪʃ ɹˈul.",
+        ),
+        ("StyleTTS2", "stˈaɪl tˈi tˈi jˈɛs tˈu"),
+        (
+            "That points to a real phonological rule.",
+            "ðˈæt pˈɔɪnts tˈu ə ɹˈil fˌoʊnəlˈɑdʒɪkəl ɹˈul.",
+        ),
+    ] {
+        let actual = styletts2_text_from_english(input);
+        assert_eq!(actual, expected, "{input}");
+        for arpabet in ["AY", "ER", "DH"] {
+            assert!(
+                !actual.contains(arpabet),
+                "{input} should not contain ARPABET symbol {arpabet}: {actual}"
+            );
+        }
+    }
+}
+
+#[test]
 fn prepared_plan_chunks_long_input_on_word_boundaries() {
     let phones = vec![
         phone_token("variant.phone.a"),
@@ -454,6 +480,45 @@ fn preflight_rejects_unknown_symbols_before_backend_runtime() {
     assert!(error.to_string().contains("unknown StyleTTS2 symbol"));
 }
 
+fn styletts2_text_from_english(text: &str) -> String {
+    let phonemicized = EnglishPhonemicizer
+        .phonemicize(&PhonemicizeRequest {
+            text: text.into(),
+            variant: VariantId("en-US".into()),
+            style: None,
+        })
+        .expect("phonemicize");
+    let plan = UtterancePlan {
+        id: UtteranceId("utt.styletts2.text".into()),
+        variant: phonemicized.variant,
+        speaker: None,
+        intended_text: Some(phonemicized.text),
+        intended_morphemes: Vec::new(),
+        intended_phonemes: phonemicized.phonemes,
+        target_phones: phonemicized.phones,
+        target_syllables: phonemicized.syllables,
+        boundaries: phonemicized.boundaries,
+        target_prosody: ProsodyTrack::default(),
+        target_acoustics: Vec::new(),
+        style: None,
+        provenance: phonemicized.provenance,
+    };
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &styletts2_en_us_symbol_set(),
+        StyleTts2PlanOptions::default(),
+    )
+    .expect("prepare StyleTTS2 plan");
+    backend_plan
+        .chunks
+        .iter()
+        .map(|chunk| styletts2_text_for_symbols(&chunk.symbols).expect("StyleTTS2 text"))
+        .collect::<Vec<_>>()
+        .join(" || ")
+        .trim()
+        .to_string()
+}
+
 fn plan(
     speaker: Option<SpeakerId>,
     style: Option<StyleRef>,
@@ -470,6 +535,7 @@ fn plan(
         intended_morphemes: Vec::new(),
         intended_phonemes: phonemes,
         target_phones: phones,
+        target_syllables: Vec::new(),
         boundaries,
         target_prosody: ProsodyTrack::default(),
         target_acoustics: Vec::new(),

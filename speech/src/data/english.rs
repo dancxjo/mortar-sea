@@ -653,4 +653,27 @@ mod tests {
         );
         assert_eq!(flapping.environment.prosodic_context, Spec::Unspecified);
     }
+
+    #[test]
+    fn weak_forms_are_variant_data() {
+        let ga = variant("en-US-GA");
+        let weak_the = ga
+            .weak_forms
+            .iter()
+            .find(|rule| rule.id == "english_weak_the_before_consonant")
+            .expect("weak form for the before consonants");
+
+        assert_eq!(weak_the.lexical_item, "the");
+        assert_eq!(
+            weak_the.pronunciation,
+            vec![
+                arpabet::phoneme_id("en-US-GA", "DH"),
+                arpabet::phoneme_id("en-US-GA", "AH0")
+            ]
+        );
+        assert_eq!(
+            weak_the.following,
+            WeakFormFollowingContext::BeforeConsonantish
+        );
+    }
 }

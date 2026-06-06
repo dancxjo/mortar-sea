@@ -3,17 +3,18 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::data::arpabet::{self, split_stress};
-use crate::data::cmudict::{self, CmuPhoneme, CmuStress, PronunciationStatus};
+use crate::data::cmudict::{self, CmuPhoneme, PronunciationStatus};
 use crate::data::{canonical_variant_id, variant_by_code};
 use crate::evidence::{EvidenceProvenance, EvidenceSource};
 use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, GraphemeId, PhoneId, PhonemeId, VariantId};
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
-use crate::prosody::{Stress, Syllable};
+use crate::prosody::Syllable;
 use crate::realize::{PhoneDecompositionPolicy, RealizationOptions, realize_phonemes};
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
+use crate::syllabify::syllabify_phones;
 use crate::time::TextSpan;
 use crate::variant::{
     LinguisticVariant, WeakFormFollowingContext, WeakFormRule, WeakFormStyleContext,
@@ -21,6 +22,7 @@ use crate::variant::{
 
 const WORD_BOUNDARY_ID: &str = "boundary.word";
 const LETTER_BOUNDARY_ID: &str = "boundary.letter";
+const NO_LETTER_INDEX: usize = usize::MAX;
 
 pub trait Phonemicizer {
     fn phonemicize(
@@ -77,6 +79,7 @@ pub trait PronunciationPipeline {
                 let raw_symbol = cmu.raw_symbol();
                 let mut features = arpabet::cmu_token_features(cmu);
                 if let Some(letter_index) = pronunciation.letter_indices.get(phoneme_index).copied()
+                    && letter_index != NO_LETTER_INDEX
                 {
                     add_letter_index_feature(&mut features, letter_index);
                     add_letter_name_feature(&mut features);
@@ -134,7 +137,6 @@ pub trait PronunciationPipeline {
         let mut graphemes = Vec::with_capacity(words.len());
         let mut phonemes = Vec::new();
         let mut phones = Vec::new();
-        let mut syllables = Vec::new();
         let mut warnings = Vec::new();
         let careful_style = input
             .style
@@ -164,11 +166,6 @@ pub trait PronunciationPipeline {
             };
             let pronunciation = self.token_classifier(word, &variant, context);
             warnings.extend(pronunciation.warnings.clone());
-            let candidate = pronunciation
-                .candidates
-                .first()
-                .cloned()
-                .unwrap_or_default();
             let mut word_phonemes =
                 self.phoneme_planner(&canonical_variant, word_index, &pronunciation);
             let mut word_phones = self.phone_realizer(&variant, &word_phonemes, careful_style);
@@ -176,19 +173,10 @@ pub trait PronunciationPipeline {
             assign_realized_phones(&mut word_phonemes, &word_phones);
             phonemes.extend(word_phonemes);
 
-            if !word_phones.is_empty() {
-                syllables.push(Syllable {
-                    nucleus_index: candidate
-                        .iter()
-                        .position(|phoneme| arpabet::is_vowel(&phoneme.raw_symbol())),
-                    stress: stress_for_candidate(&candidate),
-                    phones: word_phones.clone(),
-                    span: None,
-                });
-            }
             insert_letter_boundaries(&mut word_phones, &pronunciation.letter_break_offsets);
             phones.append(&mut word_phones);
         }
+        let syllables = syllabify_phones(&phones, &variant);
 
         Ok(PhonemicizeOutput {
             text: input.text.clone(),
@@ -802,9 +790,9 @@ fn mixed_alphanumeric_pronunciation(word: &WordToken) -> WordPronunciation {
         .filter(|character| character.is_alphabetic())
         .collect::<String>();
     if alpha.len() > 1 && alpha.chars().all(|character| character.is_uppercase()) {
-        let (letter_names, letter_break_offsets, letter_indices) =
-            letter_name_sequence(alpha.chars());
-        candidate.extend(letter_names);
+        let (sequence, letter_break_offsets, letter_indices) =
+            mixed_alphanumeric_sequence(word.text.chars());
+        candidate.extend(sequence);
         return WordPronunciation {
             candidates: vec![candidate],
             status: PronunciationStatus::Guessed,
@@ -840,6 +828,43 @@ fn mixed_alphanumeric_pronunciation(word: &WordToken) -> WordPronunciation {
         letter_break_offsets: Vec::new(),
         letter_indices: Vec::new(),
     }
+}
+
+fn mixed_alphanumeric_sequence(
+    characters: impl IntoIterator<Item = char>,
+) -> (Vec<CmuPhoneme>, Vec<usize>, Vec<usize>) {
+    let mut candidate = Vec::new();
+    let mut break_offsets = Vec::new();
+    let mut letter_indices = Vec::new();
+    let mut unit_index = 0usize;
+    let units = characters
+        .into_iter()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<Vec<_>>();
+
+    for (index, character) in units.iter().enumerate() {
+        let pronunciation = if character.is_ascii_digit() {
+            digit_name_pronunciation(*character)
+        } else if character.is_alphabetic() {
+            letter_name_pronunciation(*character)
+        } else {
+            Vec::new()
+        };
+        let letter_index = if character.is_alphabetic() {
+            let current = unit_index;
+            unit_index += 1;
+            current
+        } else {
+            NO_LETTER_INDEX
+        };
+        letter_indices.extend(std::iter::repeat_n(letter_index, pronunciation.len()));
+        candidate.extend(pronunciation);
+        if index + 1 < units.len() {
+            break_offsets.push(candidate.len());
+        }
+    }
+
+    (candidate, break_offsets, letter_indices)
 }
 
 fn letter_name_sequence(
@@ -899,6 +924,26 @@ fn letter_name_pronunciation(character: char) -> Vec<CmuPhoneme> {
         .collect()
 }
 
+fn digit_name_pronunciation(character: char) -> Vec<CmuPhoneme> {
+    let symbols: &[&str] = match character {
+        '0' => &["Z", "IH1", "R", "OW0"],
+        '1' => &["W", "AH1", "N"],
+        '2' => &["T", "UW1"],
+        '3' => &["TH", "R", "IY1"],
+        '4' => &["F", "AO1", "R"],
+        '5' => &["F", "AY1", "V"],
+        '6' => &["S", "IH1", "K", "S"],
+        '7' => &["S", "EH1", "V", "AH0", "N"],
+        '8' => &["EY1", "T"],
+        '9' => &["N", "AY1", "N"],
+        _ => &[],
+    };
+    symbols
+        .iter()
+        .map(|symbol| CmuPhoneme::parse(symbol))
+        .collect()
+}
+
 fn guess_pronunciation(word: &str) -> Vec<CmuPhoneme> {
     word.chars()
         .filter_map(|character| fallback_symbol_for_char(character).map(CmuPhoneme::parse))
@@ -937,22 +982,6 @@ fn fallback_symbol_for_char(character: char) -> Option<&'static str> {
     }
 }
 
-fn stress_for_candidate(candidate: &[CmuPhoneme]) -> Spec<Stress> {
-    if candidate
-        .iter()
-        .any(|phoneme| phoneme.stress == Some(CmuStress::Primary))
-    {
-        Spec::Known(Stress::Primary)
-    } else if candidate
-        .iter()
-        .any(|phoneme| phoneme.stress == Some(CmuStress::Secondary))
-    {
-        Spec::Known(Stress::Secondary)
-    } else {
-        Spec::Known(Stress::Unstressed)
-    }
-}
-
 fn boundary_phone_token() -> PhoneToken {
     boundary_phone_token_with_id(WORD_BOUNDARY_ID, "word-boundary")
 }
@@ -977,10 +1006,29 @@ fn boundary_phone_token_with_id(id: &'static str, method: &'static str) -> Phone
 }
 
 fn insert_letter_boundaries(phones: &mut Vec<PhoneToken>, break_offsets: &[usize]) {
-    for (inserted, offset) in break_offsets.iter().enumerate() {
-        let index = offset.saturating_add(inserted).min(phones.len());
+    for offset in break_offsets {
+        let index = phone_insert_index_for_phoneme_offset(phones, *offset);
         phones.insert(index, letter_boundary_phone_token());
     }
+}
+
+fn phone_insert_index_for_phoneme_offset(phones: &[PhoneToken], offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+
+    let mut source_phone_count = 0usize;
+    for (index, phone) in phones.iter().enumerate() {
+        if is_boundary_phone(phone) || phone.provenance.method.contains("epenthesis rule") {
+            continue;
+        }
+        source_phone_count += 1;
+        if source_phone_count == offset {
+            return index + 1;
+        }
+    }
+
+    phones.len()
 }
 
 fn assign_realized_phones(phonemes: &mut [PhonemeToken], phones: &[PhoneToken]) {
@@ -1173,7 +1221,7 @@ mod tests {
             phoneme_symbols(&output),
             [
                 "S", "P", "IY1", "CH", "T", "AH0", "S", "T", "AY1", "L", "T", "IY1", "T", "IY1",
-                "EH1", "S"
+                "EH1", "S", "T", "UW1"
             ]
         );
         assert_eq!(

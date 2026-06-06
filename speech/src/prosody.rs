@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::phonology::PhoneToken;
-use crate::segment::BoundaryKind;
+use crate::segment::{BoundaryKind, SyllablePosition};
 use crate::spec::Spec;
 use crate::time::TimeSpan;
 
@@ -18,6 +18,8 @@ pub enum Stress {
 pub struct Syllable {
     pub phones: Vec<PhoneToken>,
     pub stress: Spec<Stress>,
+    #[serde(default)]
+    pub phone_positions: Vec<SyllablePosition>,
     pub span: Option<TimeSpan>,
     pub nucleus_index: Option<usize>,
 }

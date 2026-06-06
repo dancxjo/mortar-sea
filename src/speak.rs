@@ -253,6 +253,7 @@ pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> Ut
         intended_morphemes: Vec::new(),
         intended_phonemes: output.phonemes.clone(),
         target_phones: output.phones.clone(),
+        target_syllables: output.syllables.clone(),
         boundaries: output.boundaries.clone(),
         target_prosody: ProsodyTrack::default(),
         target_acoustics: Vec::new(),

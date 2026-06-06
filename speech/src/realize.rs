@@ -335,7 +335,7 @@ fn phone_from_epenthesis_rule(
         confidence: previous.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: format!("{} rule {}", variant.id.0, rule.id),
+            method: format!("{} epenthesis rule {}", variant.id.0, rule.id),
             version: Some("0.1".into()),
         },
     }
@@ -343,7 +343,7 @@ fn phone_from_epenthesis_rule(
 
 fn default_phone_token(variant: &LinguisticVariant, token: &PhonemeToken) -> PhoneToken {
     let phone = default_phone_id(variant, token);
-    let features = match &phone {
+    let mut features = match &phone {
         Spec::Known(id) => variant
             .phones
             .phones
@@ -353,6 +353,7 @@ fn default_phone_token(variant: &LinguisticVariant, token: &PhonemeToken) -> Pho
             .unwrap_or_default(),
         _ => FeatureBundle::default(),
     };
+    merge_features(&mut features, &token.features);
 
     PhoneToken {
         phone,
@@ -361,6 +362,12 @@ fn default_phone_token(variant: &LinguisticVariant, token: &PhonemeToken) -> Pho
         acoustic_evidence: Vec::new(),
         confidence: token.confidence,
         provenance: token.provenance.clone(),
+    }
+}
+
+fn merge_features(target: &mut FeatureBundle, source: &FeatureBundle) {
+    for (id, value) in &source.values {
+        target.values.insert(id.clone(), value.clone());
     }
 }
 
