@@ -87,9 +87,6 @@ impl LlmJobKind {
 
 type TokenSink = Box<dyn FnMut(String) + Send + 'static>;
 const DEFAULT_LLM_CONTEXT_SIZE: u32 = 8_192;
-const DEFAULT_VOICE_WORDS_PER_MINUTE: f64 = 190.0;
-const AVERAGE_SPOKEN_WORD_CHARS: f64 = 5.2;
-const VOICE_PUNCTUATION_PAUSE: Duration = Duration::from_millis(90);
 const LLM_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
@@ -521,6 +518,41 @@ mod tests {
 
         assert_eq!(generated, "still going");
         assert_eq!(engine.append_attempts, 1);
+    }
+
+    #[test]
+    fn voice_tokens_are_not_artificially_paced() {
+        let id = Uuid::new_v4();
+        let token = "voice token ".repeat(80);
+        let mut engine = ScriptedEngine::new(
+            id,
+            [
+                vec![LlmEvent::Token {
+                    text: token.clone(),
+                }],
+                vec![LlmEvent::Completed],
+            ],
+        );
+        let (events, _receiver) = tokio::sync::broadcast::channel(8);
+
+        let started = Instant::now();
+        let generated = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::Voice,
+            Instant::now(),
+            GenerationRequest::default(),
+            None,
+            None,
+            &events,
+        )
+        .expect("voice token generation should complete");
+
+        assert_eq!(generated, token);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "scripted voice generation should not be delayed to spoken-token pace"
+        );
     }
 
     #[test]
@@ -1026,9 +1058,6 @@ fn handle_llm_events(
                     token_sink(text.clone());
                 }
                 send_generation_progress(id, kind, started_at, generated, *token_events, events);
-                if matches!(kind, LlmJobKind::Voice) {
-                    thread::sleep(voice_token_delay(&text));
-                }
             }
             LlmEvent::Completed => {
                 return complete_generation(id, kind, started_at, generated, *token_events, events);
@@ -1134,22 +1163,6 @@ fn complete_generation(
         elapsed_ms: duration_millis(started_at.elapsed()),
     });
     Ok(Some(generated.to_owned()))
-}
-
-fn voice_token_delay(text: &str) -> Duration {
-    let visible_chars = text.chars().filter(|ch| !ch.is_control()).count();
-    if visible_chars == 0 {
-        return Duration::ZERO;
-    }
-
-    let chars_per_second =
-        DEFAULT_VOICE_WORDS_PER_MINUTE * (AVERAGE_SPOKEN_WORD_CHARS + 1.0) / 60.0;
-    let seconds = visible_chars as f64 / chars_per_second;
-    let mut delay = Duration::from_secs_f64(seconds);
-    if text.ends_with(['.', '!', '?', ',', ';', ':']) {
-        delay += VOICE_PUNCTUATION_PAUSE;
-    }
-    delay
 }
 
 fn duration_millis(duration: Duration) -> u64 {

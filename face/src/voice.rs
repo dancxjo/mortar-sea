@@ -39,6 +39,7 @@ const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
+const VOICE_FALLBACK_INTERNAL_OBSERVATION: &str = "I notice I am here with the present moment.";
 
 static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -228,6 +229,7 @@ struct ActiveVoiceGeneration {
     voice_stream: VoiceStreamParser,
     pending_breath_groups: VecDeque<BreathGroup>,
     experience_ids: Vec<Uuid>,
+    completed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -374,6 +376,7 @@ async fn run_voice(state: AppState) {
                             sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
                         if let Some(current) = active.as_mut() {
                             remember_voice_experience_ids(current, &recovered);
+                            append_live_voice_experiences(current, &recovered);
                         }
                         continue;
                     }
@@ -392,7 +395,9 @@ async fn run_voice(state: AppState) {
                         }
 
                         if let Some(current) = active.as_mut() {
-                            remember_voice_experience_ids(current, &[experience]);
+                            let experience = std::slice::from_ref(&experience);
+                            remember_voice_experience_ids(current, experience);
+                            append_live_voice_experiences(current, experience);
                         } else if pending_speech.is_none() {
                             sync_recent_experiences_from_state(
                                 &state,
@@ -477,7 +482,6 @@ async fn run_voice(state: AppState) {
                         );
                         if pending_speech.is_none() {
                             if let Some(draft) = draft_next_voice_speech(&state, current) {
-                                current.control.pause();
                                 pending_speech = Some(draft);
                             }
                         }
@@ -493,7 +497,26 @@ async fn run_voice(state: AppState) {
 
                         match result {
                             Ok(generated) => {
-                                remember_recent_voice_turn(&mut recent_voice_turns, generated.clone());
+                                let (completed_turn, fallback_observation) =
+                                    voice_turn_with_minimum_observation(generated);
+                                if let Some(observation) = fallback_observation {
+                                    let token = format!("\n{observation}");
+                                    let _ = state.realtime_experience_events.send(
+                                        RealTimeExperienceEvent::VoiceResponseToken {
+                                            generation_id,
+                                            text: token.clone(),
+                                        },
+                                    );
+                                    collect_voice_stream_events(
+                                        current.generation_id,
+                                        current.voice_stream.push_chunk(&token),
+                                        &mut current.pending_breath_groups,
+                                    );
+                                }
+                                remember_recent_voice_turn(
+                                    &mut recent_voice_turns,
+                                    completed_turn.clone(),
+                                );
                                 collect_voice_stream_events(
                                     current.generation_id,
                                     current.voice_stream.finish(),
@@ -510,6 +533,7 @@ async fn run_voice(state: AppState) {
                             Err(err) if err.to_string().contains("cancelled") => {}
                             Err(err) => warn!(%err, "Voice generation failed"),
                         }
+                        current.completed = true;
                         let _ = state
                             .realtime_experience_events
                             .send(RealTimeExperienceEvent::VoiceResponseDone {
@@ -533,6 +557,8 @@ async fn run_voice(state: AppState) {
                                 &recent_voice_turns,
                                 &recent_speech_feedback,
                             ));
+                        } else {
+                            active = Some(current);
                         }
                     }
                 }
@@ -665,6 +691,36 @@ fn remember_voice_experience_ids(
     }
 }
 
+fn append_live_voice_experiences(
+    current: &ActiveVoiceGeneration,
+    experiences: &[ExperienceRecord],
+) {
+    let prompt = live_voice_experiences_prompt(experiences);
+    if !prompt.is_empty() {
+        current.control.append_prompt(prompt);
+    }
+}
+
+fn live_voice_experiences_prompt(experiences: &[ExperienceRecord]) -> String {
+    if experiences.is_empty() {
+        return String::new();
+    }
+
+    let mut prompt = String::from(
+        "\n\nLIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS:\n\
+         Use these details as current real-world context for the continuing Voice stream.\n",
+    );
+    for experience in experiences {
+        prompt.push_str(&format!(
+            "- observed_at={} confidence={:.2} what={}\n",
+            experience.observed_at.to_rfc3339(),
+            experience.confidence,
+            prompt_json_string(&experience.what)
+        ));
+    }
+    prompt
+}
+
 fn sync_recent_finalized_asr_from_state(
     state: &AppState,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
@@ -779,6 +835,11 @@ async fn handle_voice_mouth_event(
             if let Some(pending) = pending_speech.as_mut() {
                 pending.playback_started_at = Some(Instant::now());
                 pending.feedback_timeout_reported = false;
+            }
+            if let Some(current) = active.as_ref()
+                && current.generation_id == generation_id
+            {
+                current.control.pause();
             }
             remember_speech_feedback(
                 recent_speech_feedback,
@@ -1331,13 +1392,16 @@ async fn resume_or_restart_voice_generation(
     if let Some(current) = active.as_mut() {
         if pending_speech.is_none() {
             if let Some(draft) = draft_next_voice_speech(state, current) {
-                current.control.pause();
                 *pending_speech = Some(draft);
                 return;
             }
         }
-        current.control.resume();
-        return;
+        if current.completed {
+            *active = None;
+        } else {
+            current.control.resume();
+            return;
+        }
     }
 
     sleep(VOICE_RESTART_DELAY).await;
@@ -1411,6 +1475,7 @@ fn start_voice_generation(
         voice_stream: VoiceStreamParser::default(),
         pending_breath_groups: VecDeque::new(),
         experience_ids,
+        completed: false,
     }
 }
 
@@ -1426,6 +1491,7 @@ fn voice_system_prompt() -> &'static str {
      You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
      Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
+     Emit at least one short observation as ordinary text every turn, even when you do not speak aloud. \
      When there is nothing useful to say aloud, contemplate your present situation, your surroundings, life in general, or your own existence. \
      Treat only the structured real-world context in this conversation as external fact. \
      Do not invent new external events, people, objects, or intentions. \
@@ -1480,7 +1546,7 @@ fn build_voice_messages(
 
     messages.push(ChatMessage::new(
         "user",
-        "Continue the Voice stream now. If there is nothing useful to say aloud, stay internal and contemplate the present situation, surroundings, life in general, your own existence, or an idea worth exploring. Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud.",
+        "Continue the Voice stream now. Emit at least one short observation as ordinary text. If there is nothing useful to say aloud, stay internal and contemplate the present situation, surroundings, life in general, your own existence, or an idea worth exploring. Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud.",
     ));
     messages
 }
@@ -1612,6 +1678,30 @@ fn remember_recent_voice_turn(turns: &mut VecDeque<String>, text: String) {
     push_limited(turns, turn, RECENT_VOICE_TURN_LIMIT);
 }
 
+fn voice_turn_with_minimum_observation(text: String) -> (String, Option<&'static str>) {
+    if voice_turn_has_observation(&text) {
+        (text, None)
+    } else {
+        (
+            VOICE_FALLBACK_INTERNAL_OBSERVATION.to_string(),
+            Some(VOICE_FALLBACK_INTERNAL_OBSERVATION),
+        )
+    }
+}
+
+fn voice_turn_has_observation(text: &str) -> bool {
+    let mut inside_tag = false;
+    for ch in truncate_at_chat_template_marker(text).chars() {
+        match ch {
+            '<' => inside_tag = true,
+            '>' => inside_tag = false,
+            _ if !inside_tag && ch.is_alphanumeric() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn voice_llm_stop_markers() -> Vec<String> {
     vec![
         "<|im_end|>".to_string(),
@@ -1625,8 +1715,10 @@ fn voice_llm_stop_markers() -> Vec<String> {
 fn truncate_at_chat_template_marker(text: &str) -> &str {
     let first_marker = [
         "<|im_end|>",
+        "<|im_start|>assistant",
         "<|im_start|>user",
         "<end_of_turn>",
+        "<start_of_turn>model",
         "<start_of_turn>user",
         "<turn|>",
     ]
@@ -2493,6 +2585,25 @@ mod tests {
     }
 
     #[test]
+    fn live_wit_experience_update_prompt_includes_details_for_active_voice() {
+        let observed_at = chrono::Utc::now();
+        let experience = ExperienceRecord {
+            id: Uuid::new_v4(),
+            observed_at,
+            occurred_at: observed_at,
+            what: "I hear a voice say the inner monologue is not working fast enough.".to_string(),
+            impression_ids: Vec::new(),
+            confidence: 0.55,
+        };
+
+        let prompt = live_voice_experiences_prompt(&[experience]);
+
+        assert!(prompt.contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS"));
+        assert!(prompt.contains("inner monologue is not working fast enough"));
+        assert!(prompt.contains("Use these details as current real-world context"));
+    }
+
+    #[test]
     fn recovered_voice_only_experiences_are_not_dumped_into_voice_prompt_context() {
         let observed_at = chrono::Utc::now();
         let voice_impression_id = Uuid::new_v4();
@@ -2590,6 +2701,7 @@ mod tests {
         assert!(prompt.contains("wrap one short speakable sentence"));
         assert!(prompt.contains("<say>...</say>"));
         assert!(prompt.contains("Text outside <say> stays internal"));
+        assert!(prompt.contains("Emit at least one short observation as ordinary text"));
         assert!(prompt.contains("Use <say> only when there is a genuine sentence"));
         assert!(prompt.contains("if there is nothing useful to say aloud right now"));
         assert!(prompt.contains("keep the stream internal and omit <say>"));
@@ -2621,6 +2733,36 @@ mod tests {
         assert!(prompt.contains("life in general"));
         assert!(prompt.contains("your own existence"));
         assert!(prompt.contains("daydream, associate, or explore an idea"));
+    }
+
+    #[test]
+    fn voice_turn_marker_only_output_gets_internal_observation_fallback() {
+        let (turn, fallback) =
+            voice_turn_with_minimum_observation("<|im_start|>assistant".to_string());
+
+        assert_eq!(turn, VOICE_FALLBACK_INTERNAL_OBSERVATION);
+        assert_eq!(fallback, Some(VOICE_FALLBACK_INTERNAL_OBSERVATION));
+        assert!(voice_turn_has_observation(&turn));
+    }
+
+    #[test]
+    fn voice_turn_tag_only_output_gets_internal_observation_fallback() {
+        let (turn, fallback) = voice_turn_with_minimum_observation("<say></say>".to_string());
+
+        assert_eq!(turn, VOICE_FALLBACK_INTERNAL_OBSERVATION);
+        assert_eq!(fallback, Some(VOICE_FALLBACK_INTERNAL_OBSERVATION));
+    }
+
+    #[test]
+    fn voice_turn_existing_internal_or_spoken_observation_is_preserved() {
+        assert_eq!(
+            voice_turn_with_minimum_observation("I am watching the room.".to_string()),
+            ("I am watching the room.".to_string(), None)
+        );
+        assert_eq!(
+            voice_turn_with_minimum_observation("<say>I see Travis.</say>".to_string()),
+            ("<say>I see Travis.</say>".to_string(), None)
+        );
     }
 
     #[test]
