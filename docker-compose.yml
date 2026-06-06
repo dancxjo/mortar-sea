@@ -1,4 +1,70 @@
 services:
+  face-https-proxy:
+    image: nginx:1.27-alpine
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        apk add --no-cache openssl
+
+        cat >/tmp/face-openssl.cnf <<EOF
+        [req]
+        distinguished_name = req_distinguished_name
+        x509_extensions = v3_req
+        prompt = no
+
+        [req_distinguished_name]
+        CN = mortar-sea-face
+
+        [v3_req]
+        subjectAltName = @alt_names
+
+        [alt_names]
+        DNS.1 = localhost
+        IP.1 = 127.0.0.1
+        IP.2 = ::1
+        EOF
+
+        mkdir -p /etc/nginx/certs
+        openssl req \
+          -x509 \
+          -nodes \
+          -newkey rsa:2048 \
+          -days 3650 \
+          -keyout /etc/nginx/certs/face.key \
+          -out /etc/nginx/certs/face.crt \
+          -config /tmp/face-openssl.cnf
+
+        cat >/etc/nginx/conf.d/default.conf <<EOF
+        server {
+          listen 0.0.0.0:443 ssl;
+          server_name _;
+
+          ssl_certificate /etc/nginx/certs/face.crt;
+          ssl_certificate_key /etc/nginx/certs/face.key;
+
+          location /ws/ {
+            proxy_pass http://127.0.0.1:3030;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade websocket;
+            proxy_set_header Connection upgrade;
+            proxy_set_header Host 127.0.0.1:3030;
+            proxy_set_header X-Forwarded-Proto https;
+          }
+
+          location / {
+            proxy_pass http://127.0.0.1:3030;
+            proxy_http_version 1.1;
+            proxy_set_header Host 127.0.0.1:3030;
+            proxy_set_header X-Forwarded-Proto https;
+          }
+        }
+        EOF
+
+        exec nginx -g 'daemon off;'
+
   qdrant:
     image: qdrant/qdrant:latest
     ports:
