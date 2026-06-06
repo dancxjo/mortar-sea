@@ -38,7 +38,7 @@ pub fn realize_phonemes(
     options: &RealizationOptions,
 ) -> Vec<PhoneToken> {
     let mut phones = Vec::new();
-    for (index, token) in phonemes.iter().enumerate() {
+    for index in 0..phonemes.len() {
         phones.push(realize_phoneme_at(variant, phonemes, index, options));
         phones.extend(epenthetic_phones_after(variant, phonemes, index));
     }
