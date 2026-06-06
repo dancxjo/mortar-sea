@@ -105,6 +105,7 @@ impl LlmStreamControl {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn append_prompt(&self, text: impl Into<String>) {
         let text = text.into();
         if text.trim().is_empty() {

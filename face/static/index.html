@@ -39,6 +39,20 @@
               <p class="voice-playback-detail" x-show="voicePlaybackDetail" x-text="voicePlaybackDetail"></p>
               <p class="voice-playback-error" x-show="voiceLastError" x-text="voiceLastError"></p>
               <p class="voice-playback-events" x-text="voicePlaybackEventSummary()"></p>
+              <div class="voice-audio-clips" x-show="voiceAudioClips.length">
+                <template x-for="clip in voiceAudioClips" x-bind:key="clip.utteranceId">
+                  <a
+                    class="voice-audio-clip"
+                    x-bind:href="clip.audioUrl"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <span x-text="formatTimestamp(clip.observedAt)"></span>
+                    <strong x-text="`${formatDuration(clip.durationMs || 0)} WAV`"></strong>
+                    <em x-text="clip.text"></em>
+                  </a>
+                </template>
+              </div>
               <pre class="voice-stream" x-ref="voiceStream" x-text="voiceResponse || 'Waiting for inner monologue…'"></pre>
               <details>
                 <summary>What's happening here?</summary>

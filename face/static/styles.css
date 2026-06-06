@@ -415,6 +415,47 @@ input[type="range"] {
   font-weight: 700;
 }
 
+.voice-audio-clips {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.voice-audio-clip {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 32px;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid rgba(16, 32, 24, 0.12);
+  border-radius: 6px;
+  background: rgba(110, 208, 166, 0.14);
+  color: #102018;
+  text-decoration: none;
+  font-size: 0.76rem;
+}
+
+.voice-audio-clip span {
+  color: #64786d;
+  font-weight: 750;
+}
+
+.voice-audio-clip strong {
+  font-weight: 850;
+}
+
+.voice-audio-clip em {
+  overflow: hidden;
+  color: #315143;
+  font-style: normal;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .llm-monitor header p {
   margin: 0 0 0.18rem;
   color: var(--muted);

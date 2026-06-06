@@ -1,13 +1,15 @@
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{LazyLock, Mutex, mpsc as std_mpsc};
 use std::time::{Duration as StdDuration, Instant};
 
+use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
 use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
-use mortar_sea::voice_stream::{
-    BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser, parse_voice_stream,
-};
+#[cfg(test)]
+use mortar_sea::voice_stream::parse_voice_stream;
+use mortar_sea::voice_stream::{BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser};
 use psyche::{ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -34,6 +36,7 @@ const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
 const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
+const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
 
@@ -254,6 +257,8 @@ struct PendingVoiceSpeech {
     observation: VoiceObservation,
     generation_id: Uuid,
     drafted_at: Instant,
+    playback_started_at: Option<Instant>,
+    audio_timeout_reported: bool,
     feedback_timeout_reported: bool,
 }
 
@@ -304,8 +309,33 @@ async fn run_voice(state: AppState) {
         tokio::select! {
             _ = mouth_feedback_watchdog.tick() => {
                 if let Some(pending) = pending_speech.as_mut() {
-                    if !pending.feedback_timeout_reported
-                        && pending.drafted_at.elapsed() >= VOICE_MOUTH_FEEDBACK_TIMEOUT
+                    if pending.playback_started_at.is_none()
+                        && !pending.audio_timeout_reported
+                        && pending.drafted_at.elapsed() >= VOICE_SPEECH_AUDIO_TIMEOUT
+                    {
+                        pending.audio_timeout_reported = true;
+                        warn!(
+                            utterance_id = %pending.observation.id,
+                            generation_id = %pending.generation_id,
+                            timeout_ms = VOICE_SPEECH_AUDIO_TIMEOUT.as_millis(),
+                            "Mouth audio synthesis timeout; interrupting stale pending speech"
+                        );
+                        accept_mouth_event(
+                            &state,
+                            VoiceMouthEvent::VoiceSpeechInterrupted {
+                                utterance_id: pending.observation.id,
+                                generation_id: pending.generation_id,
+                                observed_at: chrono::Utc::now(),
+                                text: pending.observation.text.clone(),
+                                reason: format!(
+                                    "Mouth audio synthesis timeout after {} ms",
+                                    VOICE_SPEECH_AUDIO_TIMEOUT.as_millis()
+                                ),
+                            },
+                        );
+                    } else if let Some(playback_started_at) = pending.playback_started_at
+                        && !pending.feedback_timeout_reported
+                        && playback_started_at.elapsed() >= VOICE_MOUTH_FEEDBACK_TIMEOUT
                     {
                         pending.feedback_timeout_reported = true;
                         warn!(
@@ -340,11 +370,10 @@ async fn run_voice(state: AppState) {
                             &mut recent_experiences,
                             &mut last_experience_signature,
                         );
-                        let recovered_asr =
+                        let _recovered_asr =
                             sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
                         if let Some(current) = active.as_mut() {
-                            append_voice_experience_updates(&state, current, &recovered);
-                            append_voice_finalized_asr_updates(current, &recovered_asr);
+                            remember_voice_experience_ids(current, &recovered);
                         }
                         continue;
                     }
@@ -441,7 +470,6 @@ async fn run_voice(state: AppState) {
                                 text: text.clone(),
                             },
                         );
-                        current.chars_since_last_say = current
                         collect_voice_stream_events(
                             current.generation_id,
                             current.voice_stream.push_chunk(&text),
@@ -626,36 +654,11 @@ fn remember_recent_experience(
     true
 }
 
-fn append_voice_experience_updates(
-    state: &AppState,
+fn remember_voice_experience_ids(
     current: &mut ActiveVoiceGeneration,
     experiences: &[ExperienceRecord],
 ) {
-    if experiences.is_empty() {
-        return;
-    }
-
-    let sensations = state
-        .sensations
-        .read()
-        .expect("sensation log lock")
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let impressions = state
-        .vision_impressions
-        .read()
-        .expect("vision impression log lock")
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-
     for experience in experiences {
-        current.control.append_prompt(format_voice_sensory_input(
-            experience,
-            &sensations,
-            &impressions,
-        ));
         if !current.experience_ids.contains(&experience.id) {
             current.experience_ids.push(experience.id);
         }
@@ -749,17 +752,6 @@ fn finalized_asr_update_from_clip(clip: AudioSentenceClipRecord) -> Option<Final
     })
 }
 
-fn append_voice_finalized_asr_updates(
-    current: &mut ActiveVoiceGeneration,
-    updates: &[FinalizedAsrUpdate],
-) {
-    for update in updates {
-        current
-            .control
-            .append_prompt(format_voice_finalized_asr_update(update));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_voice_mouth_event(
     state: &AppState,
@@ -770,8 +762,8 @@ async fn handle_voice_mouth_event(
     recent_experiences: &mut VecDeque<ExperienceRecord>,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &mut VecDeque<VoiceObservation>,
+    recent_voice_turns: &VecDeque<String>,
     recent_speech_feedback: &mut VecDeque<VoiceSpeechFeedback>,
-    generated_tail: &str,
     last_experience_signature: &mut Option<String>,
 ) {
     match event {
@@ -783,6 +775,10 @@ async fn handle_voice_mouth_event(
         } => {
             if !pending_matches(pending_speech.as_ref(), utterance_id, generation_id) {
                 return;
+            }
+            if let Some(pending) = pending_speech.as_mut() {
+                pending.playback_started_at = Some(Instant::now());
+                pending.feedback_timeout_reported = false;
             }
             remember_speech_feedback(
                 recent_speech_feedback,
@@ -807,7 +803,6 @@ async fn handle_voice_mouth_event(
                 None,
                 None,
             );
-            append_speech_feedback_to_active(active.as_mut(), recent_speech_feedback);
             crate::realtime_experience::spawn_trace(state.clone());
         }
         VoiceMouthEvent::VoiceSpeechFinished {
@@ -857,8 +852,8 @@ async fn handle_voice_mouth_event(
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
+                recent_voice_turns,
                 recent_speech_feedback,
-                generated_tail,
                 last_experience_signature,
             )
             .await;
@@ -910,8 +905,8 @@ async fn handle_voice_mouth_event(
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
+                recent_voice_turns,
                 recent_speech_feedback,
-                generated_tail,
                 last_experience_signature,
             )
             .await;
@@ -966,23 +961,6 @@ fn draft_next_voice_speech(
     None
 }
 
-fn maybe_nudge_voice_to_emit_say(current: &mut ActiveVoiceGeneration) {
-    if current.chars_since_last_say < VOICE_SAY_NUDGE_MIN_CHARS {
-        return;
-    }
-
-    if let Some(last_nudge_at) = current.last_say_nudge_at {
-        if last_nudge_at.elapsed() < VOICE_SAY_NUDGE_MIN_INTERVAL {
-            return;
-        }
-    }
-
-    current.control.append_prompt(
-        "Mouth is waiting at the speech gate. Emit one short spoken sentence now as <say>...</say>.",
-    );
-    current.last_say_nudge_at = Some(Instant::now());
-}
-
 fn draft_voice_speech(
     state: &AppState,
     generation_id: Uuid,
@@ -1029,6 +1007,8 @@ fn draft_voice_speech(
         observation,
         generation_id,
         drafted_at: Instant::now(),
+        playback_started_at: None,
+        audio_timeout_reported: false,
         feedback_timeout_reported: false,
     })
 }
@@ -1059,12 +1039,24 @@ fn synthesize_voice_speech_audio(
         let wav = tokio::task::spawn_blocking(move || {
             let result = (|| -> anyhow::Result<_> {
                 let output_path = mouth_audio_dir().join(mouth_audio_filename(utterance_id));
-                let artifact = PiperSynthesisWorker::shared()?.synthesize_text_to_wav(
-                    utterance_id,
-                    generation_id,
-                    text_for_task,
-                    output_path,
-                )?;
+                let artifact =
+                    match synthesize_text_with_piper_command_to_wav(&text_for_task, &output_path) {
+                        Ok(artifact) => artifact,
+                        Err(command_error) => {
+                            warn!(
+                                %utterance_id,
+                                %generation_id,
+                                error = %format!("{command_error:#}"),
+                                "Mouth Piper command synthesis failed; falling back to in-process worker"
+                            );
+                            PiperSynthesisWorker::shared()?.synthesize_text_to_wav(
+                                utterance_id,
+                                generation_id,
+                                text_for_task,
+                                output_path,
+                            )?
+                        }
+                    };
                 let byte_len = std::fs::metadata(&artifact.path)?.len();
                 Ok((byte_len, artifact))
             })();
@@ -1136,6 +1128,152 @@ fn synthesize_voice_speech_audio(
     });
 }
 
+fn synthesize_text_with_piper_command_to_wav(
+    text: &str,
+    output_path: &Path,
+) -> anyhow::Result<SpeechSynthesisArtifact> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let binary = mortar_sea_command_binary();
+    let output = Command::new(&binary)
+        .arg("speak")
+        .arg("--backend")
+        .arg("piper")
+        .arg("--output")
+        .arg(output_path)
+        .arg(text)
+        .output()
+        .with_context(|| format!("failed to run {}", binary.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "{} speak --backend piper exited with status {}\nstdout:\n{}\nstderr:\n{}",
+            binary.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    wav_artifact_from_path(output_path)
+}
+
+fn mortar_sea_command_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("MORTAR_FACE_PIPER_SYNTHESIS_BIN") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join(if cfg!(windows) {
+            "mortar-sea.exe"
+        } else {
+            "mortar-sea"
+        });
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+
+    PathBuf::from("mortar-sea")
+}
+
+fn wav_artifact_from_path(path: &Path) -> anyhow::Result<SpeechSynthesisArtifact> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        bail!("{} is not a RIFF/WAVE file", path.display());
+    }
+
+    let mut offset = 12usize;
+    let mut sample_rate_hz = None::<u32>;
+    let mut channels = None::<u16>;
+    let mut bits_per_sample = None::<u16>;
+    let mut data_bytes = None::<usize>;
+
+    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes(
+            bytes[offset + 4..offset + 8]
+                .try_into()
+                .expect("chunk size slice has four bytes"),
+        ) as usize;
+        offset += 8;
+        let Some(chunk_end) = offset.checked_add(chunk_size) else {
+            bail!("{} has an overflowing WAV chunk size", path.display());
+        };
+        if chunk_end > bytes.len() {
+            bail!("{} has a truncated WAV chunk", path.display());
+        }
+
+        match chunk_id {
+            b"fmt " if chunk_size >= 16 => {
+                let audio_format = u16::from_le_bytes(
+                    bytes[offset..offset + 2]
+                        .try_into()
+                        .expect("audio format slice has two bytes"),
+                );
+                if audio_format != 1 {
+                    bail!(
+                        "{} uses unsupported WAV audio format {}",
+                        path.display(),
+                        audio_format
+                    );
+                }
+                channels = Some(u16::from_le_bytes(
+                    bytes[offset + 2..offset + 4]
+                        .try_into()
+                        .expect("channel slice has two bytes"),
+                ));
+                sample_rate_hz = Some(u32::from_le_bytes(
+                    bytes[offset + 4..offset + 8]
+                        .try_into()
+                        .expect("sample-rate slice has four bytes"),
+                ));
+                bits_per_sample = Some(u16::from_le_bytes(
+                    bytes[offset + 14..offset + 16]
+                        .try_into()
+                        .expect("bit-depth slice has two bytes"),
+                ));
+            }
+            b"data" => {
+                data_bytes = Some(chunk_size);
+            }
+            _ => {}
+        }
+
+        offset = chunk_end + (chunk_size % 2);
+    }
+
+    let sample_rate_hz = sample_rate_hz.context("WAV missing fmt sample rate")?;
+    let channels = channels.context("WAV missing channel count")?;
+    let bits_per_sample = bits_per_sample.context("WAV missing bit depth")?;
+    let data_bytes = data_bytes.context("WAV missing data chunk")?;
+    let bytes_per_sample = usize::from(bits_per_sample)
+        .checked_div(8)
+        .filter(|value| *value > 0)
+        .context("invalid WAV bit depth")?;
+    let frame_bytes = bytes_per_sample
+        .checked_mul(usize::from(channels))
+        .context("WAV frame byte size overflow")?;
+    if frame_bytes == 0 {
+        bail!("invalid WAV channel count");
+    }
+    let samples = data_bytes / frame_bytes;
+
+    Ok(SpeechSynthesisArtifact {
+        path: path.to_path_buf(),
+        sample_rate_hz,
+        samples,
+    })
+}
+
 fn speech_boundary_hint(boundary: &SpeechBoundary) -> Option<String> {
     match boundary {
         SpeechBoundary::Continuing | SpeechBoundary::Final | SpeechBoundary::Interrupted => {
@@ -1174,20 +1312,6 @@ fn remember_speech_feedback(
     );
 }
 
-fn append_speech_feedback_to_active(
-    active: Option<&mut ActiveVoiceGeneration>,
-    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
-) {
-    let Some(current) = active else {
-        return;
-    };
-    if let Some(feedback) = recent_speech_feedback.back() {
-        current
-            .control
-            .append_prompt(format_voice_speech_feedback(feedback));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn resume_or_restart_voice_generation(
     state: &AppState,
@@ -1197,19 +1321,14 @@ async fn resume_or_restart_voice_generation(
     recent_experiences: &mut VecDeque<ExperienceRecord>,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
+    recent_voice_turns: &VecDeque<String>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
-    generated_tail: &str,
     last_experience_signature: &mut Option<String>,
 ) {
     sync_recent_experiences_from_state(state, recent_experiences, last_experience_signature);
     sync_recent_finalized_asr_from_state(state, recent_finalized_asr);
 
     if let Some(current) = active.as_mut() {
-        if let Some(feedback) = recent_speech_feedback.back() {
-            current
-                .control
-                .append_prompt(format_voice_speech_feedback(feedback));
-        }
         if pending_speech.is_none() {
             if let Some(draft) = draft_next_voice_speech(state, current) {
                 current.control.pause();
@@ -1228,8 +1347,8 @@ async fn resume_or_restart_voice_generation(
         recent_experiences,
         recent_finalized_asr,
         recent_thoughts,
+        recent_voice_turns,
         recent_speech_feedback,
-        generated_tail,
     ));
 }
 
@@ -1239,8 +1358,8 @@ fn start_voice_generation(
     recent_experiences: &VecDeque<ExperienceRecord>,
     recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
+    recent_voice_turns: &VecDeque<String>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
-    generated_tail: &str,
 ) -> ActiveVoiceGeneration {
     let generation_id = Uuid::new_v4();
     let experience_ids = recent_experiences
@@ -1249,16 +1368,16 @@ fn start_voice_generation(
         .collect::<Vec<_>>();
     let control = LlmStreamControl::new();
     let request = GenerationRequest {
-        prompt: build_voice_prompt(
+        prompt: String::new(),
+        messages: build_voice_messages(
             recent_experiences,
             recent_finalized_asr,
             recent_thoughts,
+            recent_voice_turns,
             recent_speech_feedback,
-            generated_tail,
         ),
-        messages: Vec::new(),
         images: Vec::new(),
-        max_tokens: None,
+        max_tokens: Some(VOICE_MAX_TOKENS_PER_TURN),
         stop: Vec::new(),
     };
 
@@ -1292,8 +1411,6 @@ fn start_voice_generation(
         voice_stream: VoiceStreamParser::default(),
         pending_breath_groups: VecDeque::new(),
         experience_ids,
-        chars_since_last_say: 0,
-        last_say_nudge_at: None,
     }
 }
 
@@ -1309,11 +1426,10 @@ fn voice_system_prompt() -> &'static str {
      You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
      Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
-     Real-world experience updates will be appended while you are thinking. Let each new observation bend the stream naturally. \
-     Treat only those appended real-world experience updates as external facts. \
+     Treat only the structured real-world context in this conversation as external fact. \
      Do not invent new external events, people, objects, or intentions. \
      You may daydream or associate, but keep imagined material distinct from what is actually known. \
-     Constantly review what is happening against the latest real-world updates. \
+     Constantly review what is happening against the latest real-world context. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM."
 }
 
@@ -1324,29 +1440,58 @@ fn voice_mouth_guidance_prompt() -> &'static str {
     Emit a <say> sentence quickly; do not wait many internal sentences before the next <say>. \
      To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
      If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
-     The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and then report that Mouth feedback back here before the Voice continues. \
-     Do not write Mouth feedback, tool calls, or stage directions; the runtime supplies Mouth feedback as structured context. \
+     The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and include Mouth feedback in later structured context. \
+     Do not write Mouth feedback, tool calls, or stage directions; the runtime supplies Mouth feedback separately. \
      Use <say> only for the exact words to be spoken aloud.\n"
 }
 
-fn voice_reality_review_prompt() -> &'static str {
-    "\n\nVOICE ORIENTATION:\nReview what is actually known now. \
-     The only external news flashes from the real world are the appended REAL-WORLD EXPERIENCE UPDATE blocks. \
-     Do not fabricate new real-world facts. If a thought is daydreaming, imagining, or guessing, keep it as a possibility rather than an observation.\n\n"
+fn build_voice_messages(
+    recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    recent_voice_turns: &VecDeque<String>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+) -> Vec<ChatMessage> {
+    let mut system = String::new();
+    system.push_str(voice_system_prompt());
+    system.push_str(voice_mouth_guidance_prompt());
+
+    let mut messages = vec![
+        ChatMessage::new("system", system),
+        ChatMessage::new(
+            "user",
+            build_voice_context_prompt(
+                recent_experiences,
+                recent_finalized_asr,
+                recent_thoughts,
+                recent_speech_feedback,
+            ),
+        ),
+    ];
+
+    for turn in recent_voice_turns {
+        let mut turn = turn.trim().to_string();
+        trim_to_last_chars(&mut turn, VOICE_TURN_MAX_CHARS);
+        if !turn.is_empty() {
+            messages.push(ChatMessage::new("assistant", turn));
+        }
+    }
+
+    messages.push(ChatMessage::new(
+        "user",
+        "Continue the Voice stream now. Start with a short internal thought if useful, but emit one short spoken sentence as <say>...</say> early in this turn.",
+    ));
+    messages
 }
 
-fn build_voice_prompt(
+fn build_voice_context_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
     recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
-    generated_tail: &str,
 ) -> String {
     let context_frame = context_frame_for_voice(recent_experiences);
     let mut prompt = String::new();
-    prompt.push_str(voice_system_prompt());
-    prompt.push_str(voice_mouth_guidance_prompt());
-    prompt.push_str("\n\n");
     prompt.push_str("Current time metadata:\n");
     prompt.push_str(&format!(
         "- observed_at_utc: {}\n\n",
@@ -1420,13 +1565,7 @@ fn build_voice_prompt(
             prompt.push_str(&format_voice_speech_feedback(feedback));
         }
     }
-    let generated_tail = voice_tail_prompt_fragment(generated_tail);
-    if !generated_tail.trim().is_empty() {
-        prompt.push_str("\nRecent raw Voice tail before context restart:\n");
-        prompt.push_str(generated_tail.trim());
-        prompt.push('\n');
-    }
-    prompt.push_str("\nContinue the Voice stream now:\n");
+    prompt.push_str("\nContinue from this structured context.\n");
     prompt
 }
 
@@ -1442,49 +1581,6 @@ fn context_frame_for_voice(recent_experiences: &VecDeque<ExperienceRecord>) -> C
         }));
     }
     ContextFrame::from_timeline(&frame, frame.entries(), DEFAULT_CONTEXT_FRAME_ITEMS)
-}
-
-fn format_voice_sensory_input(
-    experience: &ExperienceRecord,
-    sensations: &[SensationRecord],
-    impressions: &[VisionImpressionRecord],
-) -> String {
-    let timeline = format_voice_experience_timeline(experience, sensations, impressions);
-    let mut prompt = format!(
-        "\n\nREAL-WORLD EXPERIENCE UPDATE:\nThis is news from the real world.\nobserved_at={}\nconfidence={:.2}\nSituation summary:\n{}\n",
-        experience.observed_at.to_rfc3339(),
-        experience.confidence,
-        experience.what.trim()
-    );
-
-    if !timeline.is_empty() {
-        prompt.push_str("Evidence timeline:\n");
-        prompt.push_str(&timeline);
-    }
-
-    prompt.push('\n');
-    prompt
-}
-
-fn format_voice_finalized_asr_update(update: &FinalizedAsrUpdate) -> String {
-    let mut prompt = format!(
-        "\n\nHEARD SPEECH CONTEXT, do not copy this line into Voice output: observed_at={} sequence_start={} sequence_end={}",
-        update.observed_at.to_rfc3339(),
-        update.sequence_start,
-        update.sequence_end,
-    );
-    if let Some(sentence_index) = update.sentence_index {
-        prompt.push_str(&format!(" sentence_index={sentence_index}"));
-    }
-    if let Some(sentence_count) = update.sentence_count {
-        prompt.push_str(&format!(" sentence_count={sentence_count}"));
-    }
-    prompt.push_str(" heard_text=");
-    prompt.push_str(&prompt_json_string(update.text.trim()));
-    prompt.push_str(
-        ". Treat it as external speech to respond to or reflect on, without quoting metadata.\n",
-    );
-    prompt
 }
 
 fn format_voice_speech_feedback(feedback: &VoiceSpeechFeedback) -> String {
@@ -1506,78 +1602,13 @@ fn format_voice_speech_feedback(feedback: &VoiceSpeechFeedback) -> String {
     prompt
 }
 
-fn format_voice_experience_timeline(
-    experience: &ExperienceRecord,
-    sensations: &[SensationRecord],
-    impressions: &[VisionImpressionRecord],
-) -> String {
-    if experience.impression_ids.is_empty() {
-        return String::new();
+fn remember_recent_voice_turn(turns: &mut VecDeque<String>, text: String) {
+    let mut turn = text.trim().to_string();
+    if turn.is_empty() {
+        return;
     }
-
-    let selected_ids = experience
-        .impression_ids
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let mut selected = impressions
-        .iter()
-        .filter(|impression| selected_ids.contains(&impression.id))
-        .collect::<Vec<_>>();
-    selected.sort_by_key(|impression| impression.occurred_at);
-
-    let mut timeline = String::new();
-    for impression in selected {
-        if let Some(sensation) = sensations
-            .iter()
-            .find(|sensation| sensation.id == impression.sensation_id)
-        {
-            timeline.push_str(&format!(
-                "- {} sensation kind={} source={}:{}:{} sequence={}\n",
-                sensation.occurred_at.to_rfc3339(),
-                sensation.kind,
-                sensation.source.client_id,
-                sensation.source.sensor_id,
-                sensation.source.faculty,
-                sensation.sequence
-            ));
-        }
-        timeline.push_str(&format!(
-            "- {} impression kind={} faculty={} confidence={:.2} text={}\n",
-            impression.occurred_at.to_rfc3339(),
-            impression.kind,
-            impression.faculty,
-            impression.confidence,
-            prompt_json_string(&impression.text)
-        ));
-    }
-
-    timeline
-}
-
-fn remember_generated_tail(tail: &mut String, text: &str) {
-    tail.push_str(text);
-    trim_to_last_chars(tail, VOICE_GENERATED_TAIL_MAX_CHARS);
-}
-
-fn voice_tail_prompt_fragment(tail: &str) -> String {
-    parse_voice_stream(tail)
-        .into_iter()
-        .filter_map(|event| match event {
-            VoiceStreamEvent::InternalText(text) => Some(text.text),
-            _ => None,
-        })
-        .flat_map(|text| {
-            text.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .filter(|line| !line.starts_with("Mouth feedback:"))
-                .filter(|line| !line.starts_with("Recent Mouth feedback"))
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    trim_to_last_chars(&mut turn, VOICE_TURN_MAX_CHARS);
+    push_limited(turns, turn, RECENT_VOICE_TURN_LIMIT);
 }
 
 fn trim_to_last_chars(text: &mut String, max_chars: usize) {
@@ -2177,6 +2208,26 @@ fn is_common_abbreviation(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn rendered_voice_messages(
+        recent_experiences: &VecDeque<ExperienceRecord>,
+        recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
+        recent_thoughts: &VecDeque<VoiceObservation>,
+        recent_voice_turns: &VecDeque<String>,
+        recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+    ) -> String {
+        build_voice_messages(
+            recent_experiences,
+            recent_finalized_asr,
+            recent_thoughts,
+            recent_voice_turns,
+            recent_speech_feedback,
+        )
+        .into_iter()
+        .map(|message| format!("{}: {}", message.role, message.content))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+    }
+
     #[test]
     fn sentence_segmenter_delays_last_sentence_until_more_text_or_finish() {
         let mut segmenter = VoiceSentenceSegmenter::new();
@@ -2238,12 +2289,12 @@ mod tests {
             confidence: VOICE_OBSERVATION_CONFIDENCE,
         });
 
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &thoughts,
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(prompt.contains("I am watching the room."));
@@ -2263,12 +2314,12 @@ mod tests {
             reason: None,
         });
 
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
+            &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &feedback,
-            "",
         );
 
         assert!(prompt.contains("Recent Mouth feedback for the continuous Voice stream:"));
@@ -2278,19 +2329,23 @@ mod tests {
     }
 
     #[test]
-    fn voice_prompt_sanitizes_raw_tail_before_restart() {
-        let prompt = build_voice_prompt(
-            &VecDeque::new(),
-            &VecDeque::new(),
-            &VecDeque::new(),
-            &VecDeque::new(),
-            "I am thinking. <say>I should be spoken.</say>\nMouth feedback: <say>fake</say>",
+    fn voice_messages_include_recent_assistant_turns() {
+        let mut turns = VecDeque::new();
+        remember_recent_voice_turn(
+            &mut turns,
+            "I am thinking. <say>I should be spoken now.</say>".to_string(),
         );
 
-        assert!(prompt.contains("Recent raw Voice tail before context restart:"));
+        let prompt = rendered_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &turns,
+            &VecDeque::new(),
+        );
+
         assert!(prompt.contains("I am thinking."));
-        assert!(!prompt.contains("I should be spoken."));
-        assert!(!prompt.contains("Mouth feedback:"));
+        assert!(prompt.contains("<say>I should be spoken now.</say>"));
     }
 
     #[test]
@@ -2306,37 +2361,17 @@ mod tests {
             sentence_count: Some(1),
         });
 
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &asr,
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(prompt.contains("Recent finalized ASR transcripts heard directly:"));
         assert!(prompt.contains("hello from the microphone"));
         assert!(prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
-    }
-
-    #[test]
-    fn finalized_asr_update_formats_as_real_world_prompt_append() {
-        let update = FinalizedAsrUpdate {
-            observed_at: chrono::Utc::now(),
-            text: "please look at this".to_string(),
-            sequence_start: 4,
-            sequence_end: 5,
-            sentence_index: Some(1),
-            sentence_count: Some(2),
-        };
-
-        let prompt = format_voice_finalized_asr_update(&update);
-
-        assert!(prompt.contains("HEARD SPEECH CONTEXT"));
-        assert!(prompt.contains("do not copy this line into Voice output"));
-        assert!(prompt.contains("sequence_start=4"));
-        assert!(prompt.contains("sentence_index=1"));
-        assert!(prompt.contains("heard_text=\"please look at this\""));
     }
 
     #[test]
@@ -2395,12 +2430,12 @@ mod tests {
             vec![first, second],
             &mut last_signature,
         );
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &recent,
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert_eq!(recovered.len(), 2);
@@ -2431,12 +2466,12 @@ mod tests {
             vec![experience],
             &mut last_signature,
         );
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &recent,
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(recovered.is_empty());
@@ -2446,12 +2481,12 @@ mod tests {
 
     #[test]
     fn voice_prompt_explains_emoji_becomes_real_world_face() {
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(
@@ -2463,12 +2498,12 @@ mod tests {
 
     #[test]
     fn voice_prompt_says_voice_cannot_execute_functions() {
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(prompt.contains("execute functions"));
@@ -2478,12 +2513,12 @@ mod tests {
 
     #[test]
     fn voice_prompt_treats_visible_people_as_likely_addressees() {
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(prompt.contains("Do not address an unseen or hypothetical human"));
@@ -2495,12 +2530,12 @@ mod tests {
 
     #[test]
     fn voice_prompt_says_say_tags_are_for_spoken_output() {
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
         assert!(prompt.contains("you must wrap"));
@@ -2513,100 +2548,17 @@ mod tests {
 
     #[test]
     fn voice_prompt_reinforces_reality_boundaries() {
-        let prompt = build_voice_prompt(
+        let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
-            "",
+            &VecDeque::new(),
         );
 
-        assert!(
-            prompt.contains(
-                "Treat only those appended real-world experience updates as external facts"
-            )
-        );
+        assert!(prompt.contains("Treat only the structured real-world context"));
         assert!(prompt.contains("Do not invent new external events"));
         assert!(prompt.contains("daydream"));
-    }
-
-    #[test]
-    fn sensory_input_is_marked_as_real_world_update() {
-        let experience = ExperienceRecord {
-            id: Uuid::new_v4(),
-            observed_at: chrono::Utc::now(),
-            occurred_at: chrono::Utc::now(),
-            what: "A person is standing near the desk.".to_string(),
-            impression_ids: Vec::new(),
-            confidence: 0.71,
-        };
-
-        let prompt = format_voice_sensory_input(&experience, &[], &[]);
-
-        assert!(prompt.contains("REAL-WORLD EXPERIENCE UPDATE"));
-        assert!(prompt.contains("This is news from the real world."));
-        assert!(prompt.contains("A person is standing near the desk."));
-    }
-
-    #[test]
-    fn sensory_input_includes_experience_evidence_timeline() {
-        let occurred_at = chrono::Utc::now();
-        let sensation_id = Uuid::new_v4();
-        let impression_id = Uuid::new_v4();
-        let source = SensationSource {
-            client_id: "browser".to_string(),
-            sensor_id: "camera".to_string(),
-            faculty: "vision".to_string(),
-        };
-        let sensation = SensationRecord {
-            id: sensation_id,
-            kind: "camera.frame".to_string(),
-            occurred_at,
-            observed_at: occurred_at,
-            source: source.clone(),
-            sequence: 7,
-            media: MediaRecord {
-                mime: "image/jpeg".to_string(),
-                width: 640,
-                height: 480,
-                encoding: "base64".to_string(),
-            },
-            provenance: psyche::Provenance::direct().with_faculty("Camera"),
-            data_sha256: "abc123".to_string(),
-            data_bytes: 3,
-            detail: json!({"camera": "front"}),
-        };
-        let impression = VisionImpressionRecord {
-            id: impression_id,
-            sensation_id,
-            occurred_at,
-            observed_at: occurred_at,
-            source,
-            sequence: 7,
-            text: "A person is standing near the desk.".to_string(),
-            kind: "vision".to_string(),
-            faculty: "Vision".to_string(),
-            confidence: 0.82,
-            payload: json!({}),
-        };
-        let experience = ExperienceRecord {
-            id: Uuid::new_v4(),
-            observed_at: occurred_at,
-            occurred_at,
-            what: "A person is standing near the desk.".to_string(),
-            impression_ids: vec![impression_id],
-            confidence: 0.71,
-        };
-
-        let prompt = format_voice_sensory_input(&experience, &[sensation], &[impression]);
-
-        assert!(prompt.contains("Situation summary:"));
-        assert!(prompt.contains("Evidence timeline:"));
-        assert!(
-            prompt.contains("sensation kind=camera.frame source=browser:camera:vision sequence=7")
-        );
-        assert!(prompt.contains("impression kind=vision faculty=Vision confidence=0.82"));
-        assert!(prompt.contains("\"A person is standing near the desk.\""));
     }
 
     #[test]
