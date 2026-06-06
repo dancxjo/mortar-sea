@@ -61,14 +61,13 @@ window.faceApp = function faceApp() {
     },
     voiceAudio: null,
     voiceAudioUrl: null,
-    voiceAudioContext: null,
-    voiceAudioSource: null,
     voiceCurrentDraft: null,
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
     browserSpeechFallbackEnabled: false,
     voiceAwaitingServerAudioTimer: null,
     voiceActiveSpeechUtterance: null,
+    voicePlaybackResumeAfterGesture: null,
     llmJobs: [],
     selectedLlmJobId: null,
     mime: 'image/jpeg',
@@ -138,6 +137,7 @@ window.faceApp = function faceApp() {
 
     stopVoiceMouth(reason) {
       this.clearVoiceAudioFallbackTimer();
+      this.clearVoicePlaybackGestureResume();
       this.cancelBrowserSpeechFallback();
       const interruptedDraft = this.voiceCurrentDraft;
       this.voiceCurrentDraft = null;
@@ -147,54 +147,40 @@ window.faceApp = function faceApp() {
       }
       if (this.voiceAudio) {
         this.voiceAudio.pause();
-        this.voiceAudio.src = '';
-        this.voiceAudio = null;
+        this.voiceAudio.removeAttribute('src');
+        this.voiceAudio.load();
       }
       if (this.voiceAudioUrl) {
         URL.revokeObjectURL(this.voiceAudioUrl);
         this.voiceAudioUrl = null;
       }
-      if (this.voiceAudioSource) {
-        try {
-          this.voiceAudioSource.stop();
-        } catch (_) {
-          // The source may already have ended.
-        }
-        this.voiceAudioSource.disconnect();
-        this.voiceAudioSource = null;
-      }
       this.voiceMouthOpen = false;
     },
 
     async unlockVoicePlayback() {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextClass) {
-        this.voiceLastError = 'Web Audio unavailable';
+      if (typeof window.Audio !== 'function') {
+        this.voiceLastError = 'HTML audio playback unavailable';
         this.voicePlaybackDetail = this.voiceLastError;
         return;
       }
-      if (!this.voiceAudioContext) {
-        this.voiceAudioContext = new AudioContextClass();
+      if (!this.voiceAudio) {
+        this.voiceAudio = new Audio();
+        this.voiceAudio.preload = 'auto';
       }
-      if (this.voiceAudioContext.state !== 'running') {
-        await this.voiceAudioContext.resume();
-      }
-      this.voicePlaybackDetail = `Voice audio context ${this.voiceAudioContext.state} at ${Math.round(this.voiceAudioContext.sampleRate)} Hz`;
+      this.voicePlaybackDetail = 'HTML audio playback ready';
     },
 
     stopVoicePlaybackContext() {
-      if (this.voiceAudioSource) {
-        try {
-          this.voiceAudioSource.stop();
-        } catch (_) {
-          // The source may already have ended.
-        }
-        this.voiceAudioSource.disconnect();
-        this.voiceAudioSource = null;
+      this.clearVoicePlaybackGestureResume();
+      if (this.voiceAudio) {
+        this.voiceAudio.pause();
+        this.voiceAudio.removeAttribute('src');
+        this.voiceAudio.load();
+        this.voiceAudio = null;
       }
-      if (this.voiceAudioContext) {
-        this.voiceAudioContext.close();
-        this.voiceAudioContext = null;
+      if (this.voiceAudioUrl) {
+        URL.revokeObjectURL(this.voiceAudioUrl);
+        this.voiceAudioUrl = null;
       }
     },
 
@@ -374,6 +360,28 @@ window.faceApp = function faceApp() {
       }
     },
 
+    clearVoicePlaybackGestureResume() {
+      if (!this.voicePlaybackResumeAfterGesture) return;
+      document.removeEventListener('pointerdown', this.voicePlaybackResumeAfterGesture);
+      document.removeEventListener('keydown', this.voicePlaybackResumeAfterGesture);
+      document.removeEventListener('click', this.voicePlaybackResumeAfterGesture);
+      this.voicePlaybackResumeAfterGesture = null;
+    },
+
+    waitForVoicePlaybackGesture(resume) {
+      this.clearVoicePlaybackGestureResume();
+      this.voicePlaybackResumeAfterGesture = () => {
+        const resumeAfterGesture = this.voicePlaybackResumeAfterGesture;
+        this.clearVoicePlaybackGestureResume();
+        if (resumeAfterGesture) {
+          resume();
+        }
+      };
+      document.addEventListener('pointerdown', this.voicePlaybackResumeAfterGesture, { once: true });
+      document.addEventListener('keydown', this.voicePlaybackResumeAfterGesture, { once: true });
+      document.addEventListener('click', this.voicePlaybackResumeAfterGesture, { once: true });
+    },
+
     cancelBrowserSpeechFallback() {
       if (window.speechSynthesis) {
         window.speechSynthesis.cancel();
@@ -397,7 +405,7 @@ window.faceApp = function faceApp() {
       }
       this.voiceAwaitingServerAudioTimer = window.setTimeout(() => {
         if (!this.voiceCurrentDraft || !this.voiceDraftMatches(this.voiceCurrentDraft, draft)) return;
-        if (this.voiceAudioSource) return;
+        if (this.voiceAudio && !this.voiceAudio.paused) return;
 
         const utterance = new window.SpeechSynthesisUtterance(draft.text);
         this.voiceActiveSpeechUtterance = utterance;
@@ -457,13 +465,13 @@ window.faceApp = function faceApp() {
       try {
         await this.unlockVoicePlayback();
       } catch (error) {
-        const reason = error.message || 'Voice audio context could not be unlocked';
+        const reason = error.message || 'Voice playback could not be unlocked';
         this.failVoicePlaybackOrFallback(draft, reason);
         return;
       }
 
-      if (!this.voiceAudioContext || this.voiceAudioContext.state !== 'running') {
-        const reason = `Voice audio context is ${this.voiceAudioContext?.state || 'unavailable'}`;
+      if (!this.voiceAudio) {
+        const reason = 'HTML audio playback unavailable';
         this.failVoicePlaybackOrFallback(draft, reason);
         return;
       }
@@ -480,34 +488,21 @@ window.faceApp = function faceApp() {
         bytes: audioBytes.byteLength,
       });
 
-      let audioBuffer;
-      try {
-        audioBuffer = await this.voiceAudioContext.decodeAudioData(audioBytes.slice(0));
-      } catch (error) {
-        const reason = error.message || 'Server WAV decode failed in browser';
-        this.failVoicePlaybackOrFallback(draft, reason);
-        return;
-      }
-
       if (this.voiceCurrentDraft !== draft) return;
 
-      if (this.voiceAudioSource) {
-        try {
-          this.voiceAudioSource.stop();
-        } catch (_) {
-          // The source may already have ended.
-        }
-        this.voiceAudioSource.disconnect();
+      if (this.voiceAudioUrl) {
+        URL.revokeObjectURL(this.voiceAudioUrl);
+        this.voiceAudioUrl = null;
       }
 
-      const source = this.voiceAudioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(this.voiceAudioContext.destination);
-      this.voiceAudioSource = source;
-      source.onended = () => {
-        if (this.voiceAudioSource === source) {
-          this.voiceAudioSource = null;
-        }
+      const audio = this.voiceAudio;
+      const mime = audioMessage.mime || 'audio/wav';
+      this.voiceAudioUrl = this.audioObjectUrl(audioBytes, mime)
+        || `data:${mime};base64,${encodedAudio}`;
+
+      const onEnded = () => {
+        audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
         if (this.voiceCurrentDraft !== draft) return;
         const playbackDurationMs = this.voiceUtteranceStartedAt
           ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
@@ -517,28 +512,50 @@ window.faceApp = function faceApp() {
         this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: playbackDurationMs });
         this.clearFinishedVoiceDraft(draft);
       };
+      const onError = () => {
+        audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
+        if (this.voiceCurrentDraft !== draft) return;
+        const detail = audio.error?.message || audio.error?.code || 'unknown audio error';
+        this.voiceMouthOpen = false;
+        this.failVoicePlaybackOrFallback(draft, `Server WAV playback failed: ${detail}`);
+      };
+
+      audio.pause();
+      audio.src = this.voiceAudioUrl;
+      audio.addEventListener('ended', onEnded, { once: true });
+      audio.addEventListener('error', onError, { once: true });
 
       try {
-        source.start(0);
+        await audio.play();
+        this.clearVoicePlaybackGestureResume();
         this.clearVoiceAudioFallbackTimer();
         this.cancelBrowserSpeechFallback();
         this.voiceUtteranceStartedAt = performance.now();
         this.voiceMouthOpen = true;
         this.voiceStatus = 'speaking';
-        this.voicePlaybackDetail = `Playing ${audioBuffer.duration.toFixed(2)}s through Web Audio`;
+        const reportedSeconds = durationMs ? (durationMs / 1000).toFixed(2) : '?';
+        this.voicePlaybackDetail = `Playing ${reportedSeconds}s through HTML audio`;
         console.info('Mortar voice playback started', {
           utterance_id: draft.utterance_id,
-          duration: audioBuffer.duration,
-          sample_rate: audioBuffer.sampleRate,
+          duration_ms: durationMs,
+          sample_rate_hz: audioMessage.sample_rate_hz,
         });
         this.sendVoiceMouthEvent('voice_speech_started', draft);
       } catch (error) {
         this.voiceMouthOpen = false;
-        if (this.voiceAudioSource === source) {
-          this.voiceAudioSource = null;
+        audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
+        if (error?.name === 'NotAllowedError') {
+          this.voicePlaybackDetail = 'Voice audio blocked until browser gesture; click or press a key to retry';
+          this.waitForVoicePlaybackGesture(() => {
+            if (this.voiceCurrentDraft === draft) {
+              this.playVoiceSpeechAudio(audioMessage);
+            }
+          });
+          return;
         }
-        source.disconnect();
-        this.failVoicePlaybackOrFallback(draft, error.message || 'Web Audio playback failed');
+        this.failVoicePlaybackOrFallback(draft, error.message || 'HTML audio playback failed');
       }
     },
 
@@ -558,14 +575,25 @@ window.faceApp = function faceApp() {
       return bytes.buffer;
     },
 
+    audioObjectUrl(audioBytes, mime) {
+      if (!window.Blob || !URL.createObjectURL) return null;
+      try {
+        return URL.createObjectURL(new Blob([audioBytes], { type: mime }));
+      } catch (error) {
+        console.warn('Mortar voice WAV object URL failed', error);
+        return null;
+      }
+    },
+
     clearFinishedVoiceDraft(draft) {
       if (this.voiceCurrentDraft !== draft) return;
       this.clearVoiceAudioFallbackTimer();
+      this.clearVoicePlaybackGestureResume();
       this.voiceActiveSpeechUtterance = null;
       if (this.voiceAudio) {
         this.voiceAudio.pause();
-        this.voiceAudio.src = '';
-        this.voiceAudio = null;
+        this.voiceAudio.removeAttribute('src');
+        this.voiceAudio.load();
       }
       if (this.voiceAudioUrl) {
         URL.revokeObjectURL(this.voiceAudioUrl);
@@ -582,24 +610,16 @@ window.faceApp = function faceApp() {
       this.voiceUtteranceStartedAt = null;
       this.voiceMouthOpen = false;
       this.clearVoiceAudioFallbackTimer();
+      this.clearVoicePlaybackGestureResume();
       this.cancelBrowserSpeechFallback();
       if (this.voiceAudio) {
         this.voiceAudio.pause();
-        this.voiceAudio.src = '';
-        this.voiceAudio = null;
+        this.voiceAudio.removeAttribute('src');
+        this.voiceAudio.load();
       }
       if (this.voiceAudioUrl) {
         URL.revokeObjectURL(this.voiceAudioUrl);
         this.voiceAudioUrl = null;
-      }
-      if (this.voiceAudioSource) {
-        try {
-          this.voiceAudioSource.stop();
-        } catch (_) {
-          // The source may already have ended.
-        }
-        this.voiceAudioSource.disconnect();
-        this.voiceAudioSource = null;
       }
     },
 

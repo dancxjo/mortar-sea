@@ -1,10 +1,11 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, mpsc as std_mpsc};
 use std::time::Instant;
 
 use base64::{Engine as _, engine::general_purpose};
 use chrono::{DateTime, Utc};
+use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
 use mortar_sea::voice_stream::{
     BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser, parse_voice_stream,
 };
@@ -33,11 +34,81 @@ const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
 const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 const VOICE_REALITY_REVIEW_INTERVAL: Duration = Duration::from_secs(15);
 const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(20);
+const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SAY_NUDGE_MIN_CHARS: usize = 140;
 const VOICE_SAY_NUDGE_MIN_INTERVAL: Duration = Duration::from_secs(2);
 
-static PIPER_SYNTHESIS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Debug, Clone)]
+struct PiperSynthesisWorker {
+    tx: std_mpsc::Sender<PiperSynthesisJob>,
+}
+
+#[derive(Debug)]
+struct PiperSynthesisJob {
+    text: String,
+    output_path: PathBuf,
+    response_tx: std_mpsc::Sender<anyhow::Result<SpeechSynthesisArtifact>>,
+}
+
+impl PiperSynthesisWorker {
+    fn shared() -> anyhow::Result<Self> {
+        let mut worker = PIPER_SYNTHESIS_WORKER
+            .lock()
+            .expect("piper synthesis worker lock poisoned");
+        if let Some(worker) = worker.as_ref() {
+            return Ok(worker.clone());
+        }
+
+        let (tx, rx) = std_mpsc::channel::<PiperSynthesisJob>();
+        std::thread::Builder::new()
+            .name("mortar-piper-synthesis".to_string())
+            .spawn(move || run_piper_synthesis_worker(rx))
+            .map_err(|error| anyhow::anyhow!("failed to spawn Piper synthesis worker: {error}"))?;
+        let created = Self { tx };
+        *worker = Some(created.clone());
+        Ok(created)
+    }
+
+    fn synthesize_text_to_wav(
+        &self,
+        text: String,
+        output_path: PathBuf,
+    ) -> anyhow::Result<SpeechSynthesisArtifact> {
+        let (response_tx, response_rx) = std_mpsc::channel();
+        self.tx
+            .send(PiperSynthesisJob {
+                text,
+                output_path,
+                response_tx,
+            })
+            .map_err(|error| anyhow::anyhow!("failed to queue Piper synthesis job: {error}"))?;
+        response_rx
+            .recv()
+            .map_err(|error| anyhow::anyhow!("Piper synthesis worker stopped: {error}"))?
+    }
+}
+
+fn run_piper_synthesis_worker(rx: std_mpsc::Receiver<PiperSynthesisJob>) {
+    let mut synthesizer = None::<PiperTextSynthesizer>;
+    for job in rx {
+        let result = (|| -> anyhow::Result<SpeechSynthesisArtifact> {
+            if synthesizer.is_none() {
+                info!("loading warm Piper ONNX voice session");
+                synthesizer = Some(PiperTextSynthesizer::load_selected()?);
+                info!("warm Piper ONNX voice session ready");
+            }
+
+            synthesizer
+                .as_mut()
+                .expect("Piper synthesizer initialized")
+                .synthesize_text_to_wav(job.text, "en-US", &job.output_path)
+        })();
+        let _ = job.response_tx.send(result);
+    }
+}
 
 pub(crate) fn spawn_voice(state: AppState) {
     tokio::spawn(async move {
@@ -951,27 +1022,18 @@ fn synthesize_voice_speech_audio(
             text: text.clone(),
         });
         let text_for_task = text.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
+        let wav = tokio::task::spawn_blocking(move || {
             let result = (|| -> anyhow::Result<_> {
-                // Piper/ONNX voice loading can deadlock under concurrent inits; serialize synthesis.
-                let _synthesis_guard = PIPER_SYNTHESIS_LOCK
-                    .lock()
-                    .expect("piper synthesis lock poisoned");
                 let output_path =
                     PathBuf::from("target/face-mouth").join(format!("voice-{utterance_id}.wav"));
-                let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
-                    text_for_task,
-                    "en-US",
-                    &output_path,
-                )?;
+                let artifact = PiperSynthesisWorker::shared()?
+                    .synthesize_text_to_wav(text_for_task, output_path)?;
                 let bytes = std::fs::read(&artifact.path)?;
                 Ok((bytes, artifact))
             })();
-            let _ = tx.send(result);
-        });
-
-        let wav = rx.await;
+            result
+        })
+        .await;
 
         match wav {
             Ok(Ok((bytes, artifact))) => {
@@ -1011,7 +1073,7 @@ fn synthesize_voice_speech_audio(
                 );
             }
             Err(error) => {
-                warn!(%utterance_id, %generation_id, %error, "Mouth Piper synthesis thread result channel closed");
+                warn!(%utterance_id, %generation_id, %error, "Mouth Piper synthesis task failed");
                 accept_mouth_event(
                     &state,
                     VoiceMouthEvent::VoiceSpeechInterrupted {
@@ -1019,9 +1081,7 @@ fn synthesize_voice_speech_audio(
                         generation_id,
                         observed_at: chrono::Utc::now(),
                         text,
-                        reason: format!(
-                            "Mouth Piper synthesis thread result channel closed: {error}"
-                        ),
+                        reason: format!("Mouth Piper synthesis task failed: {error}"),
                     },
                 );
             }
@@ -1193,11 +1253,12 @@ fn start_voice_generation(
 fn voice_system_prompt() -> &'static str {
     "You are the continuous Voice of Mortar-Sea: a first-person embodied verbal stream. \
      Your words are handed to Mouth one minimal spoken sentence at a time, and generation may pause while Mouth is physically speaking that sentence. \
-     Do not address the human, use tools, execute functions, or write JSON. \
+     Do not address an unseen or hypothetical human, use tools, execute functions, or write JSON. \
      You have no ability to execute functions or take actions, so do not pretend that you can. \
      Only make observations about known experience, inner feeling, uncertainty, and passing thoughts. \
      Write from the embodied system's own perspective using I, me, and my. \
      Move at about human spoken pace, or only slightly faster, with short plain sentences. \
+     If current real-world experience says someone is visible or present, your spoken <say> output is probably addressed to that person unless later evidence says otherwise. \
      You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
      Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
@@ -2364,6 +2425,23 @@ mod tests {
         assert!(prompt.contains("execute functions"));
         assert!(prompt.contains("do not pretend that you can"));
         assert!(prompt.contains("Only make observations"));
+    }
+
+    #[test]
+    fn voice_prompt_treats_visible_people_as_likely_addressees() {
+        let prompt = build_voice_prompt(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            "",
+        );
+
+        assert!(prompt.contains("Do not address an unseen or hypothetical human"));
+        assert!(
+            prompt.contains("If current real-world experience says someone is visible or present")
+        );
+        assert!(prompt.contains("probably addressed to that person"));
     }
 
     #[test]

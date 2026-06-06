@@ -85,6 +85,63 @@ impl SpeechSynthesisArtifact {
     }
 }
 
+pub struct PiperTextSynthesizer {
+    backend: PiperOnnxBackend,
+}
+
+impl PiperTextSynthesizer {
+    pub fn load_selected() -> Result<Self> {
+        let voice_model = ensure_piper_voice_model_available()?;
+        Self::load(voice_model)
+    }
+
+    pub fn load(voice_model_path: impl AsRef<Path>) -> Result<Self> {
+        let voice_model_path = voice_model_path.as_ref();
+        let config_path = piper_voice_config_path(voice_model_path);
+        let config = PiperVoiceConfig::from_json_file(&config_path)?;
+        let backend = PiperOnnxBackend::load(voice_model_path, config)
+            .context("failed to load native Piper ONNX voice backend")?;
+        Ok(Self { backend })
+    }
+
+    pub fn synthesize_text_to_wav(
+        &mut self,
+        text: impl Into<String>,
+        variant: impl Into<String>,
+        output_path: &Path,
+    ) -> Result<SpeechSynthesisArtifact> {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: text.into(),
+                variant: VariantId(variant.into()),
+                style: None,
+            })
+            .context("failed to phonemicize text into a speech plan")?;
+        let plan = utterance_plan_from_phonemicized(&phonemicized);
+        self.synthesize_plan_to_wav(plan, output_path)
+    }
+
+    pub fn synthesize_plan_to_wav(
+        &mut self,
+        plan: UtterancePlan,
+        output_path: &Path,
+    ) -> Result<SpeechSynthesisArtifact> {
+        let output = self
+            .backend
+            .synthesize_plan(&plan)
+            .context("native Piper ONNX synthesis failed")?;
+
+        write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+            .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
+
+        Ok(SpeechSynthesisArtifact {
+            path: output_path.to_path_buf(),
+            sample_rate_hz: output.sample_rate_hz,
+            samples: output.pcm_mono_f32.len(),
+        })
+    }
+}
+
 pub fn run(command: SpeakCommand) -> Result<()> {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
@@ -242,22 +299,7 @@ fn synthesize_plan_with_piper_to_wav(
     voice_model_path: &Path,
     output_path: &Path,
 ) -> Result<SpeechSynthesisArtifact> {
-    let config_path = piper_voice_config_path(voice_model_path);
-    let config = PiperVoiceConfig::from_json_file(&config_path)?;
-    let mut backend = PiperOnnxBackend::load(voice_model_path, config)
-        .context("failed to load native Piper ONNX voice backend")?;
-    let output = backend
-        .synthesize_plan(&plan)
-        .context("native Piper ONNX synthesis failed")?;
-
-    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
-        .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
-
-    Ok(SpeechSynthesisArtifact {
-        path: output_path.to_path_buf(),
-        sample_rate_hz: output.sample_rate_hz,
-        samples: output.pcm_mono_f32.len(),
-    })
+    PiperTextSynthesizer::load(voice_model_path)?.synthesize_plan_to_wav(plan, output_path)
 }
 
 pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
