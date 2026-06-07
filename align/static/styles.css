@@ -258,12 +258,12 @@ textarea {
 
 .timeline {
   overflow: hidden;
-  cursor: grab;
+  cursor: crosshair;
   touch-action: none;
 }
 
 .timeline:active {
-  cursor: grabbing;
+  cursor: crosshair;
 }
 
 canvas {

@@ -472,27 +472,29 @@ fn acoustic_profile(variant_id: &str) -> AcousticProfile {
         cues.insert(cue.id.clone(), cue);
     }
 
-    let high_front = high_front_vowel_model();
-    let high_back_rounded = high_back_rounded_vowel_model();
+    let mut phone_models = HashMap::new();
+    let mut phoneme_models = HashMap::new();
+    for entry in ARPABET.iter().filter(|entry| entry.syllabic) {
+        let model = vowel_model(entry);
+        phone_models.insert(arpabet::phone_id_for_ipa(entry.phone_symbol), model.clone());
+        phoneme_models.insert(arpabet::phoneme_id(variant_id, entry.symbol), model);
+    }
+    phone_models.insert(SCHWA, reduced_central_vowel_model("schwa"));
+    phone_models.insert(
+        R_COLORED_SCHWA,
+        reduced_central_vowel_model("r-colored schwa"),
+    );
+
     let voiceless_bilabial_stop = voiceless_bilabial_stop_model();
     let voiced_bilabial_stop = voiced_bilabial_stop_model();
 
-    let phone_models = HashMap::from([
-        (arpabet::phone_id_for_ipa("iː"), high_front.clone()),
-        (arpabet::phone_id_for_ipa("uː"), high_back_rounded.clone()),
-        (P, voiceless_bilabial_stop.clone()),
-        (B, voiced_bilabial_stop.clone()),
-    ]);
-
-    let phoneme_models = HashMap::from([
-        (arpabet::phoneme_id(variant_id, "IY"), high_front),
-        (arpabet::phoneme_id(variant_id, "UW"), high_back_rounded),
-        (
-            arpabet::phoneme_id(variant_id, "P"),
-            voiceless_bilabial_stop,
-        ),
-        (arpabet::phoneme_id(variant_id, "B"), voiced_bilabial_stop),
-    ]);
+    phone_models.insert(P, voiceless_bilabial_stop.clone());
+    phone_models.insert(B, voiced_bilabial_stop.clone());
+    phoneme_models.insert(
+        arpabet::phoneme_id(variant_id, "P"),
+        voiceless_bilabial_stop,
+    );
+    phoneme_models.insert(arpabet::phoneme_id(variant_id, "B"), voiced_bilabial_stop);
 
     AcousticProfile {
         cues,
@@ -527,6 +529,33 @@ fn acoustic_cues() -> Vec<AcousticCueDef> {
             "acoustic.rounding_resonance",
             vec![CueTarget::Feature(FeatureId("phonology.roundedness".into()))],
             Some("Lip rounding usually lowers upper formant energy and reinforces the [u] vs [i] split.".into()),
+        ),
+        cue(
+            "acoustic.cue.periodic_voicing",
+            "periodic voicing",
+            "acoustic.periodic_voicing",
+            vec![
+                CueTarget::Feature(FeatureId("phonology.voicing".into())),
+                CueTarget::Feature(FeatureId("phonology.syllabic".into())),
+            ],
+            Some("Regular low-frequency periodicity is a strong cue for voiced sonorants and vowels.".into()),
+        ),
+        cue(
+            "acoustic.cue.sonority_peak",
+            "sonority peak",
+            "acoustic.sonority_peak",
+            vec![
+                CueTarget::Feature(FeatureId("phonology.syllabic".into())),
+                CueTarget::Stress,
+            ],
+            Some("Syllable nuclei tend to carry local sonority, energy, and periodicity maxima.".into()),
+        ),
+        cue(
+            "acoustic.cue.vowel_nucleus",
+            "vowel nucleus",
+            "acoustic.vowel_nucleus",
+            vec![CueTarget::Feature(FeatureId("phonology.syllabic".into()))],
+            Some("A vowel nucleus is an alignment anchor: stable voicing plus vowel-like formants near the syllable peak.".into()),
         ),
         cue(
             "acoustic.cue.stop_closure",
@@ -566,61 +595,99 @@ fn acoustic_cues() -> Vec<AcousticCueDef> {
     ]
 }
 
-fn high_front_vowel_model() -> AcousticTargetModel {
+fn vowel_model(entry: &arpabet::ArpabetEntry) -> AcousticTargetModel {
     AcousticTargetModel {
         expected_features: acoustic_feature_bundle(&[
             (
                 "f1_region",
-                Spec::Known(FeatureValue::Category("low".into())),
+                Spec::Known(FeatureValue::Category(f1_region(entry.vowel_height).into())),
             ),
             (
                 "f2_region",
-                Spec::Known(FeatureValue::Category("high".into())),
+                Spec::Known(FeatureValue::Category(
+                    f2_region(entry.vowel_backness).into(),
+                )),
+            ),
+            ("rounding_resonance", rounding_resonance(entry.roundedness)),
+            ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
+            ("sonority_peak", Spec::Known(FeatureValue::Bool(true))),
+            ("vowel_nucleus", Spec::Known(FeatureValue::Bool(true))),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.f1_region", 0.8),
+            ("acoustic.cue.f2_region", 1.0),
+            ("acoustic.cue.rounding_resonance", 0.5),
+            ("acoustic.cue.periodic_voicing", 0.8),
+            ("acoustic.cue.sonority_peak", 0.9),
+            ("acoustic.cue.vowel_nucleus", 1.0),
+        ]),
+        landmarks: vec![vowel_target_landmark(), syllable_nucleus_landmark()],
+        notes: Some(format!(
+            "Vowel nucleus evidence for ARPABET {}: {:?} height, {:?} backness, {:?} rounding.",
+            entry.symbol, entry.vowel_height, entry.vowel_backness, entry.roundedness
+        )),
+    }
+}
+
+fn reduced_central_vowel_model(label: &str) -> AcousticTargetModel {
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "f1_region",
+                Spec::Known(FeatureValue::Category("mid".into())),
+            ),
+            (
+                "f2_region",
+                Spec::Known(FeatureValue::Category("mid".into())),
             ),
             (
                 "rounding_resonance",
                 Spec::Known(FeatureValue::Category("absent".into())),
             ),
             ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
+            (
+                "sonority_peak",
+                Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)]),
+            ),
+            ("vowel_nucleus", Spec::Known(FeatureValue::Bool(true))),
         ]),
         weighted_cues: weighted_cues(&[
-            ("acoustic.cue.f1_region", 0.8),
-            ("acoustic.cue.f2_region", 1.0),
-            ("acoustic.cue.rounding_resonance", 0.4),
+            ("acoustic.cue.f1_region", 0.7),
+            ("acoustic.cue.f2_region", 0.8),
+            ("acoustic.cue.periodic_voicing", 0.8),
+            ("acoustic.cue.sonority_peak", 0.7),
+            ("acoustic.cue.vowel_nucleus", 0.9),
         ]),
-        landmarks: vec![vowel_target_landmark()],
-        notes: Some(
-            "Telltale [i]-like evidence: low F1, high F2, and no rounding resonance.".into(),
-        ),
+        landmarks: vec![vowel_target_landmark(), syllable_nucleus_landmark()],
+        notes: Some(format!(
+            "Reduced central vowel model for {label}; sonority can be weak in unstressed syllables."
+        )),
     }
 }
 
-fn high_back_rounded_vowel_model() -> AcousticTargetModel {
-    AcousticTargetModel {
-        expected_features: acoustic_feature_bundle(&[
-            (
-                "f1_region",
-                Spec::Known(FeatureValue::Category("low".into())),
-            ),
-            (
-                "f2_region",
-                Spec::Known(FeatureValue::Category("low".into())),
-            ),
-            (
-                "rounding_resonance",
-                Spec::Known(FeatureValue::Category("present".into())),
-            ),
-            ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
-        ]),
-        weighted_cues: weighted_cues(&[
-            ("acoustic.cue.f1_region", 0.8),
-            ("acoustic.cue.f2_region", 1.0),
-            ("acoustic.cue.rounding_resonance", 0.7),
-        ]),
-        landmarks: vec![vowel_target_landmark()],
-        notes: Some(
-            "Telltale [u]-like evidence: low F1, low F2, and rounded-lip spectral effects.".into(),
-        ),
+fn f1_region(height: Option<&str>) -> &'static str {
+    match height {
+        Some("high") => "low",
+        Some("mid") | Some("rhotic") => "mid",
+        Some("low") => "high",
+        _ => "mid",
+    }
+}
+
+fn f2_region(backness: Option<&str>) -> &'static str {
+    match backness {
+        Some("front") => "high",
+        Some("central") => "mid",
+        Some("back") => "low",
+        _ => "mid",
+    }
+}
+
+fn rounding_resonance(roundedness: Option<&str>) -> Spec<FeatureValue> {
+    match roundedness {
+        Some("rounded") => Spec::Known(FeatureValue::Category("present".into())),
+        Some("unrounded") => Spec::Known(FeatureValue::Category("absent".into())),
+        _ => Spec::Unspecified,
     }
 }
 
@@ -724,6 +791,28 @@ fn vowel_target_landmark() -> AcousticLandmark {
             "Sample formants near the steady middle of the vowel when the segment is long enough."
                 .into(),
         ),
+    }
+}
+
+fn syllable_nucleus_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "syllable_nucleus_peak".into(),
+        kind: AcousticLandmarkKind::VowelTarget,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.06,
+            end_s: 0.06,
+        },
+        expected_features: acoustic_feature_bundle(&[
+            ("vowel_nucleus", Spec::Known(FeatureValue::Bool(true))),
+            ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.vowel_nucleus", 1.0),
+            ("acoustic.cue.sonority_peak", 0.9),
+            ("acoustic.cue.periodic_voicing", 0.8),
+        ]),
+        notes: Some("Use this as the preferred anchor when fitting syllable timing.".into()),
     }
 }
 

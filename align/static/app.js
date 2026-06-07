@@ -17,9 +17,16 @@ const state = {
   duration: 1,
   zoom: 1,
   viewStart: 0,
-  dragging: false,
+  pointerMode: '',
+  pointerId: null,
+  pointerStartX: 0,
+  pointerStartTime: 0,
+  pointerMoved: false,
+  pendingHit: null,
   dragX: 0,
   dragStartView: 0,
+  selection: null,
+  playRangeEnd: null,
   animationFrame: null,
 };
 
@@ -79,6 +86,10 @@ window.addEventListener('DOMContentLoaded', () => {
   elements.audio.addEventListener('play', startPlaybackLoop);
   elements.audio.addEventListener('pause', drawAll);
   elements.audio.addEventListener('seeked', drawAll);
+  elements.audio.addEventListener('timeupdate', enforcePlaybackRange);
+  elements.audio.addEventListener('ended', () => {
+    state.playRangeEnd = null;
+  });
   elements.timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
   elements.timeline.addEventListener('pointerdown', onTimelinePointerDown);
   window.addEventListener('pointermove', onTimelinePointerMove);
@@ -339,6 +350,8 @@ function renderPhonemicization(payload) {
 
 function renderAlignment(payload) {
   state.currentAlignment = payload;
+  state.selection = null;
+  state.playRangeEnd = null;
   elements.asr.textContent = [
     payload.asr_transcript ? `transcript: ${payload.asr_transcript}` : 'transcript: none',
     ...(payload.asr_segments || []).map((segment) => {
@@ -351,6 +364,8 @@ function renderAlignment(payload) {
 
 function clearAlignment() {
   state.currentAlignment = null;
+  state.selection = null;
+  state.playRangeEnd = null;
   elements.asr.textContent = '';
   elements['alignment-detail'].textContent = 'No alignment';
   drawAll();
@@ -359,6 +374,8 @@ function clearAlignment() {
 async function setAudio(url, detail) {
   state.currentAudioUrl = url;
   state.currentAlignment = null;
+  state.selection = null;
+  state.playRangeEnd = null;
   elements.audio.src = url;
   elements.audio.load();
   elements['audio-detail'].textContent = detail || 'Audio ready';
@@ -420,27 +437,64 @@ function onTimelineWheel(event) {
 }
 
 function onTimelinePointerDown(event) {
+  event.preventDefault();
   elements.timeline.setPointerCapture?.(event.pointerId);
-  state.dragging = true;
+  state.pointerId = event.pointerId;
+  state.pointerStartX = timelineX(event);
+  state.pointerStartTime = clamp(xToTime(state.pointerStartX), 0, state.duration);
+  state.pointerMoved = false;
+  state.pendingHit = hitTestTimelineSegment(event);
   state.dragX = event.clientX;
   state.dragStartView = state.viewStart;
+
+  if (event.button === 1 || event.altKey || event.shiftKey) {
+    state.pointerMode = 'pan';
+  } else {
+    state.pointerMode = 'select';
+  }
 }
 
 function onTimelinePointerMove(event) {
-  if (!state.dragging) return;
+  if (!state.pointerMode || event.pointerId !== state.pointerId) return;
   const deltaX = event.clientX - state.dragX;
-  const secondsPerPixel = viewDuration() / Math.max(1, elements.timeline.clientWidth);
-  state.viewStart = clamp(state.dragStartView - deltaX * secondsPerPixel, 0, maxViewStart());
-  drawAll();
+  if (Math.abs(timelineX(event) - state.pointerStartX) > 3) {
+    state.pointerMoved = true;
+  }
+
+  if (state.pointerMode === 'pan') {
+    const secondsPerPixel = viewDuration() / Math.max(1, elements.timeline.clientWidth);
+    state.viewStart = clamp(state.dragStartView - deltaX * secondsPerPixel, 0, maxViewStart());
+    drawAll();
+    return;
+  }
+
+  if (state.pointerMode === 'select' && state.pointerMoved) {
+    const currentTime = clamp(xToTime(timelineX(event)), 0, state.duration);
+    selectRange(state.pointerStartTime, currentTime, { announce: false, play: false });
+  }
 }
 
-function onTimelinePointerUp() {
-  state.dragging = false;
+function onTimelinePointerUp(event) {
+  if (!state.pointerMode || event.pointerId !== state.pointerId) return;
+
+  if (state.pointerMode === 'select') {
+    if (state.pointerMoved) {
+      const currentTime = clamp(xToTime(timelineX(event)), 0, state.duration);
+      selectRange(state.pointerStartTime, currentTime, { announce: true, play: true });
+    } else if (state.pendingHit) {
+      selectSegment(state.pendingHit.kind, state.pendingHit.segment, { play: true });
+    }
+  }
+
+  state.pointerMode = '';
+  state.pointerId = null;
+  state.pendingHit = null;
 }
 
 function startPlaybackLoop() {
   cancelAnimationFrame(state.animationFrame);
   const tick = () => {
+    enforcePlaybackRange();
     drawAll();
     if (!elements.audio.paused && !elements.audio.ended) {
       state.animationFrame = requestAnimationFrame(tick);
@@ -455,20 +509,24 @@ function drawAll() {
   drawWaveform();
   drawSpectrogram();
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
+    kind: 'word',
     color: '#6fd2a4',
     text: '#071b12',
     empty: 'Words',
   });
   drawTrack(canvases['phoneme-track'], state.currentAlignment?.phonemes || [], {
+    kind: 'phoneme',
     color: '#79b8ff',
     text: '#061728',
     empty: 'Phonemes',
   });
   drawTrack(canvases['phone-track'], state.currentAlignment?.phones || [], {
+    kind: 'phone',
     color: '#e8c36f',
     text: '#231804',
     empty: 'Phones',
   });
+  drawSelection();
   drawPlayhead();
 }
 
@@ -747,26 +805,59 @@ function drawTrack(canvas, segments, options) {
   }
 
   for (const segment of segments) {
+    const selected = isSelectedSegment(options.kind, segment);
     const x = timeToX(segment.start_ms / 1000);
     const right = timeToX(segment.end_ms / 1000);
     const w = Math.max(1, right - x);
     if (right < 0 || x > width) continue;
-    ctx.fillStyle = options.color;
+    ctx.fillStyle = selected ? '#f3f6f1' : options.color;
     ctx.globalAlpha = 0.92;
     ctx.fillRect(x, 8, w, height - 16);
     ctx.globalAlpha = 1;
-    ctx.strokeStyle = '#0b0e10';
+    ctx.strokeStyle = selected ? '#ef8c86' : '#0b0e10';
+    ctx.lineWidth = selected ? 2 : 1;
     ctx.strokeRect(x, 8, w, height - 16);
+    ctx.lineWidth = 1;
     if (w > 16) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(x + 2, 8, Math.max(0, w - 4), height - 16);
       ctx.clip();
-      ctx.fillStyle = options.text;
+      ctx.fillStyle = selected ? '#0b0e10' : options.text;
       ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.fillText(segment.label || segment.text || '', x + 5, Math.floor(height / 2) + 4);
       ctx.restore();
     }
+  }
+}
+
+function drawSelection() {
+  const selection = state.selection;
+  if (!selection) return;
+
+  const startX = timeToX(selection.start);
+  const endX = timeToX(selection.end);
+  for (const canvas of Object.values(canvases)) {
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (endX < 0 || startX > width) continue;
+
+    const x1 = clamp(startX, 0, width);
+    const x2 = clamp(endX, 0, width);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.24)';
+    if (x1 > 0) ctx.fillRect(0, 0, x1, height);
+    if (x2 < width) ctx.fillRect(x2, 0, width - x2, height);
+    ctx.fillStyle = 'rgba(243, 246, 241, 0.10)';
+    ctx.fillRect(x1, 0, Math.max(1, x2 - x1), height);
+    ctx.strokeStyle = '#f3f6f1';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x1 + 0.5, 0);
+    ctx.lineTo(x1 + 0.5, height);
+    ctx.moveTo(x2 - 0.5, 0);
+    ctx.lineTo(x2 - 0.5, height);
+    ctx.stroke();
   }
 }
 
@@ -783,6 +874,104 @@ function drawPlayhead() {
     ctx.lineTo(x, canvas.clientHeight);
     ctx.stroke();
   }
+}
+
+function selectSegment(kind, segment, { play = false } = {}) {
+  const start = clamp(segment.start_ms / 1000, 0, state.duration);
+  const end = clamp(Math.max(segment.end_ms / 1000, start + 0.001), 0, state.duration);
+  state.selection = {
+    kind,
+    key: segmentKey(kind, segment),
+    start,
+    end,
+    label: segment.label || segment.text || kind,
+  };
+  setStatus(`Selected ${kind} ${state.selection.label} ${formatRange(start, end)}`);
+  drawAll();
+  if (play) playSelection();
+}
+
+function selectRange(start, end, { announce = true, play = false } = {}) {
+  const left = clamp(Math.min(start, end), 0, state.duration);
+  const right = clamp(Math.max(start, end), 0, state.duration);
+  const minDuration = Math.min(0.015, state.duration);
+  const normalizedEnd = Math.min(state.duration, Math.max(right, left + minDuration));
+  const normalizedStart = normalizedEnd > left ? left : Math.max(0, normalizedEnd - minDuration);
+  state.selection = {
+    kind: 'range',
+    key: '',
+    start: normalizedStart,
+    end: normalizedEnd,
+    label: 'range',
+  };
+  if (announce) {
+    setStatus(`Selected range ${formatRange(state.selection.start, state.selection.end)}`);
+  }
+  drawAll();
+  if (play) playSelection();
+}
+
+async function playSelection() {
+  if (!state.selection || !elements.audio.src) return;
+  const start = state.selection.start;
+  const end = Math.max(state.selection.end, start + 0.001);
+  state.playRangeEnd = end;
+  elements.audio.currentTime = start;
+  try {
+    await elements.audio.play();
+  } catch (error) {
+    state.playRangeEnd = null;
+    setStatus(error.message || String(error), 'error');
+  }
+}
+
+function enforcePlaybackRange() {
+  if (state.playRangeEnd == null) return;
+  if (elements.audio.currentTime < state.playRangeEnd - 0.004) return;
+  elements.audio.pause();
+  elements.audio.currentTime = state.playRangeEnd;
+  state.playRangeEnd = null;
+  drawAll();
+}
+
+function hitTestTimelineSegment(event) {
+  const kind = trackKindForTarget(event.target);
+  if (!kind) return null;
+  const alignment = state.currentAlignment;
+  if (!alignment) return null;
+  const timeMs = xToTime(timelineX(event)) * 1000;
+  const segments = alignment[`${kind}s`] || [];
+  const segment = segments.find((candidate) => {
+    return timeMs >= candidate.start_ms && timeMs <= candidate.end_ms;
+  });
+  return segment ? { kind, segment } : null;
+}
+
+function trackKindForTarget(target) {
+  if (!target || !target.id) return '';
+  if (target.id === 'word-track') return 'word';
+  if (target.id === 'phoneme-track') return 'phoneme';
+  if (target.id === 'phone-track') return 'phone';
+  return '';
+}
+
+function isSelectedSegment(kind, segment) {
+  if (!state.selection || state.selection.kind !== kind) return false;
+  return state.selection.key === segmentKey(kind, segment);
+}
+
+function segmentKey(kind, segment) {
+  if (kind === 'word') return String(segment.index);
+  return `${segment.word_index}:${segment.index}:${segment.token_id || segment.label || ''}`;
+}
+
+function timelineX(event) {
+  const rect = elements.timeline.getBoundingClientRect();
+  return clamp(event.clientX - rect.left, 0, rect.width);
+}
+
+function formatRange(start, end) {
+  return `${formatSeconds(start)}-${formatSeconds(end)}`;
 }
 
 function toggleIr() {

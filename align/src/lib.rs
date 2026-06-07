@@ -516,6 +516,8 @@ struct AcousticFrameFeatures {
     f1_hz: f32,
     f2_hz: f32,
     spectral_flux: f32,
+    sonority: f32,
+    vowel_nucleus_likelihood: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -563,7 +565,7 @@ fn forced_alignment_tracks(
     if frames.len() < phones.len().min(3) {
         return None;
     }
-    let spans = viterbi_phone_spans(&phones, &frames, decoded.duration_ms)?;
+    let spans = viterbi_phone_spans(output, &phones, &frames, decoded.duration_ms)?;
     let aligned_phones = phones
         .into_iter()
         .zip(spans)
@@ -742,6 +744,7 @@ fn phoneme_spans_from_phone_spans(
 }
 
 fn viterbi_phone_spans(
+    output: &PhonemicizeOutput,
     phones: &[(&PhoneToken, usize)],
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
@@ -760,6 +763,19 @@ fn viterbi_phone_spans(
     let phone_count = phones.len();
     let frame_count = active.len();
     let average_frames = ((frame_count + phone_count - 1) / phone_count).max(1);
+    let nucleus_phone_indices = syllable_nucleus_phone_indices(output, phones);
+    let nucleus_targets = nucleus_target_frames(active, nucleus_phone_indices.len());
+    let mut nucleus_target_by_phone = vec![None; phone_count];
+    for (phone_index, target_frame) in nucleus_phone_indices
+        .iter()
+        .copied()
+        .zip(nucleus_targets.iter().copied())
+    {
+        if phone_index < phone_count {
+            nucleus_target_by_phone[phone_index] = Some(target_frame);
+        }
+    }
+    let nucleus_target_prefix = nucleus_target_prefix(frame_count, &nucleus_targets);
     let mut prefix_scores = vec![vec![0.0_f32; frame_count + 1]; phone_count];
     for (phone_index, (phone, _)) in phones.iter().enumerate() {
         for (frame_index, frame) in active.iter().enumerate() {
@@ -789,7 +805,16 @@ fn viterbi_phone_spans(
                 }
                 let emission =
                     prefix_scores[phone_index - 1][end] - prefix_scores[phone_index - 1][start];
-                let candidate = previous + emission + duration_score(len, expected_len);
+                let anchor = nucleus_anchor_score(
+                    phone_index - 1,
+                    class,
+                    start,
+                    end,
+                    active,
+                    &nucleus_target_by_phone,
+                    &nucleus_target_prefix,
+                );
+                let candidate = previous + emission + duration_score(len, expected_len) + anchor;
                 if candidate > dp[phone_index][end] {
                     dp[phone_index][end] = candidate;
                     previous_len[phone_index][end] = len;
@@ -829,6 +854,129 @@ fn viterbi_phone_spans(
         end = start;
     }
     Some(spans)
+}
+
+fn syllable_nucleus_phone_indices(
+    output: &PhonemicizeOutput,
+    phones: &[(&PhoneToken, usize)],
+) -> Vec<usize> {
+    let mut nuclei = Vec::new();
+    let mut cursor = 0usize;
+    for syllable in &output.syllables {
+        let Some(nucleus_index) = syllable.nucleus_index else {
+            continue;
+        };
+        for (syllable_phone_index, syllable_phone) in syllable.phones.iter().enumerate() {
+            if is_boundary_phone(syllable_phone) {
+                continue;
+            }
+            let Some((phone, _)) = phones.get(cursor) else {
+                break;
+            };
+            if phones_refer_to_same_target(syllable_phone, phone) {
+                if syllable_phone_index == nucleus_index {
+                    nuclei.push(cursor);
+                }
+                cursor += 1;
+            }
+        }
+    }
+    nuclei
+}
+
+fn is_boundary_phone(phone: &PhoneToken) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if id.as_str().starts_with("boundary."))
+}
+
+fn phones_refer_to_same_target(left: &PhoneToken, right: &PhoneToken) -> bool {
+    left.phone == right.phone && phone_word_index(left) == phone_word_index(right)
+}
+
+fn nucleus_target_frames(frames: &[AcousticFrameFeatures], nucleus_count: usize) -> Vec<usize> {
+    if frames.is_empty() || nucleus_count == 0 {
+        return Vec::new();
+    }
+    let mut targets = Vec::with_capacity(nucleus_count);
+    let mut search_start = 0usize;
+    for nucleus_index in 0..nucleus_count {
+        let remaining = nucleus_count.saturating_sub(nucleus_index + 1);
+        let last_allowed = frames.len().saturating_sub(remaining + 1);
+        let ideal = (((nucleus_index as f32 + 0.5) * frames.len() as f32 / nucleus_count as f32)
+            .round() as usize)
+            .min(last_allowed);
+        let search_radius = ((frames.len() / nucleus_count.max(1)) / 2).max(4);
+        let window_start = ideal.saturating_sub(search_radius).max(search_start);
+        let window_end = ideal
+            .saturating_add(search_radius)
+            .min(last_allowed)
+            .max(window_start);
+        let best = (window_start..=window_end)
+            .max_by(|left, right| {
+                nucleus_candidate_score(&frames[*left], *left, ideal)
+                    .total_cmp(&nucleus_candidate_score(&frames[*right], *right, ideal))
+            })
+            .unwrap_or(window_start);
+        targets.push(best);
+        search_start = best.saturating_add(1);
+        if search_start >= frames.len() {
+            break;
+        }
+    }
+    targets
+}
+
+fn nucleus_candidate_score(frame: &AcousticFrameFeatures, frame_index: usize, ideal: usize) -> f32 {
+    let distance = frame_index.abs_diff(ideal) as f32;
+    frame.vowel_nucleus_likelihood + 0.25 * frame.sonority - 0.015 * distance
+}
+
+fn nucleus_target_prefix(frame_count: usize, targets: &[usize]) -> Vec<usize> {
+    let mut prefix = vec![0usize; frame_count + 1];
+    let mut sorted = targets.to_vec();
+    sorted.sort_unstable();
+    let mut target_cursor = 0usize;
+    for frame_index in 0..frame_count {
+        prefix[frame_index + 1] = prefix[frame_index];
+        while target_cursor < sorted.len() && sorted[target_cursor] == frame_index {
+            prefix[frame_index + 1] += 1;
+            target_cursor += 1;
+        }
+    }
+    prefix
+}
+
+fn nucleus_anchor_score(
+    phone_index: usize,
+    class: PhoneClass,
+    start: usize,
+    end: usize,
+    frames: &[AcousticFrameFeatures],
+    nucleus_target_by_phone: &[Option<usize>],
+    nucleus_target_prefix: &[usize],
+) -> f32 {
+    let target = nucleus_target_by_phone
+        .get(phone_index)
+        .and_then(|target| *target);
+    let contained_targets = nucleus_target_prefix[end.min(nucleus_target_prefix.len() - 1)]
+        .saturating_sub(nucleus_target_prefix[start.min(nucleus_target_prefix.len() - 1)]);
+    if let Some(target) = target {
+        let distance = if target < start {
+            start - target
+        } else if target >= end {
+            target - end + 1
+        } else {
+            0
+        };
+        let best_inside = frames[start..end]
+            .iter()
+            .map(|frame| frame.vowel_nucleus_likelihood)
+            .fold(0.0_f32, f32::max);
+        3.2 - 0.75 * distance as f32 + 1.2 * best_inside
+    } else if class != PhoneClass::Vowel && contained_targets > 0 {
+        -2.4 * contained_targets as f32
+    } else {
+        0.0
+    }
 }
 
 fn active_frame_range(frames: &[AcousticFrameFeatures]) -> Option<(usize, usize)> {
@@ -918,6 +1066,7 @@ fn vowel_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
     score += 0.8 * closeness(frame.energy_norm, 0.68, 0.45);
     score += 0.5 * closeness(frame.zero_crossing_rate, 0.08, 0.09);
     score += 0.55 * closeness(frame.high_ratio, 0.15, 0.25);
+    score += 1.15 * frame.vowel_nucleus_likelihood;
     score += formant_region_score(phone, frame);
     score
 }
@@ -954,6 +1103,7 @@ fn nasal_score(frame: &AcousticFrameFeatures) -> f32 {
         + 0.75 * closeness(frame.low_ratio, 0.72, 0.25)
         + 0.45 * closeness(frame.spectral_centroid_hz, 900.0, 900.0)
         + 0.25 * closeness(frame.energy_norm, 0.38, 0.35)
+        + 0.35 * frame.sonority
 }
 
 fn liquid_score(frame: &AcousticFrameFeatures) -> f32 {
@@ -961,12 +1111,14 @@ fn liquid_score(frame: &AcousticFrameFeatures) -> f32 {
         + 0.45 * closeness(frame.energy_norm, 0.50, 0.40)
         + 0.45 * closeness(frame.zero_crossing_rate, 0.08, 0.10)
         + 0.35 * closeness(frame.spectral_centroid_hz, 1500.0, 1300.0)
+        + 0.35 * frame.sonority
 }
 
 fn glide_score(frame: &AcousticFrameFeatures) -> f32 {
     0.85 * closeness(frame.voicing, 0.72, 0.32)
         + 0.50 * closeness(frame.energy_norm, 0.42, 0.38)
         + 0.50 * closeness(frame.zero_crossing_rate, 0.07, 0.10)
+        + 0.25 * frame.sonority
 }
 
 fn neutral_score(frame: &AcousticFrameFeatures) -> f32 {
@@ -1008,6 +1160,10 @@ fn closeness(value: f32, target: f32, spread: f32) -> f32 {
     }
     let distance = ((value - target) / spread).abs();
     (1.0 - distance).clamp(-1.5, 1.0)
+}
+
+fn positive_closeness(value: f32, target: f32, spread: f32) -> f32 {
+    closeness(value, target, spread).max(0.0)
 }
 
 fn phone_class(phone: &PhoneToken) -> PhoneClass {
@@ -1077,7 +1233,46 @@ fn extract_acoustic_features(samples: &[f32], sample_rate_hz: u32) -> Vec<Acoust
     for frame in &mut raw {
         frame.energy_norm = ((frame.energy_norm - min_db) / range).clamp(0.0, 1.0);
     }
+    update_derived_alignment_features(&mut raw);
     raw
+}
+
+fn update_derived_alignment_features(frames: &mut [AcousticFrameFeatures]) {
+    for frame in frames {
+        frame.sonority = sonority(frame);
+        frame.vowel_nucleus_likelihood = vowel_nucleus_likelihood(frame);
+    }
+}
+
+fn sonority(frame: &AcousticFrameFeatures) -> f32 {
+    let voiced = positive_closeness(frame.voicing, 0.78, 0.35);
+    let low_noise = positive_closeness(frame.zero_crossing_rate, 0.08, 0.11);
+    let energy = positive_closeness(frame.energy_norm, 0.55, 0.50);
+    let low_band = positive_closeness(frame.low_ratio, 0.60, 0.35);
+    ((0.42 * voiced) + (0.24 * low_noise) + (0.20 * energy) + (0.14 * low_band)).clamp(0.0, 1.0)
+}
+
+fn vowel_nucleus_likelihood(frame: &AcousticFrameFeatures) -> f32 {
+    let voiced = positive_closeness(frame.voicing, 0.84, 0.30);
+    let energy = positive_closeness(frame.energy_norm, 0.68, 0.42);
+    let low_noise = positive_closeness(frame.zero_crossing_rate, 0.07, 0.09);
+    let low_high_band = positive_closeness(frame.high_ratio, 0.14, 0.24);
+    let stable = (1.0 - frame.spectral_flux).clamp(0.0, 1.0);
+    let formants = if (180.0..=1050.0).contains(&frame.f1_hz)
+        && (700.0..=3400.0).contains(&frame.f2_hz)
+        && frame.f2_hz > frame.f1_hz + 120.0
+    {
+        1.0
+    } else {
+        0.35
+    };
+    ((0.34 * voiced)
+        + (0.22 * energy)
+        + (0.16 * low_noise)
+        + (0.12 * low_high_band)
+        + (0.10 * stable)
+        + (0.06 * formants))
+        .clamp(0.0, 1.0)
 }
 
 fn analyze_frame(
@@ -1122,6 +1317,8 @@ fn analyze_frame(
             f1_hz,
             f2_hz,
             spectral_flux: 0.0,
+            sonority: 0.0,
+            vowel_nucleus_likelihood: 0.0,
         },
         magnitudes,
     )
@@ -1883,5 +2080,96 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phonemicized(text: &str) -> PhonemicizeOutput {
+        EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: text.into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize")
+    }
+
+    #[test]
+    fn syllable_nucleus_indices_skip_synthetic_rhotic_coda() {
+        let output = phonemicized("current");
+        let phones = alignable_phones(&output);
+        let nuclei = syllable_nucleus_phone_indices(&output, &phones);
+
+        assert_eq!(nuclei.len(), output.syllables.len());
+        assert_eq!(known_phone_id(phones[nuclei[0]].0), Some("ipa.phone.ɝ"));
+        assert_eq!(known_phone_id(phones[nuclei[1]].0), Some("ipa.phone.ə"));
+    }
+
+    #[test]
+    fn nucleus_targets_choose_vocalic_peaks_in_syllable_order() {
+        let mut frames = (0..90).map(test_frame).collect::<Vec<_>>();
+        for peak in [12usize, 44, 75] {
+            frames[peak].sonority = 0.92;
+            frames[peak].vowel_nucleus_likelihood = 0.96;
+        }
+
+        assert_eq!(nucleus_target_frames(&frames, 3), vec![12, 44, 75]);
+    }
+
+    #[test]
+    fn nucleus_anchor_rewards_spans_containing_target_frame() {
+        let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+        frames[10].vowel_nucleus_likelihood = 0.95;
+        let target_by_phone = vec![Some(10)];
+        let target_prefix = nucleus_target_prefix(frames.len(), &[10]);
+
+        let containing = nucleus_anchor_score(
+            0,
+            PhoneClass::Vowel,
+            8,
+            12,
+            &frames,
+            &target_by_phone,
+            &target_prefix,
+        );
+        let missing = nucleus_anchor_score(
+            0,
+            PhoneClass::Vowel,
+            12,
+            16,
+            &frames,
+            &target_by_phone,
+            &target_prefix,
+        );
+
+        assert!(containing > missing);
+    }
+
+    fn known_phone_id(token: &PhoneToken) -> Option<&str> {
+        match &token.phone {
+            Spec::Known(id) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    fn test_frame(index: usize) -> AcousticFrameFeatures {
+        AcousticFrameFeatures {
+            start_ms: index as u64 * ALIGN_HOP_MS,
+            end_ms: (index as u64 + 1) * ALIGN_HOP_MS,
+            energy_norm: 0.1,
+            zero_crossing_rate: 0.2,
+            spectral_centroid_hz: 3200.0,
+            high_ratio: 0.7,
+            low_ratio: 0.2,
+            voicing: 0.1,
+            f1_hz: 550.0,
+            f2_hz: 1500.0,
+            spectral_flux: 0.6,
+            sonority: 0.05,
+            vowel_nucleus_likelihood: 0.05,
+        }
     }
 }
