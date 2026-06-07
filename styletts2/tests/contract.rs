@@ -393,12 +393,12 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 #[test]
 fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
     for (input, expected) in [
-        ("I R", "ˈaɪ ˈɑːɹ"),
+        ("I R", "ˈaɪ jˈɑːɹ"),
         (
             "I’ll inspect the current English rule.",
             "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl .",
         ),
-        ("StyleTTS2", "stˈaɪl tˈiː tˈiː ˈɛs tˈuː"),
+        ("StyleTTS2", "stˈaɪl tˈiː tˈiː jˈɛs tˈuː"),
         ("current", "kˈɜːɹənt"),
         ("derived", "dᵻɹˈaɪvd"),
         ("surface", "sˈɜːɹfəs"),

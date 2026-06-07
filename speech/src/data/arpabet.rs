@@ -157,7 +157,9 @@ pub fn phone_id_for_ipa(ipa: &str) -> PhoneId {
 }
 
 pub fn phoneme_id(variant: &str, symbol: &str) -> PhonemeId {
-    PhonemeId(format!("{variant}.phoneme.{symbol}"))
+    let (base, _) = split_stress(symbol);
+    let canonical = entry(base).map(|entry| entry.ipa).unwrap_or(base);
+    PhonemeId(format!("{variant}.phoneme.{canonical}"))
 }
 
 pub fn phone_for_entry(entry: &ArpabetEntry) -> Phone {
@@ -181,6 +183,11 @@ pub fn phoneme_for_entry(variant: &str, entry: &ArpabetEntry) -> Phoneme {
         features: feature_bundle(entry),
         default_phone: Some(phone.clone()),
         possible_phones: vec![phone],
+        aliases: vec![SymbolAlias {
+            system: "arpabet".into(),
+            symbol: entry.symbol.into(),
+        }],
+        allophones: Vec::new(),
         status: SegmentStatus::Core,
     }
 }

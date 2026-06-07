@@ -859,15 +859,18 @@ fn weak_form_rule_applies(
 }
 
 fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciation {
-    let symbols = rule
-        .pronunciation
+    let candidate = if rule.cmudict_pronunciation.is_empty() {
+        rule.pronunciation
+            .iter()
+            .map(|id| CmuPhoneme::parse(phoneme_display_symbol(id)))
+            .collect()
+    } else {
+        rule.cmudict_pronunciation.clone()
+    };
+    let symbols = candidate
         .iter()
-        .map(phoneme_display_symbol)
+        .map(CmuPhoneme::raw_symbol)
         .collect::<Vec<_>>();
-    let candidate = symbols
-        .iter()
-        .map(|symbol| CmuPhoneme::parse(symbol))
-        .collect();
     let method = format!("variant weak form: {}", rule.id.replace('_', " "));
     WordPronunciation {
         candidates: vec![candidate],
@@ -1077,12 +1080,16 @@ fn orthographic_unit_candidate(
         .iter()
         .find(|entry| entry.kind == kind && entry.unit == normalized)
         .map(|entry| {
-            entry
-                .pronunciation
-                .iter()
-                .map(phoneme_display_symbol)
-                .map(CmuPhoneme::parse)
-                .collect()
+            if entry.cmudict_pronunciation.is_empty() {
+                entry
+                    .pronunciation
+                    .iter()
+                    .map(phoneme_display_symbol)
+                    .map(CmuPhoneme::parse)
+                    .collect()
+            } else {
+                entry.cmudict_pronunciation.clone()
+            }
         })
         .unwrap_or_default()
 }
@@ -1304,6 +1311,25 @@ pub fn phoneme_display_symbol(id: &PhonemeId) -> &str {
     id.0.rsplit('.').next().unwrap_or(&id.0)
 }
 
+pub fn phoneme_default_phone_display_symbol(id: &PhonemeId, variant: &VariantId) -> String {
+    let variant = variant_by_code(&variant.0).or_else(|| {
+        id.0.rsplit_once(".phoneme.")
+            .and_then(|(variant_id, _)| variant_by_code(variant_id))
+    });
+    let Some(variant) = variant else {
+        return phoneme_display_symbol(id).to_string();
+    };
+    let Some(default_phone) = variant
+        .phonemes
+        .phonemes
+        .get(id)
+        .and_then(|phoneme| phoneme.default_phone.as_ref())
+    else {
+        return phoneme_display_symbol(id).to_string();
+    };
+    phone_display_symbol(default_phone).to_string()
+}
+
 pub fn phone_display_symbol(id: &PhoneId) -> &str {
     if matches!(id.as_str(), WORD_BOUNDARY_ID | LETTER_BOUNDARY_ID) {
         return "|";
@@ -1340,6 +1366,39 @@ mod tests {
             .collect()
     }
 
+    fn cmudict_symbols(output: &PhonemicizeOutput) -> Vec<String> {
+        output
+            .phonemes
+            .iter()
+            .filter_map(|token| {
+                let base = phoneme_feature_category(token, "phonology.base_symbol")?;
+                let stress = phoneme_feature_category(token, "phonology.stress")
+                    .and_then(cmu_stress_digit)
+                    .unwrap_or_default();
+                Some(format!("{base}{stress}"))
+            })
+            .collect()
+    }
+
+    fn phoneme_feature_category<'a>(token: &'a PhonemeToken, feature_id: &str) -> Option<&'a str> {
+        let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+        match value {
+            Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn cmu_stress_digit(stress: &str) -> Option<&'static str> {
+        match stress {
+            "unstressed" => Some("0"),
+            "primary" => Some("1"),
+            "secondary" => Some("2"),
+            _ => None,
+        }
+    }
+
     fn phone_symbols(output: &PhonemicizeOutput) -> Vec<String> {
         output
             .phones
@@ -1359,6 +1418,10 @@ mod tests {
 
         assert_eq!(
             phoneme_symbols(&output),
+            ["h", "ʌ", "l", "oʊ", "w", "ɝ", "l", "d"]
+        );
+        assert_eq!(
+            cmudict_symbols(&output),
             ["HH", "AH0", "L", "OW1", "W", "ER1", "L", "D"]
         );
         assert_ne!(phoneme_symbols(&output), ["h", "e", "l", "l", "o"]);
@@ -1384,7 +1447,7 @@ mod tests {
             let output = EnglishPhonemicizer
                 .phonemicize(&request(word, "en-US-GA"))
                 .expect("word should phonemicize");
-            assert_eq!(phoneme_symbols(&output), expected, "{word}");
+            assert_eq!(cmudict_symbols(&output), expected, "{word}");
         }
     }
 
@@ -1394,7 +1457,8 @@ mod tests {
             .phonemicize(&request("I’ll", "en-US"))
             .expect("contraction should phonemicize");
 
-        assert_eq!(phoneme_symbols(&output), ["AY1", "L"]);
+        assert_eq!(phoneme_symbols(&output), ["aɪ", "l"]);
+        assert_eq!(cmudict_symbols(&output), ["AY1", "L"]);
         assert!(output.warnings.iter().all(|warning| {
             !matches!(
                 warning.kind,
@@ -1418,7 +1482,7 @@ mod tests {
             .expect("mixed token should phonemicize");
 
         assert_eq!(
-            phoneme_symbols(&output),
+            cmudict_symbols(&output),
             [
                 "S", "P", "IY1", "CH", "T", "AH0", "S", "T", "AY1", "L", "T", "IY1", "T", "IY1",
                 "EH1", "S", "T", "UW1"
@@ -1455,7 +1519,8 @@ mod tests {
         let the_apple = EnglishPhonemicizer
             .phonemicize(&request("the apple", "en-US"))
             .expect("the apple");
-        assert_eq!(&phoneme_symbols(&the_apple)[..2], ["DH", "IY0"]);
+        assert_eq!(&phoneme_symbols(&the_apple)[..2], ["ð", "iː"]);
+        assert_eq!(&cmudict_symbols(&the_apple)[..2], ["DH", "IY0"]);
         assert_eq!(&phone_symbols(&the_apple)[..2], ["ð", "iː"]);
 
         let and_then = EnglishPhonemicizer
@@ -1495,7 +1560,8 @@ mod tests {
         let ir = EnglishPhonemicizer
             .phonemicize(&request("IR", "en-US"))
             .expect("IR");
-        assert_eq!(phoneme_symbols(&ir), ["AY1", "AA1", "R"]);
+        assert_eq!(phoneme_symbols(&ir), ["aɪ", "ɑ", "ɹ"]);
+        assert_eq!(cmudict_symbols(&ir), ["AY1", "AA1", "R"]);
         assert_eq!(phone_symbols(&ir), ["aɪ", "|", "j", "ɑ", "ɹ"]);
         assert!(ir.warnings.iter().any(|warning| {
             warning.kind == PronunciationWarningKind::AcronymExpanded && warning.token == "IR"
@@ -1504,13 +1570,15 @@ mod tests {
         let spaced_ir = EnglishPhonemicizer
             .phonemicize(&request("I R", "en-US"))
             .expect("spaced IR");
-        assert_eq!(phoneme_symbols(&spaced_ir), ["AY1", "AA1", "R"]);
+        assert_eq!(phoneme_symbols(&spaced_ir), ["aɪ", "ɑ", "ɹ"]);
+        assert_eq!(cmudict_symbols(&spaced_ir), ["AY1", "AA1", "R"]);
         assert_eq!(phone_symbols(&spaced_ir), ["aɪ", "|", "j", "ɑ", "ɹ"]);
 
         let paused_ir = EnglishPhonemicizer
             .phonemicize(&request("I, R", "en-US"))
             .expect("paused IR");
-        assert_eq!(phoneme_symbols(&paused_ir), ["AY1", "AA1", "R"]);
+        assert_eq!(phoneme_symbols(&paused_ir), ["aɪ", "ɑ", "ɹ"]);
+        assert_eq!(cmudict_symbols(&paused_ir), ["AY1", "AA1", "R"]);
         assert_eq!(phone_symbols(&paused_ir), ["aɪ", "|", "ɑ", "ɹ"]);
 
         let styletts2 = EnglishPhonemicizer
@@ -1544,7 +1612,7 @@ mod tests {
             .find(|token| {
                 matches!(
                     &token.phoneme,
-                    Spec::Known(id) if phoneme_display_symbol(id) == "T"
+                    Spec::Known(id) if phoneme_display_symbol(id) == "t"
                 )
             })
             .expect("T phoneme");
@@ -1586,7 +1654,7 @@ mod tests {
             .find(|token| {
                 matches!(
                     &token.phoneme,
-                    Spec::Known(id) if phoneme_display_symbol(id) == "T"
+                    Spec::Known(id) if phoneme_display_symbol(id) == "t"
                 )
             })
             .expect("T phoneme");

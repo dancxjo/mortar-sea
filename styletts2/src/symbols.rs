@@ -5,7 +5,7 @@ use serde_json::Value;
 use speech::{
     BoundaryKind, FeatureId, FeatureValue, LinguisticVariant, PauseKind, PhoneInventory,
     PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, Stress, Syllable,
-    TerminalPunctuation, UtterancePlan, epenthetic_phones_after, variant_by_code,
+    TerminalPunctuation, UtterancePlan, data::arpabet, epenthetic_phones_after, variant_by_code,
 };
 use thiserror::Error;
 
@@ -170,7 +170,7 @@ impl SymbolSet {
         for token in tokens {
             if let Some(token_id) = spec_token_id(&token.phoneme) {
                 lowered.push(StyleTts2SymbolToken {
-                    symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)?,
+                    symbol: self.resolve_phoneme_symbol(token_id, token)?,
                     source: StyleTts2SymbolSource::Phoneme,
                 });
             }
@@ -239,7 +239,7 @@ impl SymbolSet {
             }
 
             lowered.push(StyleTts2SymbolToken {
-                symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)?,
+                symbol: self.resolve_phoneme_symbol(token_id, token)?,
                 source: StyleTts2SymbolSource::Phoneme,
             });
             current_word_index = word_index;
@@ -446,6 +446,20 @@ impl SymbolSet {
             token_id: token_id.to_string(),
         })
     }
+
+    fn resolve_phoneme_symbol(
+        &self,
+        token_id: &str,
+        token: &PhonemeToken,
+    ) -> Result<String, SymbolLoweringError> {
+        if let Some(cmu_alias) = cmudict_backend_alias(token)
+            && let Ok(symbol) = self.resolve_symbol(&cmu_alias, StyleTts2SymbolSource::Phoneme)
+        {
+            return Ok(symbol);
+        }
+
+        self.resolve_symbol(token_id, StyleTts2SymbolSource::Phoneme)
+    }
 }
 
 pub fn styletts2_en_us_symbol_set() -> SymbolSet {
@@ -491,6 +505,18 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
             ] {
                 set = set.with_alias(format!("{variant}.phoneme.{symbol}{stress}"), symbol);
             }
+        }
+    }
+    for entry in arpabet::ARPABET {
+        for variant in [
+            "en-US",
+            "en-US-GA",
+            "en-US-singing",
+            "en-GB-RP",
+            "en-GB-ScotE",
+            "en-US-AAE",
+        ] {
+            set = set.with_alias(format!("{variant}.phoneme.{}", entry.ipa), entry.symbol);
         }
     }
     set = set
@@ -589,6 +615,38 @@ fn phoneme_usize_feature(token: &PhonemeToken, feature_id: &str) -> Option<usize
     let value = token.features.values.get(&FeatureId(feature_id.into()))?;
     match value {
         Spec::Known(FeatureValue::Number(index)) if *index >= 0.0 => Some(*index as usize),
+        _ => None,
+    }
+}
+
+fn cmudict_backend_alias(token: &PhonemeToken) -> Option<String> {
+    let source = phoneme_feature_category(token, "phonology.source_schema")?;
+    if source != "cmudict" && source != "arpabet" {
+        return None;
+    }
+    let base = phoneme_feature_category(token, "phonology.base_symbol")?;
+    let stress = phoneme_feature_category(token, "phonology.stress").and_then(stress_digit);
+    Some(format!(
+        "en-US.arpabet.{base}{}",
+        stress.unwrap_or_default()
+    ))
+}
+
+fn phoneme_feature_category<'a>(token: &'a PhonemeToken, feature_id: &str) -> Option<&'a str> {
+    let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn stress_digit(stress: &str) -> Option<&'static str> {
+    match stress {
+        "unstressed" => Some("0"),
+        "primary" => Some("1"),
+        "secondary" => Some("2"),
         _ => None,
     }
 }

@@ -104,6 +104,15 @@ pub fn phoneme_features<'a>(
 }
 
 pub fn token_stress(token: &PhonemeToken) -> Option<Stress> {
+    if let Some((_, stress)) = token_cmu_base_and_stress(token) {
+        return match stress {
+            Some(CmuStress::Primary) => Some(Stress::Primary),
+            Some(CmuStress::Secondary) => Some(Stress::Secondary),
+            Some(CmuStress::Unstressed) => Some(Stress::Unstressed),
+            None => None,
+        };
+    }
+
     let Spec::Known(id) = &token.phoneme else {
         return None;
     };
@@ -499,15 +508,17 @@ fn cmu_stress_from_digit(digit: char) -> Option<CmuStress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::cmudict::CmuPhoneme;
     use crate::data::{arpabet, variant_by_code};
     use crate::ids::VariantId;
     use crate::variant::VariantImplementationStatus;
 
     fn phoneme(variant: &str, symbol: &str) -> PhonemeToken {
+        let cmu = CmuPhoneme::parse(symbol);
         PhonemeToken {
             phoneme: Spec::Known(arpabet::phoneme_id(variant, symbol)),
             span: None,
-            features: FeatureBundle::default(),
+            features: arpabet::cmu_token_features(&cmu),
             realized_as: Vec::new(),
             confidence: 1.0,
             provenance: EvidenceProvenance {

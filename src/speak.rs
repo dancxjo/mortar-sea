@@ -7,7 +7,7 @@ use clap::{Args, ValueEnum};
 use speech::{
     EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
     Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec, UtteranceId,
-    UtterancePlan, VariantId, phone_display_symbol, phoneme_display_symbol,
+    UtterancePlan, VariantId, phone_display_symbol, phoneme_default_phone_display_symbol,
 };
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
@@ -552,7 +552,7 @@ fn format_phonemes(output: &PhonemicizeOutput) -> String {
         .phonemes
         .iter()
         .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_display_symbol(id).to_string()),
+            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variant)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -579,7 +579,7 @@ fn format_phonemes_with_features(output: &PhonemicizeOutput) -> String {
         .iter()
         .filter_map(|token| match &token.phoneme {
             Spec::Known(id) => {
-                let symbol = phoneme_display_symbol(id);
+                let symbol = phoneme_default_phone_display_symbol(id, &output.variant);
                 let stress = token_feature_category(token, "stress");
                 let reduced = token_feature_bool(token, "reduced_vowel");
                 let mut annotations = Vec::new();
@@ -590,7 +590,7 @@ fn format_phonemes_with_features(output: &PhonemicizeOutput) -> String {
                     annotations.push("reduced".into());
                 }
                 if annotations.is_empty() {
-                    Some(symbol.to_string())
+                    Some(symbol)
                 } else {
                     Some(format!("{symbol}({})", annotations.join(",")))
                 }

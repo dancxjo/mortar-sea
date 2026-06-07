@@ -107,11 +107,16 @@ pub fn variant() -> LinguisticVariant {
             },
         );
         let phoneme = Phoneme {
-            id: PhonemeId(format!("eo.phoneme.{}", segment.symbol)),
+            id: PhonemeId(format!("eo.phoneme.{ipa}")),
             notation: format!("/{ipa}/"),
             features: Default::default(),
             default_phone: Some(phone_id.clone()),
             possible_phones: vec![phone_id],
+            aliases: vec![SymbolAlias {
+                system: "esperanto".into(),
+                symbol: segment.symbol.into(),
+            }],
+            allophones: Vec::new(),
             status: SegmentStatus::Core,
         };
         phonemes.insert(phoneme.id.clone(), phoneme);
@@ -206,12 +211,21 @@ mod tests {
         assert!(
             eo.phonemes
                 .phonemes
-                .contains_key(&PhonemeId("eo.phoneme.A".into()))
+                .contains_key(&PhonemeId("eo.phoneme.a".into()))
         );
         assert!(
             eo.phonemes
                 .phonemes
-                .contains_key(&PhonemeId("eo.phoneme.K".into()))
+                .contains_key(&PhonemeId("eo.phoneme.k".into()))
+        );
+        assert!(
+            eo.phonemes
+                .phonemes
+                .get(&PhonemeId("eo.phoneme.a".into()))
+                .expect("a phoneme")
+                .aliases
+                .iter()
+                .any(|alias| alias.system == "esperanto" && alias.symbol == "A")
         );
     }
 }

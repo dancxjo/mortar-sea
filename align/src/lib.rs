@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use speech::{
     EnglishPhonemicizer, FeatureId, FeatureValue, PhoneToken, PhonemeToken, PhonemicizeOutput,
     PhonemicizeRequest, Phonemicizer, PronunciationWarning, Spec, VariantId, phone_display_symbol,
-    phoneme_display_symbol,
+    phoneme_default_phone_display_symbol,
 };
 use tokio::{fs, net::TcpListener};
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -532,7 +532,7 @@ fn alignment_tracks(
             end_ms: timing.end_ms,
             phonemes: word_phonemes
                 .iter()
-                .map(|token| phoneme_label(token))
+                .map(|token| phoneme_label(token, &output.variant))
                 .collect::<Vec<_>>()
                 .join(" "),
             phones: word_phones
@@ -548,7 +548,7 @@ fn alignment_tracks(
             phonemes.push(SegmentAlignment {
                 word_index,
                 index: phoneme_index,
-                label: phoneme_label(phoneme),
+                label: phoneme_label(phoneme, &output.variant),
                 token_id: phoneme_token_id(phoneme),
                 start_ms: span.0,
                 end_ms: span.1,
@@ -773,7 +773,7 @@ fn format_phonemes(output: &PhonemicizeOutput) -> String {
         .phonemes
         .iter()
         .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_display_symbol(id).to_string()),
+            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variant)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -816,18 +816,18 @@ fn format_syllables(output: &PhonemicizeOutput) -> Vec<SyllableSummary> {
         .collect()
 }
 
-fn phoneme_label(token: &PhonemeToken) -> String {
+fn phoneme_label(token: &PhonemeToken, variant: &VariantId) -> String {
     match &token.phoneme {
-        Spec::Known(id) => phoneme_display_symbol(id).to_string(),
+        Spec::Known(id) => phoneme_default_phone_display_symbol(id, variant),
         Spec::Unknown => "?".into(),
         Spec::Unspecified => "_".into(),
         Spec::NotApplicable => "n/a".into(),
         Spec::Variable(values) => values
             .iter()
-            .map(phoneme_display_symbol)
+            .map(|id| phoneme_default_phone_display_symbol(id, variant))
             .collect::<Vec<_>>()
             .join("|"),
-        Spec::Gradient { value, .. } => phoneme_display_symbol(value).to_string(),
+        Spec::Gradient { value, .. } => phoneme_default_phone_display_symbol(value, variant),
     }
 }
 

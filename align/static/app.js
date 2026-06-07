@@ -12,6 +12,8 @@ const state = {
   currentAlignment: null,
   styletts2VoiceDir: 'voices/styletts2',
   audioBuffer: null,
+  spectrogramCanvas: null,
+  spectrogramMeta: null,
   duration: 1,
   zoom: 1,
   viewStart: 0,
@@ -57,7 +59,7 @@ window.addEventListener('DOMContentLoaded', () => {
   ]) {
     elements[id] = document.getElementById(id);
   }
-  for (const id of ['ruler', 'waveform', 'word-track', 'phoneme-track', 'phone-track']) {
+  for (const id of ['ruler', 'waveform', 'spectrogram', 'word-track', 'phoneme-track', 'phone-track']) {
     canvases[id] = document.getElementById(id);
   }
 
@@ -370,10 +372,14 @@ async function loadWaveform(url) {
     const context = new AudioContext();
     state.audioBuffer = await context.decodeAudioData(arrayBuffer.slice(0));
     await context.close();
+    state.spectrogramCanvas = null;
+    state.spectrogramMeta = null;
     state.duration = state.audioBuffer.duration || 1;
     fitTimeline();
   } catch (error) {
     state.audioBuffer = null;
+    state.spectrogramCanvas = null;
+    state.spectrogramMeta = null;
     state.duration = 1;
     setStatus(`Waveform decode failed: ${error.message || error}`, 'error');
     drawAll();
@@ -447,6 +453,7 @@ function drawAll() {
   setupCanvases();
   drawRuler();
   drawWaveform();
+  drawSpectrogram();
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
     color: '#6fd2a4',
     text: '#071b12',
@@ -568,6 +575,164 @@ function drawWaveform() {
     ctx.lineTo(x + 0.5, middle + max * middle * 0.92);
   }
   ctx.stroke();
+}
+
+function drawSpectrogram() {
+  const canvas = canvases.spectrogram;
+  const ctx = clearCanvas(canvas);
+  const width = Math.max(1, canvas.clientWidth);
+  const height = canvas.clientHeight;
+
+  if (!state.audioBuffer) {
+    ctx.fillStyle = '#66727a';
+    ctx.font = '13px Inter, sans-serif';
+    ctx.fillText('Load a WAV to draw the spectrogram', 14, Math.floor(height / 2));
+    return;
+  }
+
+  ensureSpectrogram();
+  if (!state.spectrogramCanvas || !state.spectrogramMeta) {
+    ctx.fillStyle = '#66727a';
+    ctx.font = '13px Inter, sans-serif';
+    ctx.fillText('Spectrogram unavailable', 14, Math.floor(height / 2));
+    return;
+  }
+
+  const sourceWidth = state.spectrogramCanvas.width;
+  const sourceHeight = state.spectrogramCanvas.height;
+  const startX = Math.floor((state.viewStart / state.duration) * sourceWidth);
+  const viewWidth = Math.max(1, Math.ceil((viewDuration() / state.duration) * sourceWidth));
+  ctx.drawImage(
+    state.spectrogramCanvas,
+    clamp(startX, 0, sourceWidth - 1),
+    0,
+    Math.min(viewWidth, sourceWidth - startX),
+    sourceHeight,
+    0,
+    0,
+    width,
+    height,
+  );
+
+  drawGrid(ctx, width, height);
+  ctx.fillStyle = 'rgba(12, 16, 18, 0.72)';
+  ctx.fillRect(7, 7, 86, 20);
+  ctx.fillStyle = '#aab5af';
+  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillText(`0-${Math.round(state.spectrogramMeta.maxHz / 1000)} kHz`, 13, 21);
+}
+
+function ensureSpectrogram() {
+  if (state.spectrogramCanvas || !state.audioBuffer) return;
+  const samples = state.audioBuffer.getChannelData(0);
+  const sampleRate = state.audioBuffer.sampleRate;
+  const fftSize = 512;
+  const hopSize = 128;
+  const maxHz = Math.min(8000, sampleRate / 2);
+  const maxBin = Math.max(1, Math.floor((maxHz / sampleRate) * fftSize));
+  const frameCount = Math.max(1, Math.floor(Math.max(0, samples.length - fftSize) / hopSize) + 1);
+  const height = 192;
+  const offscreen = document.createElement('canvas');
+  offscreen.width = frameCount;
+  offscreen.height = height;
+  const ctx = offscreen.getContext('2d');
+  const image = ctx.createImageData(frameCount, height);
+  const windowValues = hannWindow(fftSize);
+  const re = new Float32Array(fftSize);
+  const im = new Float32Array(fftSize);
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const offset = frame * hopSize;
+    for (let i = 0; i < fftSize; i += 1) {
+      re[i] = (samples[offset + i] || 0) * windowValues[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    for (let y = 0; y < height; y += 1) {
+      const normalizedY = 1 - y / Math.max(1, height - 1);
+      const bin = Math.min(maxBin, Math.max(1, Math.round(normalizedY * maxBin)));
+      const magnitude = Math.sqrt(re[bin] * re[bin] + im[bin] * im[bin]) / fftSize;
+      const db = 20 * Math.log10(magnitude + 1e-7);
+      const intensity = clamp((db + 92) / 72, 0, 1);
+      const [r, g, b] = spectrogramColor(intensity);
+      const index = (y * frameCount + frame) * 4;
+      image.data[index] = r;
+      image.data[index + 1] = g;
+      image.data[index + 2] = b;
+      image.data[index + 3] = 255;
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+  state.spectrogramCanvas = offscreen;
+  state.spectrogramMeta = { maxHz, fftSize, hopSize };
+}
+
+function hannWindow(size) {
+  const values = new Float32Array(size);
+  for (let index = 0; index < size; index += 1) {
+    values[index] = 0.5 * (1 - Math.cos((2 * Math.PI * index) / (size - 1)));
+  }
+  return values;
+}
+
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i += 1) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) {
+      j ^= bit;
+    }
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+
+  for (let len = 2; len <= n; len <<= 1) {
+    const angle = (-2 * Math.PI) / len;
+    const wLenRe = Math.cos(angle);
+    const wLenIm = Math.sin(angle);
+    for (let i = 0; i < n; i += len) {
+      let wRe = 1;
+      let wIm = 0;
+      for (let j = 0; j < len / 2; j += 1) {
+        const uRe = re[i + j];
+        const uIm = im[i + j];
+        const vRe = re[i + j + len / 2] * wRe - im[i + j + len / 2] * wIm;
+        const vIm = re[i + j + len / 2] * wIm + im[i + j + len / 2] * wRe;
+        re[i + j] = uRe + vRe;
+        im[i + j] = uIm + vIm;
+        re[i + j + len / 2] = uRe - vRe;
+        im[i + j + len / 2] = uIm - vIm;
+        const nextWRe = wRe * wLenRe - wIm * wLenIm;
+        wIm = wRe * wLenIm + wIm * wLenRe;
+        wRe = nextWRe;
+      }
+    }
+  }
+}
+
+function spectrogramColor(value) {
+  const stops = [
+    [8, 11, 14],
+    [24, 42, 64],
+    [47, 96, 121],
+    [111, 210, 164],
+    [232, 195, 111],
+    [245, 244, 205],
+  ];
+  const scaled = clamp(value, 0, 1) * (stops.length - 1);
+  const index = Math.floor(scaled);
+  const frac = scaled - index;
+  const left = stops[index];
+  const right = stops[Math.min(stops.length - 1, index + 1)];
+  return [
+    Math.round(left[0] + (right[0] - left[0]) * frac),
+    Math.round(left[1] + (right[1] - left[1]) * frac),
+    Math.round(left[2] + (right[2] - left[2]) * frac),
+  ];
 }
 
 function drawTrack(canvas, segments, options) {

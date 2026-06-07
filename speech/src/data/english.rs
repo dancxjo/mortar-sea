@@ -5,11 +5,12 @@ use crate::acoustics::{
     CueTarget, LandmarkAnchor, RelativeTimeWindow, WeightedCue,
 };
 use crate::data::arpabet::{self, ARPABET};
+use crate::data::cmudict::CmuPhoneme;
 use crate::feature::{FeatureBundle, FeatureSystem, FeatureValue};
-use crate::ids::{AcousticCueId, FeatureId, LanguageId, PhoneId, PhonemeId, VariantId};
+use crate::ids::{AcousticCueId, FeatureId, LanguageId, PhoneId, VariantId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
-use crate::phonology::PhonemeInventory;
+use crate::phonology::{PhonemeAllophone, PhonemeInventory};
 use crate::prosody::{ProsodicContext, Stress};
 use crate::rules::{
     AllophoneRule, EpenthesisRule, PhonePattern, PhonemePattern, PhonotacticConstraint,
@@ -303,6 +304,10 @@ fn orthographic_unit(
             .iter()
             .map(|symbol| arpabet::phoneme_id(variant_id, symbol))
             .collect(),
+        cmudict_pronunciation: symbols
+            .iter()
+            .map(|symbol| CmuPhoneme::parse(symbol))
+            .collect(),
     }
 }
 
@@ -381,7 +386,11 @@ fn weak_form(
         lexical_item: lexical_item.into(),
         pronunciation: symbols
             .iter()
-            .map(|symbol| PhonemeId(format!("{variant_id}.phoneme.{symbol}")))
+            .map(|symbol| arpabet::phoneme_id(variant_id, symbol))
+            .collect(),
+        cmudict_pronunciation: symbols
+            .iter()
+            .map(|symbol| CmuPhoneme::parse(symbol))
             .collect(),
         following,
         style,
@@ -389,15 +398,35 @@ fn weak_form(
 }
 
 fn phoneme_inventory(variant_id: &str) -> PhonemeInventory {
-    PhonemeInventory {
-        phonemes: ARPABET
-            .iter()
-            .map(|entry| {
-                let phoneme = arpabet::phoneme_for_entry(variant_id, entry);
-                (phoneme.id.clone(), phoneme)
-            })
-            .collect(),
+    let mut phonemes = ARPABET
+        .iter()
+        .map(|entry| {
+            let phoneme = arpabet::phoneme_for_entry(variant_id, entry);
+            (phoneme.id.clone(), phoneme)
+        })
+        .collect::<HashMap<_, _>>();
+    for rule in allophone_rules(variant_id) {
+        let Spec::Known(phoneme_id) = &rule.input.phoneme else {
+            continue;
+        };
+        let Spec::Known(phone_id) = &rule.output.phone else {
+            continue;
+        };
+        if let Some(phoneme) = phonemes.get_mut(phoneme_id) {
+            if !phoneme.possible_phones.contains(phone_id) {
+                phoneme.possible_phones.push(phone_id.clone());
+            }
+            phoneme.allophones.push(PhonemeAllophone {
+                phone: phone_id.clone(),
+                environment: rule.environment.clone(),
+                conditions: rule.conditions.clone(),
+                confidence: rule.confidence,
+                status: rule.status.clone(),
+                source_rule_id: Some(rule.id.clone()),
+            });
+        }
     }
+    PhonemeInventory { phonemes }
 }
 
 fn phone_inventory() -> PhoneInventory {
@@ -1047,6 +1076,7 @@ fn phone_symbol(phone: &PhoneId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::PhonemeId;
 
     fn has_cluster(variant: &LinguisticVariant, needle: &str) -> bool {
         variant
@@ -1065,14 +1095,25 @@ mod tests {
     }
 
     #[test]
-    fn ga_inventory_contains_arpabet_phonemes_and_ipa_phones() {
+    fn ga_inventory_contains_canonical_phonemes_and_ipa_phones() {
         let ga = variant("en-US-GA");
         assert!(
             ga.phonemes
                 .phonemes
-                .contains_key(&arpabet::phoneme_id("en-US-GA", "AH"))
+                .contains_key(&PhonemeId("en-US-GA.phoneme.ʌ".into()))
         );
         assert!(ga.phones.phones.contains_key(&PhoneId::from("ipa.phone.ʌ")));
+        let ah = ga
+            .phonemes
+            .phonemes
+            .get(&arpabet::phoneme_id("en-US-GA", "AH"))
+            .expect("AH phoneme decoded to canonical id");
+        assert_eq!(ah.id, PhonemeId("en-US-GA.phoneme.ʌ".into()));
+        assert!(
+            ah.aliases
+                .iter()
+                .any(|alias| alias.system == "arpabet" && alias.symbol == "AH")
+        );
     }
 
     #[test]
@@ -1150,6 +1191,42 @@ mod tests {
         );
         assert_eq!(flapping.environment.word_position, Spec::Unspecified);
         assert_eq!(flapping.environment.prosodic_context, Spec::Unspecified);
+    }
+
+    #[test]
+    fn phonemes_contain_allophones_with_environments() {
+        let ga = variant("en-US-GA");
+        let t = ga
+            .phonemes
+            .phonemes
+            .get(&arpabet::phoneme_id("en-US-GA", "T"))
+            .expect("T phoneme");
+        let tap = t
+            .allophones
+            .iter()
+            .find(|allophone| allophone.phone == TAP)
+            .expect("tap allophone");
+
+        assert!(t.possible_phones.contains(&TAP));
+        assert_eq!(
+            tap.source_rule_id.as_deref(),
+            Some("american_english_intervocalic_flapping")
+        );
+        assert_eq!(tap.status, RuleStatus::StyleDependent);
+        assert_eq!(tap.environment.before.len(), 1);
+        assert_eq!(tap.environment.after.len(), 1);
+        assert!(tap.conditions.contains(&RuleCondition::NotCarefulStyle));
+
+        let n = ga
+            .phonemes
+            .phonemes
+            .get(&arpabet::phoneme_id("en-US-GA", "N"))
+            .expect("N phoneme");
+        assert!(
+            n.allophones
+                .iter()
+                .any(|allophone| allophone.phone == NG && allophone.environment.after.len() == 1)
+        );
     }
 
     #[test]
