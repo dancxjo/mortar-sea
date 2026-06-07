@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
 #[cfg(test)]
 use mortar_sea::voice_stream::parse_voice_stream;
+#[cfg(test)]
 use mortar_sea::voice_stream::{BreathGroup, SpeechBoundary, VoiceStreamEvent, VoiceStreamParser};
 use psyche::{ChatMessage, ContextFrame, DEFAULT_CONTEXT_FRAME_ITEMS, GenerationRequest};
 use serde_json::json;
@@ -30,6 +31,7 @@ const RECENT_EXPERIENCE_LIMIT: usize = 12;
 const RECENT_FINALIZED_ASR_LIMIT: usize = 24;
 const RECENT_THOUGHT_LIMIT: usize = 10;
 const RECENT_VOICE_TURN_LIMIT: usize = 4;
+const RECENT_VOICE_CONVERSATION_LIMIT: usize = 24;
 const RECENT_SPEECH_FEEDBACK_LIMIT: usize = 16;
 const VOICE_TURN_MAX_CHARS: usize = 1_600;
 const VOICE_OBSERVATION_CONFIDENCE: f32 = 0.62;
@@ -39,6 +41,7 @@ const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
+const DIALOGUE_VOICE_MAX_TOKENS_PER_TURN: usize = 96;
 const VOICE_FALLBACK_INTERNAL_OBSERVATION: &str = "I notice I am here with the present moment.";
 
 static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
@@ -172,12 +175,6 @@ fn drop_stale_piper_worker(worker_id: Uuid) {
     }
 }
 
-pub(crate) fn spawn_voice(state: AppState) {
-    tokio::spawn(async move {
-        run_voice(state).await;
-    });
-}
-
 pub(crate) fn accept_mouth_event(state: &AppState, event: VoiceMouthEvent) {
     let realtime_event = match &event {
         VoiceMouthEvent::VoiceSpeechStarted {
@@ -226,8 +223,6 @@ pub(crate) fn accept_mouth_event(state: &AppState, event: VoiceMouthEvent) {
 struct ActiveVoiceGeneration {
     generation_id: Uuid,
     control: LlmStreamControl,
-    voice_stream: VoiceStreamParser,
-    pending_breath_groups: VecDeque<BreathGroup>,
     experience_ids: Vec<Uuid>,
     completed: bool,
 }
@@ -275,16 +270,42 @@ struct VoiceSpeechFeedback {
     reason: Option<String>,
 }
 
-async fn run_voice(state: AppState) {
+#[derive(Debug, Clone)]
+struct VoiceConversationTurn {
+    role: VoiceConversationRole,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceConversationRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum VoiceReply {
+    Spoken(String),
+    Thought(String),
+}
+
+pub(crate) fn spawn_voice(state: AppState) {
+    let commentator_state = state.clone();
+    tokio::spawn(async move {
+        run_commentator(commentator_state).await;
+    });
+    tokio::spawn(async move {
+        run_voice(state).await;
+    });
+}
+
+async fn run_commentator(state: AppState) {
     let mut experience_events = state.realtime_experience_events.subscribe();
-    let mut mouth_events = state.voice_mouth_events.subscribe();
     let (generation_tx, mut generation_rx) = mpsc::unbounded_channel();
     let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
     let mut recent_finalized_asr = VecDeque::<FinalizedAsrUpdate>::new();
     let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
     let mut recent_voice_turns = VecDeque::<String>::new();
-    let mut recent_speech_feedback = VecDeque::<VoiceSpeechFeedback>::new();
-    let mut pending_speech = None::<PendingVoiceSpeech>;
+    let recent_speech_feedback = VecDeque::<VoiceSpeechFeedback>::new();
     let mut last_experience_signature = None::<String>;
     sync_recent_experiences_from_state(
         &state,
@@ -301,72 +322,16 @@ async fn run_voice(state: AppState) {
         &recent_voice_turns,
         &recent_speech_feedback,
     ));
-    let mut mouth_feedback_watchdog = interval(VOICE_MOUTH_FEEDBACK_POLL_INTERVAL);
-    mouth_feedback_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    mouth_feedback_watchdog.tick().await;
 
-    info!("inner monologue Voice observer started");
+    info!("Commentator observer started");
 
     loop {
         tokio::select! {
-            _ = mouth_feedback_watchdog.tick() => {
-                if let Some(pending) = pending_speech.as_mut() {
-                    if pending.playback_started_at.is_none()
-                        && !pending.audio_timeout_reported
-                        && pending.drafted_at.elapsed() >= VOICE_SPEECH_AUDIO_TIMEOUT
-                    {
-                        pending.audio_timeout_reported = true;
-                        warn!(
-                            utterance_id = %pending.observation.id,
-                            generation_id = %pending.generation_id,
-                            timeout_ms = VOICE_SPEECH_AUDIO_TIMEOUT.as_millis(),
-                            "Mouth audio synthesis timeout; interrupting stale pending speech"
-                        );
-                        accept_mouth_event(
-                            &state,
-                            VoiceMouthEvent::VoiceSpeechInterrupted {
-                                utterance_id: pending.observation.id,
-                                generation_id: pending.generation_id,
-                                observed_at: chrono::Utc::now(),
-                                text: pending.observation.text.clone(),
-                                reason: format!(
-                                    "Mouth audio synthesis timeout after {} ms",
-                                    VOICE_SPEECH_AUDIO_TIMEOUT.as_millis()
-                                ),
-                            },
-                        );
-                    } else if let Some(playback_started_at) = pending.playback_started_at
-                        && !pending.feedback_timeout_reported
-                        && playback_started_at.elapsed() >= VOICE_MOUTH_FEEDBACK_TIMEOUT
-                    {
-                        pending.feedback_timeout_reported = true;
-                        warn!(
-                            utterance_id = %pending.observation.id,
-                            generation_id = %pending.generation_id,
-                            timeout_ms = VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis(),
-                            "Mouth feedback timeout; interrupting stale pending speech"
-                        );
-                        accept_mouth_event(
-                            &state,
-                            VoiceMouthEvent::VoiceSpeechInterrupted {
-                                utterance_id: pending.observation.id,
-                                generation_id: pending.generation_id,
-                                observed_at: chrono::Utc::now(),
-                                text: pending.observation.text.clone(),
-                                reason: format!(
-                                    "Mouth feedback timeout after {} ms",
-                                    VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis()
-                                ),
-                            },
-                        );
-                    }
-                }
-            }
             event = experience_events.recv() => {
                 let event = match event {
                     Ok(event) => event,
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        debug!(skipped, "Voice lagged behind real-time Experience events");
+                        debug!(skipped, "Commentator lagged behind real-time Experience events");
                         let recovered = sync_recent_experiences_from_state(
                             &state,
                             &mut recent_experiences,
@@ -398,7 +363,7 @@ async fn run_voice(state: AppState) {
                             let experience = std::slice::from_ref(&experience);
                             remember_voice_experience_ids(current, experience);
                             append_live_voice_experiences(current, experience);
-                        } else if pending_speech.is_none() {
+                        } else {
                             sync_recent_experiences_from_state(
                                 &state,
                                 &mut recent_experiences,
@@ -440,7 +405,7 @@ async fn run_voice(state: AppState) {
                             continue;
                         }
 
-                        if active.is_none() && pending_speech.is_none() {
+                        if active.is_none() {
                             active = Some(start_voice_generation(
                                 &state,
                                 &generation_tx,
@@ -475,16 +440,6 @@ async fn run_voice(state: AppState) {
                                 text: text.clone(),
                             },
                         );
-                        collect_voice_stream_events(
-                            current.generation_id,
-                            current.voice_stream.push_chunk(&text),
-                            &mut current.pending_breath_groups,
-                        );
-                        if pending_speech.is_none() {
-                            if let Some(draft) = draft_next_voice_speech(&state, current) {
-                                pending_speech = Some(draft);
-                            }
-                        }
                     }
                     VoiceGenerationEvent::Done { generation_id, result } => {
                         let Some(mut current) = active.take() else {
@@ -507,31 +462,24 @@ async fn run_voice(state: AppState) {
                                             text: token.clone(),
                                         },
                                     );
-                                    collect_voice_stream_events(
-                                        current.generation_id,
-                                        current.voice_stream.push_chunk(&token),
-                                        &mut current.pending_breath_groups,
-                                    );
                                 }
                                 remember_recent_voice_turn(
                                     &mut recent_voice_turns,
                                     completed_turn.clone(),
                                 );
-                                collect_voice_stream_events(
-                                    current.generation_id,
-                                    current.voice_stream.finish(),
-                                    &mut current.pending_breath_groups,
+                                commit_internal_voice_observation(
+                                    &state,
+                                    generation_id,
+                                    &completed_turn,
+                                    &current.experience_ids,
+                                    "commentator.internal_thought",
+                                    "Commentator",
+                                    "I think",
+                                    &mut recent_thoughts,
                                 );
-                                if pending_speech.is_none() {
-                                    if let Some(draft) =
-                                        draft_next_voice_speech(&state, &mut current)
-                                    {
-                                        pending_speech = Some(draft);
-                                    }
-                                }
                             }
                             Err(err) if err.to_string().contains("cancelled") => {}
-                            Err(err) => warn!(%err, "Voice generation failed"),
+                            Err(err) => warn!(%err, "Commentator generation failed"),
                         }
                         current.completed = true;
                         let _ = state
@@ -540,25 +488,262 @@ async fn run_voice(state: AppState) {
                                 generation_id,
                             });
 
-                        if pending_speech.is_none() {
-                            sleep(VOICE_RESTART_DELAY).await;
-                            sync_recent_experiences_from_state(
-                                &state,
-                                &mut recent_experiences,
-                                &mut last_experience_signature,
+                        sleep(VOICE_RESTART_DELAY).await;
+                        sync_recent_experiences_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            &mut last_experience_signature,
+                        );
+                        sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
+                        active = Some(start_voice_generation(
+                            &state,
+                            &generation_tx,
+                            &recent_experiences,
+                            &recent_finalized_asr,
+                            &recent_thoughts,
+                            &recent_voice_turns,
+                            &recent_speech_feedback,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_voice(state: AppState) {
+    let mut experience_events = state.realtime_experience_events.subscribe();
+    let mut mouth_events = state.voice_mouth_events.subscribe();
+    let (generation_tx, mut generation_rx) = mpsc::unbounded_channel();
+    let mut recent_experiences = VecDeque::<ExperienceRecord>::new();
+    let mut recent_finalized_asr = VecDeque::<FinalizedAsrUpdate>::new();
+    let mut recent_thoughts = VecDeque::<VoiceObservation>::new();
+    let mut conversation = VecDeque::<VoiceConversationTurn>::new();
+    let mut recent_speech_feedback = VecDeque::<VoiceSpeechFeedback>::new();
+    let mut pending_speech = None::<PendingVoiceSpeech>;
+    let mut active_generation_id = None::<Uuid>;
+    let mut active_experience_ids = Vec::<Uuid>::new();
+    let mut last_experience_signature = None::<String>;
+    sync_recent_experiences_from_state(
+        &state,
+        &mut recent_experiences,
+        &mut last_experience_signature,
+    );
+    for update in sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr) {
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: update.text,
+            },
+        );
+    }
+
+    let mut mouth_feedback_watchdog = interval(VOICE_MOUTH_FEEDBACK_POLL_INTERVAL);
+    mouth_feedback_watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    mouth_feedback_watchdog.tick().await;
+
+    info!("turn-taking Voice speaker started");
+
+    loop {
+        tokio::select! {
+            _ = mouth_feedback_watchdog.tick() => {
+                if let Some(pending) = pending_speech.as_mut() {
+                    if pending.playback_started_at.is_none()
+                        && !pending.audio_timeout_reported
+                        && pending.drafted_at.elapsed() >= VOICE_SPEECH_AUDIO_TIMEOUT
+                    {
+                        pending.audio_timeout_reported = true;
+                        warn!(
+                            utterance_id = %pending.observation.id,
+                            generation_id = %pending.generation_id,
+                            timeout_ms = VOICE_SPEECH_AUDIO_TIMEOUT.as_millis(),
+                            "Mouth audio synthesis timeout; interrupting stale pending Voice speech"
+                        );
+                        accept_mouth_event(
+                            &state,
+                            VoiceMouthEvent::VoiceSpeechInterrupted {
+                                utterance_id: pending.observation.id,
+                                generation_id: pending.generation_id,
+                                observed_at: chrono::Utc::now(),
+                                text: pending.observation.text.clone(),
+                                reason: format!(
+                                    "Mouth audio synthesis timeout after {} ms",
+                                    VOICE_SPEECH_AUDIO_TIMEOUT.as_millis()
+                                ),
+                            },
+                        );
+                    } else if let Some(playback_started_at) = pending.playback_started_at
+                        && !pending.feedback_timeout_reported
+                        && playback_started_at.elapsed() >= VOICE_MOUTH_FEEDBACK_TIMEOUT
+                    {
+                        pending.feedback_timeout_reported = true;
+                        warn!(
+                            utterance_id = %pending.observation.id,
+                            generation_id = %pending.generation_id,
+                            timeout_ms = VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis(),
+                            "Mouth feedback timeout; interrupting stale pending Voice speech"
+                        );
+                        accept_mouth_event(
+                            &state,
+                            VoiceMouthEvent::VoiceSpeechInterrupted {
+                                utterance_id: pending.observation.id,
+                                generation_id: pending.generation_id,
+                                observed_at: chrono::Utc::now(),
+                                text: pending.observation.text.clone(),
+                                reason: format!(
+                                    "Mouth feedback timeout after {} ms",
+                                    VOICE_MOUTH_FEEDBACK_TIMEOUT.as_millis()
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+            event = experience_events.recv() => {
+                let event = match event {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        debug!(skipped, "Voice lagged behind real-time Experience events");
+                        sync_recent_experiences_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            &mut last_experience_signature,
+                        );
+                        for update in sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr) {
+                            remember_voice_conversation_turn(
+                                &mut conversation,
+                                VoiceConversationTurn {
+                                    role: VoiceConversationRole::User,
+                                    text: update.text,
+                                },
                             );
-                            sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
-                            active = Some(start_voice_generation(
+                        }
+                        if active_generation_id.is_none() && pending_speech.is_none() && voice_conversation_needs_response(&conversation) {
+                            let (generation_id, experience_ids) = start_dialogue_voice_generation(
                                 &state,
                                 &generation_tx,
                                 &recent_experiences,
-                                &recent_finalized_asr,
                                 &recent_thoughts,
-                                &recent_voice_turns,
+                                &conversation,
                                 &recent_speech_feedback,
-                            ));
-                        } else {
-                            active = Some(current);
+                            );
+                            active_generation_id = Some(generation_id);
+                            active_experience_ids = experience_ids;
+                        }
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+
+                match event {
+                    RealTimeExperienceEvent::Experience { experience, .. } => {
+                        let _ = remember_recent_experience_from_state(
+                            &state,
+                            &mut recent_experiences,
+                            experience,
+                            &mut last_experience_signature,
+                        );
+                    }
+                    RealTimeExperienceEvent::AsrTranscript {
+                        observed_at,
+                        text,
+                        sequence_start,
+                        sequence_end,
+                        is_final: true,
+                        sentence_index,
+                        sentence_count,
+                    } => {
+                        let update = FinalizedAsrUpdate {
+                            observed_at,
+                            text,
+                            sequence_start,
+                            sequence_end,
+                            sentence_index,
+                            sentence_count,
+                        };
+                        if remember_recent_finalized_asr_update(&mut recent_finalized_asr, update.clone()) {
+                            remember_voice_conversation_turn(
+                                &mut conversation,
+                                VoiceConversationTurn {
+                                    role: VoiceConversationRole::User,
+                                    text: update.text,
+                                },
+                            );
+                        }
+
+                        if active_generation_id.is_none() && pending_speech.is_none() {
+                            let (generation_id, experience_ids) = start_dialogue_voice_generation(
+                                &state,
+                                &generation_tx,
+                                &recent_experiences,
+                                &recent_thoughts,
+                                &conversation,
+                                &recent_speech_feedback,
+                            );
+                            active_generation_id = Some(generation_id);
+                            active_experience_ids = experience_ids;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            generation_event = generation_rx.recv() => {
+                let Some(generation_event) = generation_event else {
+                    break;
+                };
+
+                match generation_event {
+                    VoiceGenerationEvent::Token { generation_id, text } => {
+                        if active_generation_id != Some(generation_id) {
+                            continue;
+                        }
+                        let _ = state.realtime_experience_events.send(
+                            RealTimeExperienceEvent::VoiceResponseToken {
+                                generation_id,
+                                text,
+                            },
+                        );
+                    }
+                    VoiceGenerationEvent::Done { generation_id, result } => {
+                        if active_generation_id != Some(generation_id) {
+                            continue;
+                        }
+                        active_generation_id = None;
+                        let _ = state
+                            .realtime_experience_events
+                            .send(RealTimeExperienceEvent::VoiceResponseDone {
+                                generation_id,
+                            });
+
+                        match result {
+                            Ok(generated) => match voice_reply_from_generated(&generated) {
+                                Some(VoiceReply::Spoken(text)) => {
+                                    if let Some(draft) = draft_voice_speech_from_text(
+                                        &state,
+                                        generation_id,
+                                        text,
+                                        &active_experience_ids,
+                                    ) {
+                                        pending_speech = Some(draft);
+                                    }
+                                }
+                                Some(VoiceReply::Thought(text)) => {
+                                    commit_internal_voice_observation(
+                                        &state,
+                                        generation_id,
+                                        &text,
+                                        &active_experience_ids,
+                                        "voice.internal_thought",
+                                        "Voice",
+                                        "I think",
+                                        &mut recent_thoughts,
+                                    );
+                                }
+                                None => {}
+                            },
+                            Err(err) if err.to_string().contains("cancelled") => {}
+                            Err(err) => warn!(%err, "Voice generation failed"),
                         }
                     }
                 }
@@ -573,16 +758,17 @@ async fn run_voice(state: AppState) {
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
 
-                handle_voice_mouth_event(
+                handle_dialogue_voice_mouth_event(
                     &state,
                     event,
-                    &mut active,
                     &generation_tx,
+                    &mut active_generation_id,
+                    &mut active_experience_ids,
                     &mut pending_speech,
                     &mut recent_experiences,
                     &mut recent_finalized_asr,
                     &mut recent_thoughts,
-                    &recent_voice_turns,
+                    &mut conversation,
                     &mut recent_speech_feedback,
                     &mut last_experience_signature,
                 ).await;
@@ -809,16 +995,17 @@ fn finalized_asr_update_from_clip(clip: AudioSentenceClipRecord) -> Option<Final
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_voice_mouth_event(
+async fn handle_dialogue_voice_mouth_event(
     state: &AppState,
     event: VoiceMouthEvent,
-    active: &mut Option<ActiveVoiceGeneration>,
     generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
+    active_generation_id: &mut Option<Uuid>,
+    active_experience_ids: &mut Vec<Uuid>,
     pending_speech: &mut Option<PendingVoiceSpeech>,
     recent_experiences: &mut VecDeque<ExperienceRecord>,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &mut VecDeque<VoiceObservation>,
-    recent_voice_turns: &VecDeque<String>,
+    conversation: &mut VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &mut VecDeque<VoiceSpeechFeedback>,
     last_experience_signature: &mut Option<String>,
 ) {
@@ -835,11 +1022,6 @@ async fn handle_voice_mouth_event(
             if let Some(pending) = pending_speech.as_mut() {
                 pending.playback_started_at = Some(Instant::now());
                 pending.feedback_timeout_reported = false;
-            }
-            if let Some(current) = active.as_ref()
-                && current.generation_id == generation_id
-            {
-                current.control.pause();
             }
             remember_speech_feedback(
                 recent_speech_feedback,
@@ -904,16 +1086,25 @@ async fn handle_voice_mouth_event(
                 duration_ms,
                 None,
             );
+            let spoken_text = pending.observation.text.clone();
             commit_spoken_voice_observation(state, pending, recent_thoughts);
-            resume_or_restart_voice_generation(
+            remember_voice_conversation_turn(
+                conversation,
+                VoiceConversationTurn {
+                    role: VoiceConversationRole::Assistant,
+                    text: spoken_text,
+                },
+            );
+            maybe_start_dialogue_voice_after_mouth(
                 state,
-                active,
                 generation_tx,
+                active_generation_id,
+                active_experience_ids,
                 pending_speech,
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
-                recent_voice_turns,
+                conversation,
                 recent_speech_feedback,
                 last_experience_signature,
             )
@@ -958,21 +1149,58 @@ async fn handle_voice_mouth_event(
                 Some(&reason),
             );
             crate::realtime_experience::spawn_trace(state.clone());
-            resume_or_restart_voice_generation(
+            maybe_start_dialogue_voice_after_mouth(
                 state,
-                active,
                 generation_tx,
+                active_generation_id,
+                active_experience_ids,
                 pending_speech,
                 recent_experiences,
                 recent_finalized_asr,
                 recent_thoughts,
-                recent_voice_turns,
+                conversation,
                 recent_speech_feedback,
                 last_experience_signature,
             )
             .await;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn maybe_start_dialogue_voice_after_mouth(
+    state: &AppState,
+    generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
+    active_generation_id: &mut Option<Uuid>,
+    active_experience_ids: &mut Vec<Uuid>,
+    pending_speech: &Option<PendingVoiceSpeech>,
+    recent_experiences: &mut VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    conversation: &VecDeque<VoiceConversationTurn>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+    last_experience_signature: &mut Option<String>,
+) {
+    sync_recent_experiences_from_state(state, recent_experiences, last_experience_signature);
+    sync_recent_finalized_asr_from_state(state, recent_finalized_asr);
+    if active_generation_id.is_some()
+        || pending_speech.is_some()
+        || !voice_conversation_needs_response(conversation)
+    {
+        return;
+    }
+
+    sleep(VOICE_RESTART_DELAY).await;
+    let (generation_id, experience_ids) = start_dialogue_voice_generation(
+        state,
+        generation_tx,
+        recent_experiences,
+        recent_thoughts,
+        conversation,
+        recent_speech_feedback,
+    );
+    *active_generation_id = Some(generation_id);
+    *active_experience_ids = experience_ids;
 }
 
 fn pending_matches(
@@ -985,6 +1213,7 @@ fn pending_matches(
     })
 }
 
+#[cfg(test)]
 fn collect_voice_stream_events(
     generation_id: Uuid,
     events: Vec<VoiceStreamEvent>,
@@ -1007,32 +1236,13 @@ fn collect_voice_stream_events(
     }
 }
 
-fn draft_next_voice_speech(
-    state: &AppState,
-    current: &mut ActiveVoiceGeneration,
-) -> Option<PendingVoiceSpeech> {
-    while let Some(group) = current.pending_breath_groups.pop_front() {
-        if let Some(draft) =
-            draft_voice_speech(state, current.generation_id, group, &current.experience_ids)
-        {
-            return Some(draft);
-        }
-    }
-
-    None
-}
-
-fn draft_voice_speech(
+fn draft_voice_speech_from_text(
     state: &AppState,
     generation_id: Uuid,
-    group: BreathGroup,
+    text: String,
     experience_ids: &[Uuid],
 ) -> Option<PendingVoiceSpeech> {
-    let (fallback_boundary, fallback_tone, fallback_pace) = speech_hints_for_text(&group.text);
-    let boundary = speech_boundary_hint(&group.boundary).or(fallback_boundary);
-    let tone = group.tone.clone().or(fallback_tone);
-    let pace = group.pace.clone().or(fallback_pace);
-    let thought = parse_voice_thought(&group.text)?;
+    let thought = voice_observation_text(&text)?;
     let observed_at = chrono::Utc::now();
     let observation = VoiceObservation {
         id: Uuid::new_v4(),
@@ -1048,7 +1258,7 @@ fn draft_voice_speech(
         utterance_id = %observation.id,
         %generation_id,
         text = %thought.text,
-        "Mouth accepted Voice <say> breath group"
+        "Mouth accepted Voice response"
     );
     let _ = state
         .realtime_experience_events
@@ -1058,10 +1268,12 @@ fn draft_voice_speech(
             observed_at,
             text: thought.text.clone(),
             emoji: thought.emoji.clone(),
-            boundary,
-            tone,
-            pace,
+            boundary: Some("sentence".to_string()),
+            tone: None,
+            pace: Some("medium".to_string()),
         });
+    record_queued_voice_sensation_and_impression(state, generation_id, &observation);
+    crate::realtime_experience::spawn_trace(state.clone());
     synthesize_voice_speech_audio(state, generation_id, observation.id, thought.text.clone());
 
     Some(PendingVoiceSpeech {
@@ -1335,33 +1547,6 @@ fn wav_artifact_from_path(path: &Path) -> anyhow::Result<SpeechSynthesisArtifact
     })
 }
 
-fn speech_boundary_hint(boundary: &SpeechBoundary) -> Option<String> {
-    match boundary {
-        SpeechBoundary::Continuing | SpeechBoundary::Final | SpeechBoundary::Interrupted => {
-            Some(boundary.as_attr_value().to_string())
-        }
-        SpeechBoundary::Unknown(value) if !value.trim().is_empty() => Some(value.clone()),
-        SpeechBoundary::Unknown(_) => None,
-    }
-}
-
-fn speech_hints_for_text(text: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let trimmed = text.trim_end();
-    let tone = if trimmed.ends_with('?') {
-        "questioning"
-    } else if trimmed.ends_with('!') {
-        "emphatic"
-    } else {
-        "thoughtful"
-    };
-
-    (
-        Some("sentence".to_string()),
-        Some(tone.to_string()),
-        Some("medium".to_string()),
-    )
-}
-
 fn remember_speech_feedback(
     recent_speech_feedback: &mut VecDeque<VoiceSpeechFeedback>,
     feedback: VoiceSpeechFeedback,
@@ -1371,49 +1556,6 @@ fn remember_speech_feedback(
         feedback,
         RECENT_SPEECH_FEEDBACK_LIMIT,
     );
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn resume_or_restart_voice_generation(
-    state: &AppState,
-    active: &mut Option<ActiveVoiceGeneration>,
-    generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
-    pending_speech: &mut Option<PendingVoiceSpeech>,
-    recent_experiences: &mut VecDeque<ExperienceRecord>,
-    recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
-    recent_thoughts: &VecDeque<VoiceObservation>,
-    recent_voice_turns: &VecDeque<String>,
-    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
-    last_experience_signature: &mut Option<String>,
-) {
-    sync_recent_experiences_from_state(state, recent_experiences, last_experience_signature);
-    sync_recent_finalized_asr_from_state(state, recent_finalized_asr);
-
-    if let Some(current) = active.as_mut() {
-        if pending_speech.is_none() {
-            if let Some(draft) = draft_next_voice_speech(state, current) {
-                *pending_speech = Some(draft);
-                return;
-            }
-        }
-        if current.completed {
-            *active = None;
-        } else {
-            current.control.resume();
-            return;
-        }
-    }
-
-    sleep(VOICE_RESTART_DELAY).await;
-    *active = Some(start_voice_generation(
-        state,
-        generation_tx,
-        recent_experiences,
-        recent_finalized_asr,
-        recent_thoughts,
-        recent_voice_turns,
-        recent_speech_feedback,
-    ));
 }
 
 fn start_voice_generation(
@@ -1456,7 +1598,69 @@ fn start_voice_generation(
     tokio::spawn(async move {
         let token_tx = tx.clone();
         let result = scheduler
-            .stream_controlled(LlmJobKind::Voice, request, control_for_task, move |text| {
+            .stream_controlled(
+                LlmJobKind::Commentator,
+                request,
+                control_for_task,
+                move |text| {
+                    let _ = token_tx.send(VoiceGenerationEvent::Token {
+                        generation_id,
+                        text,
+                    });
+                },
+            )
+            .await;
+        let _ = tx.send(VoiceGenerationEvent::Done {
+            generation_id,
+            result,
+        });
+    });
+
+    ActiveVoiceGeneration {
+        generation_id,
+        control,
+        experience_ids,
+        completed: false,
+    }
+}
+
+fn start_dialogue_voice_generation(
+    state: &AppState,
+    generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
+    recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    conversation: &VecDeque<VoiceConversationTurn>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+) -> (Uuid, Vec<Uuid>) {
+    let generation_id = Uuid::new_v4();
+    let experience_ids = recent_experiences
+        .iter()
+        .map(|experience| experience.id)
+        .collect::<Vec<_>>();
+    let request = GenerationRequest {
+        prompt: String::new(),
+        messages: build_dialogue_voice_messages(
+            recent_experiences,
+            recent_thoughts,
+            conversation,
+            recent_speech_feedback,
+        ),
+        images: Vec::new(),
+        max_tokens: Some(DIALOGUE_VOICE_MAX_TOKENS_PER_TURN),
+        stop: voice_llm_stop_markers(),
+    };
+
+    let scheduler = state
+        .voice_llm_scheduler
+        .clone()
+        .unwrap_or_else(|| state.llm_scheduler.clone());
+    let events = state.realtime_experience_events.clone();
+    let tx = generation_tx.clone();
+    let _ = events.send(RealTimeExperienceEvent::VoiceResponseStart { generation_id });
+    tokio::spawn(async move {
+        let token_tx = tx.clone();
+        let result = scheduler
+            .stream(LlmJobKind::Voice, request, move |text| {
                 let _ = token_tx.send(VoiceGenerationEvent::Token {
                     generation_id,
                     text,
@@ -1469,30 +1673,22 @@ fn start_voice_generation(
         });
     });
 
-    ActiveVoiceGeneration {
-        generation_id,
-        control,
-        voice_stream: VoiceStreamParser::default(),
-        pending_breath_groups: VecDeque::new(),
-        experience_ids,
-        completed: false,
-    }
+    (generation_id, experience_ids)
 }
 
 fn voice_system_prompt() -> &'static str {
-    "You are the continuous Voice of Pete Mortar-Sea: a first-person embodied verbal stream. \
-     Your words are handed to Mouth one minimal spoken sentence at a time, and generation may pause while Mouth is physically speaking that sentence. \
+    "You are the Commentator of Pete Mortar-Sea: a continuous first-person observer inside the embodied system. \
      Do not address an unseen or hypothetical human, use tools, execute functions, or write JSON. \
      You have no ability to execute functions or take actions, so do not pretend that you can. \
-     Only make observations about known experience, inner feeling, uncertainty, and passing thoughts. \
+     Your only job is to constantly comment on the current situation, from the system's own first-person point of view, and try to figure out what is going on. \
      Write from the embodied system's own perspective using I, me, and my. \
      Move at about human spoken pace, or only slightly faster, with short plain sentences. \
-     If current real-world experience says someone is visible or present, your spoken <say> output is probably addressed to that person unless later evidence says otherwise. \
      You may end any sentence with one emoji; when you emit an emoji, it becomes your visible face in the real world. \
      Use that face to express your current attitude, choosing an emoji that matches what you feel, notice, or suspect right now. \
      Preserve uncertainty and keep the thought moving as a continuous stream of consciousness. \
      Emit at least one short observation as ordinary text every turn, even when you do not speak aloud. \
-     When there is nothing useful to say aloud, contemplate your present situation, your surroundings, life in general, or your own existence. \
+     Never use <say> tags; Commentator is not allowed to speak out loud. \
+     When there is nothing obvious to comment on, contemplate the present situation, your surroundings, life in general, or your own existence. \
      Treat only the structured real-world context in this conversation as external fact. \
      Do not invent new external events, people, objects, or intentions. \
      You may daydream, associate, or explore an idea, but keep imagined material distinct from what is actually known. \
@@ -1501,15 +1697,10 @@ fn voice_system_prompt() -> &'static str {
 }
 
 fn voice_mouth_guidance_prompt() -> &'static str {
-    "\n\nMOUTH GUIDANCE:\n\
-    To speak aloud through Mouth, wrap one short speakable sentence in <say>...</say>. \
-     Text outside <say> stays internal and will not be spoken aloud. \
-     Use <say> only when there is a genuine sentence that should be heard out loud; if there is nothing useful to say aloud right now, keep the stream internal and omit <say>. \
-     To close Mouth for that spoken unit, end the sentence inside <say> with clear terminal punctuation before </say>. \
-     If you want an emoji to become the visible face for that spoken thought, put the emoji inside <say> just before </say>. \
-     The system will synthesize that sentence with Piper, open the on-face Mouth while audio plays, close it when playback finishes or is interrupted, and include Mouth feedback in later structured context. \
-     Do not write Mouth feedback, tool calls, or stage directions; the runtime supplies Mouth feedback separately. \
-     Use <say> only for the exact words to be spoken aloud.\n"
+    "\n\nCOMMENTATOR OUTPUT:\n\
+     Write only internal first-person commentary. \
+     Do not use <say>, do not write stage directions, and do not try to control Mouth. \
+     These thoughts are reported to the Wits as internal observations.\n"
 }
 
 fn build_voice_messages(
@@ -1523,32 +1714,159 @@ fn build_voice_messages(
     system.push_str(voice_system_prompt());
     system.push_str(voice_mouth_guidance_prompt());
 
-    let mut messages = vec![
-        ChatMessage::new("system", system),
-        ChatMessage::new(
-            "user",
-            build_voice_context_prompt(
-                recent_experiences,
-                recent_finalized_asr,
-                recent_thoughts,
-                recent_speech_feedback,
-            ),
+    let mut messages = Vec::new();
+    append_chat_message(&mut messages, "system", system);
+    append_chat_message(
+        &mut messages,
+        "user",
+        build_voice_context_prompt(
+            recent_experiences,
+            recent_finalized_asr,
+            recent_thoughts,
+            recent_speech_feedback,
         ),
-    ];
+    );
 
     for turn in recent_voice_turns {
         let mut turn = turn.trim().to_string();
         trim_to_last_chars(&mut turn, VOICE_TURN_MAX_CHARS);
-        if !turn.is_empty() {
-            messages.push(ChatMessage::new("assistant", turn));
-        }
+        append_chat_message(&mut messages, "assistant", turn);
     }
 
-    messages.push(ChatMessage::new(
+    append_chat_message(
+        &mut messages,
         "user",
-        "Continue the Voice stream now. Emit at least one short observation as ordinary text. If there is nothing useful to say aloud, stay internal and contemplate the present situation, surroundings, life in general, your own existence, or an idea worth exploring. Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud.",
-    ));
+        "Continue the Commentator stream now. Emit at least one short first-person observation as ordinary text. Do not use <say> tags or attempt to speak aloud.",
+    );
     messages
+}
+
+fn build_dialogue_voice_messages(
+    recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    conversation: &VecDeque<VoiceConversationTurn>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+    append_chat_message(&mut messages, "system", dialogue_voice_system_prompt());
+    append_chat_message(
+        &mut messages,
+        "user",
+        build_dialogue_voice_context_prompt(
+            recent_experiences,
+            recent_thoughts,
+            recent_speech_feedback,
+        ),
+    );
+
+    for turn in conversation {
+        let mut text = turn.text.trim().to_string();
+        trim_to_last_chars(&mut text, VOICE_TURN_MAX_CHARS);
+        if text.is_empty() {
+            continue;
+        }
+        let role = match turn.role {
+            VoiceConversationRole::User => "user",
+            VoiceConversationRole::Assistant => "assistant",
+        };
+        append_chat_message(&mut messages, role, text);
+    }
+
+    append_chat_message(
+        &mut messages,
+        "user",
+        "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice unless it starts with <thought/>. Start with <thought/> to pass the turn or keep the response internal; that response will not be spoken.",
+    );
+    messages
+}
+
+fn append_chat_message(
+    messages: &mut Vec<ChatMessage>,
+    role: impl Into<String>,
+    content: impl Into<String>,
+) {
+    let role = role.into();
+    let content = content.into();
+    if content.trim().is_empty() {
+        return;
+    }
+
+    if let Some(previous) = messages.last_mut()
+        && previous.role == role
+    {
+        previous.content.push_str("\n\n");
+        previous.content.push_str(content.trim());
+        return;
+    }
+
+    messages.push(ChatMessage::new(role, content));
+}
+
+fn dialogue_voice_system_prompt() -> &'static str {
+    "You are the spoken Voice of Pete Mortar-Sea. \
+     You converse through Mouth with the current interlocutor when finalized ASR turns show someone has spoken. \
+     Do not use tools, execute functions, write JSON, or mention prompts, metadata, ids, frames, logs, or the fact that you are an LLM. \
+     Write from the embodied system's own perspective using I, me, and my. \
+     Keep responses brief, plain, and conversational. \
+     Give the interlocutor a chance to speak; do not monologue. \
+     Whatever you write is spoken aloud verbatim by Mouth, so do not wrap speech in <say> tags. \
+     If it is better to wait, listen, or pass the turn, start the response with <thought/>; responses that start with <thought/> are recorded internally and are not spoken. \
+     Treat only the structured context and conversation turns as external fact. \
+     Preserve uncertainty and do not invent new external events, people, objects, or intentions."
+}
+
+fn build_dialogue_voice_context_prompt(
+    recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+) -> String {
+    let context_frame = context_frame_for_voice(recent_experiences);
+    let mut prompt = String::new();
+    prompt.push_str("Current time metadata:\n");
+    prompt.push_str(&format!(
+        "- observed_at_utc: {}\n\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
+    prompt.push_str("Current known ContextFrame fields:\n");
+    prompt.push_str(&context_frame.render());
+    prompt.push('\n');
+    prompt.push_str("Recent Experiences from the Wits:\n");
+    if recent_experiences.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for experience in recent_experiences {
+            prompt.push_str(&format!(
+                "- observed_at={} confidence={:.2} what={}\n",
+                experience.observed_at.to_rfc3339(),
+                experience.confidence,
+                prompt_json_string(&experience.what)
+            ));
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Recent internal thoughts reported to Wits:\n");
+    if recent_thoughts.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for thought in recent_thoughts {
+            prompt.push_str(&format!(
+                "- observed_at={} text={}\n",
+                thought.observed_at.to_rfc3339(),
+                prompt_json_string(&thought.text)
+            ));
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Recent Mouth feedback:\n");
+    if recent_speech_feedback.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for feedback in recent_speech_feedback {
+            prompt.push_str(&format_voice_speech_feedback(feedback));
+        }
+    }
+    prompt.push_str("\nUse the conversation turns as the dialogue history.\n");
+    prompt
 }
 
 fn build_voice_context_prompt(
@@ -1605,7 +1923,7 @@ fn build_voice_context_prompt(
         }
     }
     prompt.push('\n');
-    prompt.push_str("Recent spoken Voice sentences committed after Mouth finished:\n");
+    prompt.push_str("Recent internal thoughts reported to Wits:\n");
     if recent_thoughts.is_empty() {
         prompt.push_str("- None yet.\n");
     } else {
@@ -1624,7 +1942,7 @@ fn build_voice_context_prompt(
         }
     }
     prompt.push('\n');
-    prompt.push_str("Recent Mouth feedback for the continuous Voice stream:\n");
+    prompt.push_str("Recent Mouth feedback from spoken Voice:\n");
     if recent_speech_feedback.is_empty() {
         prompt.push_str("- None yet.\n");
     } else {
@@ -1676,6 +1994,24 @@ fn remember_recent_voice_turn(turns: &mut VecDeque<String>, text: String) {
     }
     trim_to_last_chars(&mut turn, VOICE_TURN_MAX_CHARS);
     push_limited(turns, turn, RECENT_VOICE_TURN_LIMIT);
+}
+
+fn remember_voice_conversation_turn(
+    turns: &mut VecDeque<VoiceConversationTurn>,
+    mut turn: VoiceConversationTurn,
+) {
+    turn.text = clean_generated_voice_text(&turn.text);
+    if turn.text.is_empty() {
+        return;
+    }
+    trim_to_last_chars(&mut turn.text, VOICE_TURN_MAX_CHARS);
+    push_limited(turns, turn, RECENT_VOICE_CONVERSATION_LIMIT);
+}
+
+fn voice_conversation_needs_response(turns: &VecDeque<VoiceConversationTurn>) -> bool {
+    turns
+        .back()
+        .is_some_and(|turn| turn.role == VoiceConversationRole::User)
 }
 
 fn voice_turn_with_minimum_observation(text: String) -> (String, Option<&'static str>) {
@@ -1744,6 +2080,60 @@ fn trim_to_last_chars(text: &mut String, max_chars: usize) {
     text.drain(..byte_index);
 }
 
+fn voice_reply_from_generated(text: &str) -> Option<VoiceReply> {
+    let cleaned = clean_generated_voice_text(text);
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    if let Some(thought) = strip_leading_thought_marker(&cleaned) {
+        return Some(VoiceReply::Thought(thought.to_string()));
+    }
+
+    Some(VoiceReply::Spoken(cleaned))
+}
+
+fn strip_leading_thought_marker(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    for marker in ["<thought/>", "<thought />"] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+fn clean_generated_voice_text(text: &str) -> String {
+    let mut cleaned = truncate_at_chat_template_marker(text).trim().to_string();
+    for (from, to) in [
+        ("<say>", ""),
+        ("</say>", ""),
+        ("<thought />", "<thought/>"),
+        ("<thought>", "<thought/>"),
+        ("</thought>", ""),
+    ] {
+        cleaned = cleaned.replace(from, to);
+    }
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches('"')
+        .trim()
+        .to_string()
+}
+
+fn voice_observation_text(text: &str) -> Option<VoiceThought> {
+    let normalized = clean_generated_voice_text(text);
+    let normalized = strip_leading_thought_marker(&normalized).unwrap_or(&normalized);
+    let (text_without_emoji, emoji) = split_trailing_emoji(normalized.trim());
+    let text = text_without_emoji.trim().to_string();
+    if text.is_empty() || !text.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    Some(VoiceThought { text, emoji })
+}
+
 fn commit_spoken_voice_observation(
     state: &AppState,
     pending: PendingVoiceSpeech,
@@ -1774,6 +2164,57 @@ fn commit_spoken_voice_observation(
                 emoji: emoji.to_string(),
             });
     }
+    let _ = state
+        .realtime_experience_events
+        .send(RealTimeExperienceEvent::VoiceObservation {
+            generation_id,
+            observation,
+        });
+    crate::realtime_experience::spawn_trace(state.clone());
+}
+
+fn commit_internal_voice_observation(
+    state: &AppState,
+    generation_id: Uuid,
+    text: &str,
+    experience_ids: &[Uuid],
+    kind: &str,
+    faculty: &str,
+    impression_prefix: &str,
+    recent_thoughts: &mut VecDeque<VoiceObservation>,
+) {
+    let Some(thought) = voice_observation_text(text) else {
+        return;
+    };
+    let observed_at = chrono::Utc::now();
+    let observation = VoiceObservation {
+        id: Uuid::new_v4(),
+        observed_at,
+        text: thought.text,
+        emoji: thought.emoji,
+        experience_ids: experience_ids.to_vec(),
+        interrupted_generation_id: None,
+        confidence: VOICE_OBSERVATION_CONFIDENCE,
+    };
+    {
+        let mut observations = state
+            .voice_observations
+            .write()
+            .expect("voice observation log lock");
+        if observations.len() == crate::app::MAX_RECORDED_VOICE_OBSERVATIONS {
+            observations.pop_front();
+        }
+        observations.push_back(observation.clone());
+    }
+    push_limited(recent_thoughts, observation.clone(), RECENT_THOUGHT_LIMIT);
+    record_internal_voice_sensation_and_impression(
+        state,
+        generation_id,
+        &observation,
+        kind,
+        faculty,
+        impression_prefix,
+    );
     let _ = state
         .realtime_experience_events
         .send(RealTimeExperienceEvent::VoiceObservation {
@@ -1831,6 +2272,154 @@ fn record_spoken_voice_sensation_and_impression(
         text: format!("I say: {}", observation.text),
         kind: "voice.spoken_utterance".to_string(),
         faculty: "Voice".to_string(),
+        confidence: observation.confidence,
+        payload: json!({
+            "voice_observation_id": observation.id,
+            "voice_generation_id": generation_id,
+        }),
+    };
+
+    state
+        .voice_impression_ids
+        .write()
+        .expect("voice impression id lock")
+        .insert(impression.id);
+
+    let mut impressions = state
+        .vision_impressions
+        .write()
+        .expect("vision impression log lock");
+    if impressions.len() == crate::app::MAX_RECORDED_VISION_IMPRESSIONS {
+        impressions.pop_front();
+    }
+    impressions.push_back(impression);
+}
+
+fn record_queued_voice_sensation_and_impression(
+    state: &AppState,
+    generation_id: Uuid,
+    observation: &VoiceObservation,
+) {
+    let detail = json!({
+        "text": observation.text,
+        "emoji": observation.emoji.as_deref(),
+        "utterance_id": observation.id,
+        "voice_generation_id": generation_id,
+        "experience_ids": observation.experience_ids,
+        "confidence": observation.confidence,
+    });
+    let sensation = SensationRecord {
+        id: Uuid::new_v4(),
+        kind: "voice.speech_queued".to_string(),
+        occurred_at: observation.observed_at,
+        observed_at: observation.observed_at,
+        source: SensationSource {
+            client_id: "mortar-sea".to_string(),
+            sensor_id: "voice.mouth.queue".to_string(),
+            faculty: "voice".to_string(),
+        },
+        sequence: 0,
+        media: MediaRecord {
+            mime: "text/plain".to_string(),
+            width: 0,
+            height: 0,
+            encoding: "utf-8".to_string(),
+        },
+        provenance: psyche::Provenance::direct().with_faculty("Voice"),
+        data_sha256: sha256_hex(observation.text.as_bytes()),
+        data_bytes: observation.text.len(),
+        detail,
+    };
+    record_sensation(&state.sensations, sensation.clone());
+
+    let impression = VisionImpressionRecord {
+        id: Uuid::new_v4(),
+        sensation_id: sensation.id,
+        occurred_at: sensation.occurred_at,
+        observed_at: sensation.observed_at,
+        source: sensation.source,
+        sequence: sensation.sequence,
+        text: queued_voice_impression_text(&observation.text),
+        kind: "voice.speech_queued".to_string(),
+        faculty: "Voice".to_string(),
+        confidence: observation.confidence,
+        payload: json!({
+            "voice_observation_id": observation.id,
+            "voice_generation_id": generation_id,
+        }),
+    };
+
+    state
+        .voice_impression_ids
+        .write()
+        .expect("voice impression id lock")
+        .insert(impression.id);
+
+    let mut impressions = state
+        .vision_impressions
+        .write()
+        .expect("vision impression log lock");
+    if impressions.len() == crate::app::MAX_RECORDED_VISION_IMPRESSIONS {
+        impressions.pop_front();
+    }
+    impressions.push_back(impression);
+}
+
+fn queued_voice_impression_text(text: &str) -> String {
+    format!("I feel myself about to say: {text}")
+}
+
+fn record_internal_voice_sensation_and_impression(
+    state: &AppState,
+    generation_id: Uuid,
+    observation: &VoiceObservation,
+    kind: &str,
+    faculty: &str,
+    impression_prefix: &str,
+) {
+    let detail = json!({
+        "text": observation.text,
+        "emoji": observation.emoji.as_deref(),
+        "observation_id": observation.id,
+        "voice_generation_id": generation_id,
+        "experience_ids": observation.experience_ids,
+        "interrupted_generation_id": observation.interrupted_generation_id,
+        "confidence": observation.confidence,
+    });
+    let sensation = SensationRecord {
+        id: Uuid::new_v4(),
+        kind: kind.to_string(),
+        occurred_at: observation.observed_at,
+        observed_at: observation.observed_at,
+        source: SensationSource {
+            client_id: "mortar-sea".to_string(),
+            sensor_id: faculty.to_ascii_lowercase(),
+            faculty: faculty.to_ascii_lowercase(),
+        },
+        sequence: 0,
+        media: MediaRecord {
+            mime: "text/plain".to_string(),
+            width: 0,
+            height: 0,
+            encoding: "utf-8".to_string(),
+        },
+        provenance: psyche::Provenance::direct().with_faculty(faculty),
+        data_sha256: sha256_hex(observation.text.as_bytes()),
+        data_bytes: observation.text.len(),
+        detail,
+    };
+    record_sensation(&state.sensations, sensation.clone());
+
+    let impression = VisionImpressionRecord {
+        id: Uuid::new_v4(),
+        sensation_id: sensation.id,
+        occurred_at: sensation.occurred_at,
+        observed_at: sensation.observed_at,
+        source: sensation.source,
+        sequence: sensation.sequence,
+        text: format!("{impression_prefix}: {}", observation.text),
+        kind: kind.to_string(),
+        faculty: faculty.to_string(),
         confidence: observation.confidence,
         payload: json!({
             "voice_observation_id": observation.id,
@@ -2045,6 +2634,7 @@ struct VoiceThought {
     emoji: Option<String>,
 }
 
+#[cfg(test)]
 fn parse_voice_thought(sentence: &str) -> Option<VoiceThought> {
     let normalized = normalize_voice_text(sentence);
     let (text_without_emoji, emoji) = split_trailing_emoji(&normalized);
@@ -2075,6 +2665,7 @@ fn clean_voice_sentence(sentence: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn normalize_voice_text(text: &str) -> String {
     text.trim()
         .trim_matches('"')
@@ -2162,6 +2753,7 @@ fn split_leading_emoji(text: &str) -> Option<(String, &str)> {
     Some((text[..end].to_string(), &text[end..]))
 }
 
+#[cfg(test)]
 fn first_sentence(text: &str) -> Option<String> {
     find_sentence_end(text).map(|end| text[..end].trim().to_string())
 }
@@ -2282,6 +2874,7 @@ impl VoiceSentenceSegmenter {
     }
 }
 
+#[cfg(test)]
 fn find_sentence_end(text: &str) -> Option<usize> {
     for (index, ch) in text.char_indices() {
         let punctuation_end = index + ch.len_utf8();
@@ -2300,6 +2893,7 @@ fn find_sentence_end(text: &str) -> Option<usize> {
     None
 }
 
+#[cfg(test)]
 fn closing_quote_end(text: &str, start: usize) -> usize {
     let mut end = start;
     for ch in text[start..].chars() {
@@ -2312,6 +2906,7 @@ fn closing_quote_end(text: &str, start: usize) -> usize {
     end
 }
 
+#[cfg(test)]
 fn is_common_abbreviation(text: &str) -> bool {
     let Some(last) = text.split_whitespace().last() else {
         return false;
@@ -2344,6 +2939,15 @@ mod tests {
         .map(|message| format!("{}: {}", message.role, message.content))
         .collect::<Vec<_>>()
         .join("\n\n")
+    }
+
+    fn assert_no_adjacent_same_role(messages: &[ChatMessage]) {
+        for pair in messages.windows(2) {
+            assert_ne!(
+                pair[0].role, pair[1].role,
+                "adjacent same-role messages violate model chat template contracts"
+            );
+        }
     }
 
     #[test]
@@ -2395,6 +2999,14 @@ mod tests {
     }
 
     #[test]
+    fn queued_voice_impression_uses_requested_wording() {
+        assert_eq!(
+            queued_voice_impression_text("I can answer briefly."),
+            "I feel myself about to say: I can answer briefly."
+        );
+    }
+
+    #[test]
     fn voice_prompt_includes_recent_thought_emoji() {
         let mut thoughts = VecDeque::new();
         thoughts.push_back(VoiceObservation {
@@ -2420,7 +3032,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_prompt_includes_recent_mouth_feedback() {
+    fn commentator_prompt_includes_recent_mouth_feedback() {
         let mut feedback = VecDeque::new();
         feedback.push_back(VoiceSpeechFeedback {
             observed_at: chrono::Utc::now(),
@@ -2440,7 +3052,7 @@ mod tests {
             &feedback,
         );
 
-        assert!(prompt.contains("Recent Mouth feedback for the continuous Voice stream:"));
+        assert!(prompt.contains("Recent Mouth feedback from spoken Voice:"));
         assert!(prompt.contains("event=finished"));
         assert!(prompt.contains("I am speaking after the mouth finishes."));
         assert!(prompt.contains("duration_ms=840"));
@@ -2453,17 +3065,25 @@ mod tests {
             &mut turns,
             "I am thinking. <say>I should be spoken now.</say>".to_string(),
         );
+        remember_recent_voice_turn(&mut turns, "I am still thinking.".to_string());
 
-        let prompt = rendered_voice_messages(
+        let messages = build_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &turns,
             &VecDeque::new(),
         );
+        let prompt = messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         assert!(prompt.contains("I am thinking."));
         assert!(prompt.contains("<say>I should be spoken now.</say>"));
+        assert!(prompt.contains("I am still thinking."));
+        assert_no_adjacent_same_role(&messages);
     }
 
     #[test]
@@ -2657,7 +3277,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_prompt_says_voice_cannot_execute_functions() {
+    fn commentator_prompt_says_commentator_cannot_execute_functions() {
         let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
@@ -2668,11 +3288,11 @@ mod tests {
 
         assert!(prompt.contains("execute functions"));
         assert!(prompt.contains("do not pretend that you can"));
-        assert!(prompt.contains("Only make observations"));
+        assert!(prompt.contains("try to figure out what is going on"));
     }
 
     #[test]
-    fn voice_prompt_treats_visible_people_as_likely_addressees() {
+    fn commentator_prompt_has_no_spoken_mouth_ability() {
         let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
@@ -2682,14 +3302,122 @@ mod tests {
         );
 
         assert!(prompt.contains("Do not address an unseen or hypothetical human"));
-        assert!(
-            prompt.contains("If current real-world experience says someone is visible or present")
-        );
-        assert!(prompt.contains("probably addressed to that person"));
+        assert!(prompt.contains("Never use <say> tags"));
+        assert!(prompt.contains("Commentator is not allowed to speak out loud"));
+        assert!(prompt.contains("reported to the Wits as internal observations"));
     }
 
     #[test]
-    fn voice_prompt_says_say_tags_are_for_spoken_output() {
+    fn dialogue_voice_prompt_speaks_plain_text_and_supports_thought_pass() {
+        let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+        );
+        let prompt = messages
+            .into_iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        assert!(prompt.contains("Whatever you write is spoken aloud verbatim"));
+        assert!(prompt.contains("do not wrap speech in <say> tags"));
+        assert!(prompt.contains("Keep responses brief"));
+        assert!(prompt.contains("Give the interlocutor a chance to speak"));
+        assert!(prompt.contains("Start with <thought/> to pass the turn"));
+        assert!(prompt.contains("will not be spoken"));
+    }
+
+    #[test]
+    fn dialogue_voice_messages_include_conversation_turns() {
+        let mut conversation = VecDeque::new();
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "Are you there?".to_string(),
+            },
+        );
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::Assistant,
+                text: "I am here.".to_string(),
+            },
+        );
+
+        let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &conversation,
+            &VecDeque::new(),
+        );
+
+        assert!(messages.iter().any(|message| {
+            message.role == "user" && message.content.contains("Are you there?")
+        }));
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message.role == "assistant" && message.content == "I am here." })
+        );
+        assert_no_adjacent_same_role(&messages);
+    }
+
+    #[test]
+    fn dialogue_voice_coalesces_adjacent_user_turns_for_chat_templates() {
+        let mut conversation = VecDeque::new();
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "First user sentence.".to_string(),
+            },
+        );
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "Second user sentence.".to_string(),
+            },
+        );
+
+        let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &conversation,
+            &VecDeque::new(),
+        );
+
+        assert_no_adjacent_same_role(&messages);
+        let user_text = messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        assert!(user_text.contains("First user sentence."));
+        assert!(user_text.contains("Second user sentence."));
+    }
+
+    #[test]
+    fn voice_reply_from_generated_passes_thought_marker_without_speech() {
+        assert_eq!(
+            voice_reply_from_generated("<thought/> I should wait."),
+            Some(VoiceReply::Thought("I should wait.".to_string()))
+        );
+        assert_eq!(
+            voice_reply_from_generated("I can answer briefly."),
+            Some(VoiceReply::Spoken("I can answer briefly.".to_string()))
+        );
+        assert_eq!(
+            voice_reply_from_generated("<say>I should not keep tags.</say>"),
+            Some(VoiceReply::Spoken("I should not keep tags.".to_string()))
+        );
+    }
+
+    #[test]
+    fn commentator_prompt_says_say_tags_are_forbidden() {
         let prompt = rendered_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
@@ -2698,23 +3426,9 @@ mod tests {
             &VecDeque::new(),
         );
 
-        assert!(prompt.contains("wrap one short speakable sentence"));
-        assert!(prompt.contains("<say>...</say>"));
-        assert!(prompt.contains("Text outside <say> stays internal"));
-        assert!(prompt.contains("Emit at least one short observation as ordinary text"));
-        assert!(prompt.contains("Use <say> only when there is a genuine sentence"));
-        assert!(prompt.contains("if there is nothing useful to say aloud right now"));
-        assert!(prompt.contains("keep the stream internal and omit <say>"));
-        assert!(prompt.contains("If there is nothing useful to say aloud, stay internal"));
-        assert!(prompt.contains("put the emoji inside <say> just before </say>"));
-        assert!(prompt.contains("Use <say> only for the exact words to be spoken aloud"));
-        assert!(
-            prompt.contains(
-                "Emit a short <say>...</say> sentence only if there is something that should actually be heard out loud"
-            )
-        );
-        assert!(!prompt.contains("Emit a <say> sentence quickly"));
-        assert!(!prompt.contains("early in this turn"));
+        assert!(prompt.contains("Continue the Commentator stream now"));
+        assert!(prompt.contains("Do not use <say> tags or attempt to speak aloud"));
+        assert!(!prompt.contains("<say>...</say>"));
     }
 
     #[test]
@@ -2729,7 +3443,7 @@ mod tests {
 
         assert!(prompt.contains("Treat only the structured real-world context"));
         assert!(prompt.contains("Do not invent new external events"));
-        assert!(prompt.contains("contemplate your present situation"));
+        assert!(prompt.contains("contemplate the present situation"));
         assert!(prompt.contains("life in general"));
         assert!(prompt.contains("your own existence"));
         assert!(prompt.contains("daydream, associate, or explore an idea"));

@@ -175,6 +175,7 @@ fn format_realtime_experience_prompt_with_cluster_gap(
 
     let mut prompt = String::from(
         "You are the real-time Experience generator, the first Wit in the comprehension pipeline.\n\
+         You run continuously in a loop over the recent timeline; each pass tries to understand what is going on right now.\n\
          Consume the timeline in order. Do not group by faculty or source.\n\
          Treat impressions as evidence, not certainty.\n\
          Return only plain text, not JSON, Markdown, bullets, or labels.\n\
@@ -455,6 +456,8 @@ mod tests {
         let context_frame = ContextFrame::from_timeline(&frame, frame.entries(), 3);
         let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
 
+        assert!(prompt.contains("You run continuously in a loop over the recent timeline"));
+        assert!(prompt.contains("each pass tries to understand what is going on right now"));
         assert!(prompt.contains("Write as first-person lived experience"));
         assert!(prompt.contains("what I see, where I am, and what seems present"));
         assert!(prompt.contains("do not narrate sensors, camera input, GPS registration"));

@@ -62,6 +62,7 @@ pub(crate) enum LlmJobKind {
     Vision,
     ContextFrame,
     RealtimeExperience,
+    Commentator,
     Voice,
 }
 
@@ -71,6 +72,7 @@ impl LlmJobKind {
             Self::Vision => "vision",
             Self::ContextFrame => "context_frame",
             Self::RealtimeExperience => "realtime_experience",
+            Self::Commentator => "commentator",
             Self::Voice => "voice",
         }
     }
@@ -79,6 +81,7 @@ impl LlmJobKind {
         match self {
             Self::ContextFrame => 1,
             Self::RealtimeExperience => 1,
+            Self::Commentator => 1,
             Self::Voice => 1,
             Self::Vision => 2,
         }
@@ -115,10 +118,12 @@ impl LlmStreamControl {
             .push_back(text);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn pause(&self) {
         self.paused.store(true, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn resume(&self) {
         self.paused.store(false, Ordering::SeqCst);
     }
