@@ -17,6 +17,13 @@ pub struct StyleTts2SynthesisOutput {
     pub sample_rate_hz: u32,
     pub pcm_mono_f32: Vec<f32>,
     pub realized_utterance: Option<Utterance>,
+    pub timings: Vec<StyleTts2Timing>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleTts2Timing {
+    pub stage: String,
+    pub elapsed_ms: f64,
 }
 
 #[derive(Debug, Error)]

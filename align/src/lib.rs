@@ -1239,7 +1239,7 @@ fn duration_limits(
         PhoneClass::Other => 40,
     };
     let mut min = min;
-    let dynamic_max = average_frames.saturating_mul(4).max(min);
+    let dynamic_max = average_frames.saturating_mul(5).div_ceil(2).max(min);
     let mut max = class_max.min(dynamic_max).max(min);
     if let Some(model) = context.unit_model(unit) {
         if let Some(duration) = model_duration_range(model) {

@@ -35,6 +35,7 @@ impl StyleTts2Backend for MockStyleTts2Backend {
                 sample_rate_hz: self.sample_rate_hz,
                 pcm_mono_f32: Vec::new(),
                 realized_utterance: None,
+                timings: Vec::new(),
             });
         }
 
@@ -60,6 +61,7 @@ impl StyleTts2Backend for MockStyleTts2Backend {
             sample_rate_hz: self.sample_rate_hz,
             pcm_mono_f32,
             realized_utterance: None,
+            timings: Vec::new(),
         })
     }
 }

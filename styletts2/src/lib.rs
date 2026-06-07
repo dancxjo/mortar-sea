@@ -30,7 +30,7 @@ pub mod plan;
 pub mod request;
 pub mod symbols;
 
-pub use backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput};
+pub use backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput, StyleTts2Timing};
 pub use config::{StyleTts2Config, StyleTts2ConfigError, StyleTts2ModelPaths};
 pub use mock::MockStyleTts2Backend;
 pub use plan::{

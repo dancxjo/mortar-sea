@@ -11,7 +11,7 @@ use speech::{
 };
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
-    StyleTts2PlanOptions, StyleTts2SynthesisRequest, prepare_styletts2_plan,
+    StyleTts2PlanOptions, StyleTts2SynthesisRequest, StyleTts2Timing, prepare_styletts2_plan,
     styletts2_en_us_symbol_set, styletts2_text_for_symbols, validate_styletts2_plan,
 };
 
@@ -57,6 +57,8 @@ pub struct SpeakCommand {
     pub style_seed: u64,
     #[arg(long)]
     pub debug_pronunciation: bool,
+    #[arg(long)]
+    pub timings: bool,
     #[arg(long, default_value_t = DEFAULT_MAX_TTS_SYMBOLS)]
     pub max_tts_symbols: usize,
     #[arg(long)]
@@ -94,11 +96,12 @@ impl SpeakCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpeechSynthesisArtifact {
     pub path: PathBuf,
     pub sample_rate_hz: u32,
     pub samples: usize,
+    pub timings: Vec<StyleTts2Timing>,
 }
 
 impl SpeechSynthesisArtifact {
@@ -212,6 +215,7 @@ impl PiperTextSynthesizer {
             path: output_path.to_path_buf(),
             sample_rate_hz: output.sample_rate_hz,
             samples: output.pcm_mono_f32.len(),
+            timings: Vec::new(),
         })
     }
 }
@@ -302,6 +306,7 @@ impl StyleTts2TextSynthesizer {
             path: output_path.to_path_buf(),
             sample_rate_hz: output.sample_rate_hz,
             samples: output.pcm_mono_f32.len(),
+            timings: output.timings,
         })
     }
 
@@ -505,6 +510,12 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     }
     println!("sample_rate_hz: {}", artifact.sample_rate_hz);
     println!("samples: {}", artifact.samples);
+    if command.timings && !artifact.timings.is_empty() {
+        println!("timings_ms:");
+        for timing in &artifact.timings {
+            println!("  {}: {:.2}", timing.stage, timing.elapsed_ms);
+        }
+    }
     println!("wav: {}", artifact.path.display());
 
     Ok(())
@@ -631,6 +642,7 @@ fn synthesize_backend_plan_with_mock_to_wav(
         path: output_path.to_path_buf(),
         sample_rate_hz: output.sample_rate_hz,
         samples: output.pcm_mono_f32.len(),
+        timings: output.timings,
     })
 }
 
@@ -806,7 +818,7 @@ mod tests {
 
         assert_eq!(
             symbols,
-            ["HH", "AH", "L", "OW", "|", "W", "ER", "L", "D", "."]
+            ["HH", "ə", "L", "ˈ", "OW", "|", "W", "ˈ", "ɝ", "R", "L", "D"]
         );
         assert_ne!(symbols, ["h", "e", "l", "l", "o"]);
     }
@@ -837,10 +849,10 @@ mod tests {
         assert_eq!(
             symbols,
             [
-                "HH", "AH", "L", "OW", "|", "M", "AY", "|", "B", "EY", "B", "IY", ".", "HH", "AH",
-                "L", "OW", "|", "M", "AY", "|", "D", "AA", "R", "L", "IH", "N", ".", "HH", "AH",
-                "L", "OW", "|", "M", "AY", "|", "R", "AE", "G", "T", "AY", "M", "|", "G", "AE",
-                "L", "."
+                "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "B", "ˈ", "EY", "B", "IY",
+                ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "D", "ˈ", "AA", "R", "L",
+                "IH", "N", ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "R", "ˈ",
+                "AE", "G", "T", "ˌ", "AY", "M", "|", "G", "ˈ", "AE", "L", "."
             ]
         );
     }
@@ -862,6 +874,7 @@ mod tests {
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,
+            timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
             no_tts_chunking: false,
             fail_on_guessed_pronunciation: true,
@@ -888,6 +901,7 @@ mod tests {
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,
+            timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
             no_tts_chunking: false,
             fail_on_guessed_pronunciation: false,
@@ -914,6 +928,7 @@ mod tests {
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,
+            timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
             no_tts_chunking: false,
             fail_on_guessed_pronunciation: false,

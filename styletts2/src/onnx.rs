@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use ort::ep::ExecutionProviderDispatch;
 use ort::memory::Allocator;
@@ -12,7 +13,7 @@ use ort::session::{
 use ort::value::{DynTensorValueType, Tensor};
 use speech::{StyleRef, StyleSource};
 
-use crate::backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput};
+use crate::backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput, StyleTts2Timing};
 #[cfg(test)]
 use crate::plan::{styletts2_character_id, styletts2_text_for_symbol};
 use crate::plan::{styletts2_token_ids_for_symbols, validate_styletts2_plan};
@@ -281,30 +282,52 @@ impl StyleTts2Backend for StyleTts2OnnxBackend {
         &mut self,
         request: &StyleTts2SynthesisRequest,
     ) -> Result<StyleTts2SynthesisOutput, StyleTts2Error> {
+        let total_started = Instant::now();
+        let preflight_started = Instant::now();
         self.preflight_request(request)?;
+        let mut timings = vec![timing("preflight", preflight_started)];
         if request.is_empty() {
+            timings.push(timing("total", total_started));
             return Ok(StyleTts2SynthesisOutput {
                 sample_rate_hz: SAMPLE_RATE_HZ,
                 pcm_mono_f32: Vec::new(),
                 realized_utterance: None,
+                timings,
             });
         }
 
         let mut pcm_mono_f32 = Vec::new();
-        for chunk in &request.backend_plan.chunks {
+        for (index, chunk) in request.backend_plan.chunks.iter().enumerate() {
+            let chunk_started = Instant::now();
             let token_ids = styletts2_token_ids_for_symbols(&chunk.symbols)?;
             if token_ids.is_empty() {
                 continue;
             }
-            pcm_mono_f32.extend(self.synthesize_token_ids(request, token_ids)?);
+            let output = self.synthesize_token_ids(request, token_ids)?;
+            pcm_mono_f32.extend(output.pcm_mono_f32);
+            let chunk_prefix = format!("chunk_{}", index + 1);
+            timings.extend(
+                output
+                    .timings
+                    .into_iter()
+                    .map(|timing| prefix_timing(&chunk_prefix, timing)),
+            );
+            timings.push(timing(&format!("{chunk_prefix}.total"), chunk_started));
         }
+        timings.push(timing("total", total_started));
 
         Ok(StyleTts2SynthesisOutput {
             sample_rate_hz: SAMPLE_RATE_HZ,
             pcm_mono_f32,
             realized_utterance: None,
+            timings,
         })
     }
+}
+
+struct OnnxChunkSynthesisOutput {
+    pcm_mono_f32: Vec<f32>,
+    timings: Vec<StyleTts2Timing>,
 }
 
 impl StyleTts2OnnxBackend {
@@ -312,9 +335,11 @@ impl StyleTts2OnnxBackend {
         &mut self,
         request: &StyleTts2SynthesisRequest,
         token_ids: Vec<i64>,
-    ) -> Result<Vec<f32>, StyleTts2Error> {
+    ) -> Result<OnnxChunkSynthesisOutput, StyleTts2Error> {
         let token_len = i64::try_from(token_ids.len())
             .map_err(|_| invalid_output("StyleTTS2 token sequence is too long"))?;
+        let mut timings = Vec::new();
+        let text_encoder_started = Instant::now();
         let encoder_input = Tensor::from_array((vec![1_i64, token_len], token_ids.clone()))
             .map_err(|error| backend_error(format!("failed to build text encoder input: {error}")))?
             .upcast();
@@ -329,8 +354,13 @@ impl StyleTts2OnnxBackend {
             )));
         }
         drop(encoder_outputs);
-        let style_vector = self.resolve_style_vector(request, &encoder_shape, &encoder_values)?;
+        timings.push(timing("text_encoder", text_encoder_started));
 
+        let style_started = Instant::now();
+        let style_vector = self.resolve_style_vector(request, &encoder_shape, &encoder_values)?;
+        timings.push(timing("style", style_started));
+
+        let decoder_started = Instant::now();
         let decoder_tokens = Tensor::from_array((vec![1_i64, token_len], token_ids))
             .map_err(|error| {
                 backend_error(format!("failed to build decoder token input: {error}"))
@@ -367,8 +397,12 @@ impl StyleTts2OnnxBackend {
                 "StyleTTS2 decoder returned an empty waveform",
             ));
         }
+        timings.push(timing("decoder", decoder_started));
 
-        Ok(samples)
+        Ok(OnnxChunkSynthesisOutput {
+            pcm_mono_f32: samples,
+            timings,
+        })
     }
 
     fn preflight_request(&self, request: &StyleTts2SynthesisRequest) -> Result<(), StyleTts2Error> {
@@ -1028,6 +1062,20 @@ fn validate_thread_count(label: &str, threads: usize) -> Result<(), StyleTts2Err
         )));
     }
     Ok(())
+}
+
+fn timing(stage: &str, started: Instant) -> StyleTts2Timing {
+    StyleTts2Timing {
+        stage: stage.into(),
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn prefix_timing(prefix: &str, timing: StyleTts2Timing) -> StyleTts2Timing {
+    StyleTts2Timing {
+        stage: format!("{prefix}.{}", timing.stage),
+        elapsed_ms: timing.elapsed_ms,
+    }
 }
 
 fn find_home_onnxruntime_dylib() -> Option<PathBuf> {
