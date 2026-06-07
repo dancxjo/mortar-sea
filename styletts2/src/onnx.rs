@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ort::ep::ExecutionProviderDispatch;
+use ort::memory::Allocator;
 use ort::session::{
-    Session,
+    IoBinding, Session,
     builder::{GraphOptimizationLevel, SessionBuilder},
 };
 use ort::value::{DynTensorValueType, Tensor};
@@ -477,7 +478,8 @@ impl StyleTts2OnnxBackend {
         validate_style_vector(reference_features)?;
         let options = self.diffusion_options.clone();
         validate_diffusion_options(&options)?;
-        let static_inputs = DiffusionStaticInputs::new(
+        let mut diffusion_binding = DiffusionIoBinding::new(
+            &self.diffusion,
             text_embedding_shape,
             text_embedding,
             reference_features,
@@ -493,7 +495,7 @@ impl StyleTts2OnnxBackend {
         for index in 0..options.diffusion_steps.saturating_sub(1) {
             let sigma = sigmas[index];
             let sigma_next = sigmas[index + 1];
-            x = self.adpm2_step(x, sigma, sigma_next, &static_inputs, &mut rng)?;
+            x = self.adpm2_step(x, sigma, sigma_next, &mut diffusion_binding, &mut rng)?;
         }
 
         validate_style_vector(&x)?;
@@ -506,7 +508,7 @@ impl StyleTts2OnnxBackend {
         x: Vec<f32>,
         sigma: f32,
         sigma_next: f32,
-        static_inputs: &DiffusionStaticInputs,
+        diffusion_binding: &mut DiffusionIoBinding,
         rng: &mut DeterministicRng,
     ) -> Result<Vec<f32>, StyleTts2Error> {
         let sigma_up = (sigma_next.powi(2) * (sigma.powi(2) - sigma_next.powi(2)) / sigma.powi(2))
@@ -514,10 +516,10 @@ impl StyleTts2OnnxBackend {
             .sqrt();
         let sigma_down = (sigma_next.powi(2) - sigma_up.powi(2)).max(0.0).sqrt();
         let sigma_mid = (sigma + sigma_down) * 0.5;
-        let denoised = self.diffusion_denoise(&x, sigma, static_inputs)?;
+        let denoised = self.diffusion_denoise(&x, sigma, diffusion_binding)?;
         let derivative = diffusion_derivative(&x, &denoised, sigma)?;
         let midpoint = add_scaled(&x, &derivative, sigma_mid - sigma);
-        let denoised_mid = self.diffusion_denoise(&midpoint, sigma_mid, static_inputs)?;
+        let denoised_mid = self.diffusion_denoise(&midpoint, sigma_mid, diffusion_binding)?;
         let derivative_mid = diffusion_derivative(&midpoint, &denoised_mid, sigma_mid)?;
         let mut next = add_scaled(&x, &derivative_mid, sigma_down - sigma);
         if sigma_up > 0.0 {
@@ -532,7 +534,7 @@ impl StyleTts2OnnxBackend {
         &mut self,
         x: &[f32],
         sigma: f32,
-        static_inputs: &DiffusionStaticInputs,
+        diffusion_binding: &mut DiffusionIoBinding,
     ) -> Result<Vec<f32>, StyleTts2Error> {
         validate_style_vector(x)?;
         if sigma <= 0.0 || !sigma.is_finite() {
@@ -544,22 +546,25 @@ impl StyleTts2OnnxBackend {
         let noise = Tensor::from_array((vec![1_i64, 1, STYLE_VECTOR_DIMS as i64], x.to_vec()))
             .map_err(|error| {
                 backend_error(format!("failed to build diffusion noise input: {error}"))
-            })?
-            .upcast();
-        let sigma = Tensor::from_array((vec![1_i64], vec![sigma]))
+            })?;
+        let sigma = Tensor::from_array((vec![1_i64], vec![sigma])).map_err(|error| {
+            backend_error(format!("failed to build diffusion sigma input: {error}"))
+        })?;
+        diffusion_binding
+            .binding
+            .bind_input("a", &noise)
             .map_err(|error| {
-                backend_error(format!("failed to build diffusion sigma input: {error}"))
-            })?
-            .upcast();
+                backend_error(format!("failed to bind diffusion noise input: {error}"))
+            })?;
+        diffusion_binding
+            .binding
+            .bind_input("b", &sigma)
+            .map_err(|error| {
+                backend_error(format!("failed to bind diffusion sigma input: {error}"))
+            })?;
         let outputs = self
             .diffusion
-            .run(ort::inputs![
-                "a" => noise,
-                "b" => sigma,
-                "c" => static_inputs.text_embedding.view(),
-                "d" => static_inputs.embedding_scale.view(),
-                "e" => static_inputs.reference_features.view(),
-            ])
+            .run_binding(&diffusion_binding.binding)
             .map_err(|error| {
                 backend_error(format!("StyleTTS2 diffusion denoiser failed: {error}"))
             })?;
@@ -573,14 +578,13 @@ impl StyleTts2OnnxBackend {
     }
 }
 
-struct DiffusionStaticInputs {
-    text_embedding: Tensor<f32>,
-    embedding_scale: Tensor<f64>,
-    reference_features: Tensor<f32>,
+struct DiffusionIoBinding {
+    binding: IoBinding,
 }
 
-impl DiffusionStaticInputs {
+impl DiffusionIoBinding {
     fn new(
+        diffusion: &Session,
         text_embedding_shape: &[i64],
         text_embedding: &[f32],
         reference_features: &[f32],
@@ -610,12 +614,37 @@ impl DiffusionStaticInputs {
                 "failed to build diffusion reference feature input: {error}"
             ))
         })?;
+        let output = Tensor::<f32>::new(&Allocator::default(), [1_usize, 1, STYLE_VECTOR_DIMS])
+            .map_err(|error| {
+                backend_error(format!(
+                    "failed to build diffusion denoiser output buffer: {error}"
+                ))
+            })?;
+        let mut binding = diffusion.create_binding().map_err(|error| {
+            backend_error(format!("failed to create diffusion I/O binding: {error}"))
+        })?;
+        binding.bind_input("c", &text_embedding).map_err(|error| {
+            backend_error(format!(
+                "failed to bind diffusion text embedding input: {error}"
+            ))
+        })?;
+        binding.bind_input("d", &embedding_scale).map_err(|error| {
+            backend_error(format!(
+                "failed to bind diffusion embedding scale input: {error}"
+            ))
+        })?;
+        binding
+            .bind_input("e", &reference_features)
+            .map_err(|error| {
+                backend_error(format!(
+                    "failed to bind diffusion reference feature input: {error}"
+                ))
+            })?;
+        binding.bind_output("z", output).map_err(|error| {
+            backend_error(format!("failed to bind diffusion denoiser output: {error}"))
+        })?;
 
-        Ok(Self {
-            text_embedding,
-            embedding_scale,
-            reference_features,
-        })
+        Ok(Self { binding })
     }
 }
 

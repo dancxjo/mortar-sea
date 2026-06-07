@@ -35,6 +35,7 @@ const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
 const ALIGN_SAMPLE_RATE_HZ: u32 = 16_000;
 const ALIGN_FRAME_MS: u64 = 25;
 const ALIGN_HOP_MS: u64 = 10;
+const MAX_FULL_TRAJECTORY_SAMPLES: usize = 7;
 
 #[derive(Clone)]
 struct AppState {
@@ -1238,7 +1239,8 @@ fn duration_limits(
         PhoneClass::Other => 40,
     };
     let mut min = min;
-    let mut max = class_max.max(average_frames.saturating_mul(5)).max(min);
+    let dynamic_max = average_frames.saturating_mul(4).max(min);
+    let mut max = class_max.min(dynamic_max).max(min);
     if let Some(model) = context.unit_model(unit) {
         if let Some(duration) = model_duration_range(model) {
             let min_frames = ms_to_frames(duration.min).max(1);
@@ -1604,9 +1606,34 @@ fn sampled_frames<'a>(
             .take(frames.len().min(2))
             .chain(frames.iter().rev().take(frames.len().min(2)))
             .collect(),
-        Some(SegmentSamplingStrategy::UseFullTrajectory) => frames.iter().collect(),
+        Some(SegmentSamplingStrategy::UseFullTrajectory) => {
+            sampled_full_trajectory_frames(frames, MAX_FULL_TRAJECTORY_SAMPLES)
+        }
         Some(SegmentSamplingStrategy::UseMidpoint) | None => vec![&frames[midpoint]],
     }
+}
+
+fn sampled_full_trajectory_frames(
+    frames: &[AcousticFrameFeatures],
+    max_samples: usize,
+) -> Vec<&AcousticFrameFeatures> {
+    if frames.is_empty() || max_samples == 0 {
+        return Vec::new();
+    }
+    if frames.len() <= max_samples {
+        return frames.iter().collect();
+    }
+
+    (0..max_samples)
+        .map(|index| {
+            let frame_index = if max_samples == 1 {
+                frames.len() / 2
+            } else {
+                index.saturating_mul(frames.len().saturating_sub(1)) / (max_samples - 1)
+            };
+            &frames[frame_index]
+        })
+        .collect()
 }
 
 fn duration_range_score(model: &AcousticTargetModel, frames: &[AcousticFrameFeatures]) -> f32 {
@@ -2016,6 +2043,7 @@ fn extract_acoustic_features(samples: &[f32], sample_rate_hz: u32) -> Vec<Acoust
     }
     let frame_len = ((u64::from(sample_rate_hz) * ALIGN_FRAME_MS) / 1000).max(1) as usize;
     let hop_len = ((u64::from(sample_rate_hz) * ALIGN_HOP_MS) / 1000).max(1) as usize;
+    let spectrum_plan = SpectrumPlan::new(frame_len);
     let mut raw = Vec::new();
     let mut previous_magnitudes = Vec::new();
     let mut start = 0usize;
@@ -2024,8 +2052,13 @@ fn extract_acoustic_features(samples: &[f32], sample_rate_hz: u32) -> Vec<Acoust
         let frame = &samples[start..end];
         let start_ms = (start as u128 * 1000 / u128::from(sample_rate_hz)) as u64;
         let end_ms = (end as u128 * 1000 / u128::from(sample_rate_hz)) as u64;
-        let (mut features, magnitudes) =
-            analyze_frame(frame, sample_rate_hz, start_ms, end_ms.max(start_ms + 1));
+        let (mut features, magnitudes) = analyze_frame(
+            frame,
+            sample_rate_hz,
+            start_ms,
+            end_ms.max(start_ms + 1),
+            &spectrum_plan,
+        );
         features.spectral_flux = spectral_flux(&magnitudes, &previous_magnitudes);
         previous_magnitudes = magnitudes;
         raw.push(features);
@@ -2094,6 +2127,7 @@ fn analyze_frame(
     sample_rate_hz: u32,
     start_ms: u64,
     end_ms: u64,
+    spectrum_plan: &SpectrumPlan,
 ) -> (AcousticFrameFeatures, Vec<f32>) {
     let len = frame.len().max(1);
     let mut windowed = Vec::with_capacity(frame.len());
@@ -2113,7 +2147,7 @@ fn analyze_frame(
     let rms = (sum_sq / len as f32).sqrt();
     let energy_db = 20.0 * (rms + 1.0e-6).log10();
     let zero_crossing_rate = crossings as f32 / len as f32;
-    let magnitudes = magnitude_spectrum(&windowed);
+    let magnitudes = spectrum_plan.magnitude_spectrum(&windowed);
     let (spectral_centroid_hz, spectral_skew, high_ratio, low_ratio, low_band_peak_hz) =
         spectral_shape(&magnitudes, sample_rate_hz);
     let (f1_hz, f2_hz, f3_hz) = rough_formants(&magnitudes, sample_rate_hz);
@@ -2140,6 +2174,46 @@ fn analyze_frame(
         },
         magnitudes,
     )
+}
+
+struct SpectrumPlan {
+    len: usize,
+    bins: usize,
+    basis: Vec<(f32, f32)>,
+}
+
+impl SpectrumPlan {
+    fn new(len: usize) -> Self {
+        let len = len.max(1);
+        let bins = (len / 2).max(1);
+        let mut basis = Vec::with_capacity(bins.saturating_mul(len));
+        for bin in 0..bins {
+            for index in 0..len {
+                let phase = -2.0 * std::f32::consts::PI * bin as f32 * index as f32 / len as f32;
+                basis.push((phase.cos(), phase.sin()));
+            }
+        }
+        Self { len, bins, basis }
+    }
+
+    fn magnitude_spectrum(&self, frame: &[f32]) -> Vec<f32> {
+        if frame.len() != self.len {
+            return magnitude_spectrum(frame);
+        }
+        let mut magnitudes = Vec::with_capacity(self.bins);
+        for bin in 0..self.bins {
+            let offset = bin * self.len;
+            let mut real = 0.0_f32;
+            let mut imag = 0.0_f32;
+            for (index, sample) in frame.iter().enumerate() {
+                let (cos, sin) = self.basis[offset + index];
+                real += sample * cos;
+                imag += sample * sin;
+            }
+            magnitudes.push((real * real + imag * imag).sqrt());
+        }
+        magnitudes
+    }
 }
 
 fn hann(index: usize, len: usize) -> f32 {
@@ -2990,6 +3064,24 @@ mod tests {
         );
 
         assert!(containing > missing);
+    }
+
+    #[test]
+    fn full_trajectory_sampling_is_bounded_and_spread_across_segment() {
+        let frames = (0..30).map(test_frame).collect::<Vec<_>>();
+        let sampled = sampled_full_trajectory_frames(&frames, 7);
+
+        assert_eq!(sampled.len(), 7);
+        assert_eq!(sampled.first().map(|frame| frame.start_ms), Some(0));
+        assert_eq!(
+            sampled.last().map(|frame| frame.start_ms),
+            Some(29 * ALIGN_HOP_MS)
+        );
+        assert!(
+            sampled
+                .windows(2)
+                .all(|pair| pair[0].start_ms < pair[1].start_ms)
+        );
     }
 
     #[test]
