@@ -29,6 +29,9 @@ use uuid::Uuid;
 const DEFAULT_ALIGN_ADDR: &str = "0.0.0.0:3030";
 const MAX_WAV_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
+const ALIGN_SAMPLE_RATE_HZ: u32 = 16_000;
+const ALIGN_FRAME_MS: u64 = 25;
+const ALIGN_HOP_MS: u64 = 10;
 
 #[derive(Clone)]
 struct AppState {
@@ -441,16 +444,19 @@ async fn align_audio(
         .await
         .with_context(|| format!("failed to read {}", audio_path.display()))?;
     let decoded = decode_wav(&audio_bytes)?;
-    let asr_samples = resample_linear(&decoded.samples, decoded.sample_rate_hz, ASR_SAMPLE_RATE_HZ);
-    let duration_ms = decoded.duration_ms;
-    let asr_segments =
+    let phonemicized = phonemicize_text(request.text, request.variant)?;
+    let asr_segments = if asr_transcript_enabled() {
+        let asr_samples =
+            resample_linear(&decoded.samples, decoded.sample_rate_hz, ASR_SAMPLE_RATE_HZ);
+        let duration_ms = decoded.duration_ms;
         tokio::task::spawn_blocking(move || transcribe_with_ear(asr_samples, duration_ms))
             .await
-            .context("ASR task failed")??;
-
-    let phonemicized = phonemicize_text(request.text, request.variant)?;
-    let (words, phonemes, phones) =
-        alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms);
+            .context("ASR task failed")??
+    } else {
+        Vec::new()
+    };
+    let (words, phonemes, phones) = forced_alignment_tracks(&phonemicized.ir, &decoded)
+        .unwrap_or_else(|| alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms));
 
     Ok(Json(AlignmentResponse {
         audio_url: request.audio_url,
@@ -466,6 +472,15 @@ async fn align_audio(
         phonemes,
         phones,
     }))
+}
+
+fn asr_transcript_enabled() -> bool {
+    std::env::var("ALIGN_ASR_TRANSCRIPT").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn phonemicize_text(text: String, variant: String) -> Result<PhonemicizeResponse, AppError> {
@@ -486,6 +501,744 @@ fn phonemicize_text(text: String, variant: String) -> Result<PhonemicizeResponse
         warnings: output.warnings.clone(),
         ir: output,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AcousticFrameFeatures {
+    start_ms: u64,
+    end_ms: u64,
+    energy_norm: f32,
+    zero_crossing_rate: f32,
+    spectral_centroid_hz: f32,
+    high_ratio: f32,
+    low_ratio: f32,
+    voicing: f32,
+    f1_hz: f32,
+    f2_hz: f32,
+    spectral_flux: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhoneSpan {
+    start_ms: u64,
+    end_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhoneClass {
+    Vowel,
+    Stop,
+    Fricative,
+    Affricate,
+    Nasal,
+    Liquid,
+    Glide,
+    Other,
+}
+
+struct AlignedPhone<'a> {
+    token: &'a PhoneToken,
+    word_index: usize,
+    span: PhoneSpan,
+}
+
+fn forced_alignment_tracks(
+    output: &PhonemicizeOutput,
+    decoded: &DecodedWav,
+) -> Option<(
+    Vec<WordAlignment>,
+    Vec<SegmentAlignment>,
+    Vec<SegmentAlignment>,
+)> {
+    let phones = alignable_phones(output);
+    if phones.is_empty() {
+        return None;
+    }
+    let samples = resample_linear(
+        &decoded.samples,
+        decoded.sample_rate_hz,
+        ALIGN_SAMPLE_RATE_HZ,
+    );
+    let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
+    if frames.len() < phones.len().min(3) {
+        return None;
+    }
+    let spans = viterbi_phone_spans(&phones, &frames, decoded.duration_ms)?;
+    let aligned_phones = phones
+        .into_iter()
+        .zip(spans)
+        .map(|((token, word_index), span)| AlignedPhone {
+            token,
+            word_index,
+            span,
+        })
+        .collect::<Vec<_>>();
+    Some(alignment_tracks_from_phone_spans(
+        output,
+        &aligned_phones,
+        decoded.duration_ms,
+    ))
+}
+
+fn alignable_phones(output: &PhonemicizeOutput) -> Vec<(&PhoneToken, usize)> {
+    output
+        .phones
+        .iter()
+        .filter_map(|token| {
+            let Spec::Known(id) = &token.phone else {
+                return None;
+            };
+            if id.as_str().starts_with("boundary.") {
+                return None;
+            }
+            Some((token, phone_word_index(token)?))
+        })
+        .collect()
+}
+
+fn alignment_tracks_from_phone_spans(
+    output: &PhonemicizeOutput,
+    aligned_phones: &[AlignedPhone<'_>],
+    duration_ms: u64,
+) -> (
+    Vec<WordAlignment>,
+    Vec<SegmentAlignment>,
+    Vec<SegmentAlignment>,
+) {
+    let canonical_words = output
+        .graphemes
+        .iter()
+        .map(|token| token.text.clone())
+        .collect::<Vec<_>>();
+    let mut words = Vec::new();
+    let mut phonemes = Vec::new();
+    let mut phones = Vec::new();
+
+    for (word_index, text) in canonical_words.iter().enumerate() {
+        let word_phone_refs = aligned_phones
+            .iter()
+            .filter(|phone| phone.word_index == word_index)
+            .collect::<Vec<_>>();
+        let fallback_span = distributed_word_span(word_index, canonical_words.len(), duration_ms);
+        let word_start = word_phone_refs
+            .iter()
+            .map(|phone| phone.span.start_ms)
+            .min()
+            .unwrap_or(fallback_span.0);
+        let word_end = word_phone_refs
+            .iter()
+            .map(|phone| phone.span.end_ms)
+            .max()
+            .unwrap_or(fallback_span.1)
+            .max(word_start.saturating_add(1));
+        let word_phonemes = output
+            .phonemes
+            .iter()
+            .filter(|token| token_word_index(token) == Some(word_index))
+            .collect::<Vec<_>>();
+
+        words.push(WordAlignment {
+            index: word_index,
+            text: text.clone(),
+            asr_text: None,
+            start_ms: word_start,
+            end_ms: word_end,
+            phonemes: word_phonemes
+                .iter()
+                .map(|token| phoneme_label(token, &output.variant))
+                .collect::<Vec<_>>()
+                .join(" "),
+            phones: word_phone_refs
+                .iter()
+                .map(|aligned| phone_label(aligned.token))
+                .collect::<Vec<_>>()
+                .join(" "),
+        });
+
+        for (phone_index, aligned) in word_phone_refs.iter().enumerate() {
+            phones.push(SegmentAlignment {
+                word_index,
+                index: phone_index,
+                label: phone_label(aligned.token),
+                token_id: phone_token_id(aligned.token),
+                start_ms: aligned.span.start_ms,
+                end_ms: aligned.span.end_ms,
+            });
+        }
+
+        let phoneme_spans = phoneme_spans_from_phone_spans(&word_phonemes, &word_phone_refs);
+        for (phoneme_index, (phoneme, span)) in word_phonemes.iter().zip(phoneme_spans).enumerate()
+        {
+            phonemes.push(SegmentAlignment {
+                word_index,
+                index: phoneme_index,
+                label: phoneme_label(phoneme, &output.variant),
+                token_id: phoneme_token_id(phoneme),
+                start_ms: span.start_ms,
+                end_ms: span.end_ms,
+            });
+        }
+    }
+
+    (words, phonemes, phones)
+}
+
+fn distributed_word_span(word_index: usize, word_count: usize, duration_ms: u64) -> (u64, u64) {
+    if word_count == 0 {
+        return (0, duration_ms.max(1));
+    }
+    let start = duration_ms.saturating_mul(word_index as u64) / word_count as u64;
+    let end = duration_ms.saturating_mul((word_index + 1) as u64) / word_count as u64;
+    (start, end.max(start.saturating_add(1)))
+}
+
+fn phoneme_spans_from_phone_spans(
+    phonemes: &[&PhonemeToken],
+    phones: &[&AlignedPhone<'_>],
+) -> Vec<PhoneSpan> {
+    if phonemes.is_empty() {
+        return Vec::new();
+    }
+    if phones.is_empty() {
+        return distribute_spans(0, phonemes.len() as u64, phonemes.len())
+            .into_iter()
+            .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
+            .collect();
+    }
+
+    let mut spans = Vec::with_capacity(phonemes.len());
+    let mut cursor = 0usize;
+    for (index, phoneme) in phonemes.iter().enumerate() {
+        let remaining_phonemes = phonemes.len().saturating_sub(index + 1);
+        let remaining_phones = phones.len().saturating_sub(cursor);
+        let desired = phoneme.realized_as.len().max(1);
+        let take = desired
+            .min(remaining_phones.saturating_sub(remaining_phonemes).max(1))
+            .min(remaining_phones);
+        if take == 0 {
+            let previous = spans.last().copied().unwrap_or(PhoneSpan {
+                start_ms: phones[0].span.start_ms,
+                end_ms: phones[0].span.end_ms,
+            });
+            spans.push(previous);
+            continue;
+        }
+        let slice = &phones[cursor..cursor + take];
+        cursor += take;
+        let start_ms = slice
+            .iter()
+            .map(|phone| phone.span.start_ms)
+            .min()
+            .unwrap_or(phones[0].span.start_ms);
+        let end_ms = slice
+            .iter()
+            .map(|phone| phone.span.end_ms)
+            .max()
+            .unwrap_or(start_ms.saturating_add(1))
+            .max(start_ms.saturating_add(1));
+        spans.push(PhoneSpan { start_ms, end_ms });
+    }
+    spans
+}
+
+fn viterbi_phone_spans(
+    phones: &[(&PhoneToken, usize)],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+) -> Option<Vec<PhoneSpan>> {
+    let (active_start, active_end) = active_frame_range(frames)?;
+    let active = &frames[active_start..active_end];
+    if active.len() < phones.len() {
+        return Some(
+            distribute_spans(0, duration_ms, phones.len())
+                .into_iter()
+                .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
+                .collect(),
+        );
+    }
+
+    let phone_count = phones.len();
+    let frame_count = active.len();
+    let average_frames = ((frame_count + phone_count - 1) / phone_count).max(1);
+    let mut prefix_scores = vec![vec![0.0_f32; frame_count + 1]; phone_count];
+    for (phone_index, (phone, _)) in phones.iter().enumerate() {
+        for (frame_index, frame) in active.iter().enumerate() {
+            prefix_scores[phone_index][frame_index + 1] =
+                prefix_scores[phone_index][frame_index] + phone_frame_score(phone, frame);
+        }
+    }
+
+    let neg = f32::NEG_INFINITY;
+    let mut dp = vec![vec![neg; frame_count + 1]; phone_count + 1];
+    let mut previous_len = vec![vec![0usize; frame_count + 1]; phone_count + 1];
+    dp[0][0] = 0.0;
+
+    for phone_index in 1..=phone_count {
+        let class = phone_class(phones[phone_index - 1].0);
+        let (min_len, max_len, expected_len) = duration_limits(class, average_frames);
+        for end in 1..=frame_count {
+            let max_len = max_len.min(end);
+            if max_len < min_len {
+                continue;
+            }
+            for len in min_len..=max_len {
+                let start = end - len;
+                let previous = dp[phone_index - 1][start];
+                if !previous.is_finite() {
+                    continue;
+                }
+                let emission =
+                    prefix_scores[phone_index - 1][end] - prefix_scores[phone_index - 1][start];
+                let candidate = previous + emission + duration_score(len, expected_len);
+                if candidate > dp[phone_index][end] {
+                    dp[phone_index][end] = candidate;
+                    previous_len[phone_index][end] = len;
+                }
+            }
+        }
+    }
+
+    if !dp[phone_count][frame_count].is_finite() {
+        return None;
+    }
+
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 1
+        };
+        phone_count
+    ];
+    let mut end = frame_count;
+    for phone_index in (1..=phone_count).rev() {
+        let len = previous_len[phone_index][end];
+        if len == 0 {
+            return None;
+        }
+        let start = end - len;
+        let start_frame = active_start + start;
+        let start_ms = frames[start_frame].start_ms.min(duration_ms);
+        let end_ms = if active_start + end < frames.len() {
+            frames[active_start + end].start_ms
+        } else {
+            frames[active_start + end - 1].end_ms
+        }
+        .min(duration_ms)
+        .max(start_ms.saturating_add(1));
+        spans[phone_index - 1] = PhoneSpan { start_ms, end_ms };
+        end = start;
+    }
+    Some(spans)
+}
+
+fn active_frame_range(frames: &[AcousticFrameFeatures]) -> Option<(usize, usize)> {
+    if frames.is_empty() {
+        return None;
+    }
+    let first = frames
+        .iter()
+        .position(|frame| frame.energy_norm > 0.08 || frame.voicing > 0.35)
+        .unwrap_or(0)
+        .saturating_sub(3);
+    let last = frames
+        .iter()
+        .rposition(|frame| frame.energy_norm > 0.08 || frame.voicing > 0.35)
+        .unwrap_or(frames.len() - 1)
+        .saturating_add(4)
+        .min(frames.len());
+    if first >= last {
+        Some((0, frames.len()))
+    } else {
+        Some((first, last))
+    }
+}
+
+fn duration_limits(class: PhoneClass, average_frames: usize) -> (usize, usize, f32) {
+    let expected_ms = match class {
+        PhoneClass::Vowel => 90,
+        PhoneClass::Fricative => 95,
+        PhoneClass::Affricate => 90,
+        PhoneClass::Nasal | PhoneClass::Liquid => 75,
+        PhoneClass::Glide => 50,
+        PhoneClass::Stop => 55,
+        PhoneClass::Other => 65,
+    };
+    let expected = ((expected_ms + ALIGN_HOP_MS - 1) / ALIGN_HOP_MS) as usize;
+    let min = match class {
+        PhoneClass::Stop => 1,
+        PhoneClass::Glide => 1,
+        PhoneClass::Vowel | PhoneClass::Fricative | PhoneClass::Affricate => 2,
+        PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Other => 1,
+    };
+    let class_max = match class {
+        PhoneClass::Vowel => 65,
+        PhoneClass::Fricative | PhoneClass::Affricate => 55,
+        PhoneClass::Nasal | PhoneClass::Liquid => 45,
+        PhoneClass::Glide => 30,
+        PhoneClass::Stop => 28,
+        PhoneClass::Other => 40,
+    };
+    let max = class_max.max(average_frames.saturating_mul(5)).max(min);
+    (min, max, expected.max(1) as f32)
+}
+
+fn duration_score(length: usize, expected: f32) -> f32 {
+    let length = length as f32;
+    let ratio = (length / expected.max(1.0)).ln().abs();
+    -0.55 * ratio
+}
+
+fn phone_frame_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+    let class = phone_class(phone);
+    let voicing = phone_feature_category(phone, "phonology.voicing");
+    let mut score = match class {
+        PhoneClass::Vowel => vowel_score(phone, frame),
+        PhoneClass::Stop => stop_score(voicing, frame),
+        PhoneClass::Fricative => fricative_score(voicing, frame),
+        PhoneClass::Affricate => {
+            0.55 * stop_score(voicing, frame) + 0.55 * fricative_score(voicing, frame)
+        }
+        PhoneClass::Nasal => nasal_score(frame),
+        PhoneClass::Liquid => liquid_score(frame),
+        PhoneClass::Glide => glide_score(frame),
+        PhoneClass::Other => neutral_score(frame),
+    };
+
+    if matches!(voicing, Some("voiced")) {
+        score += 0.5 * closeness(frame.voicing, 0.72, 0.35);
+    } else if matches!(voicing, Some("voiceless")) {
+        score += 0.25 * closeness(frame.voicing, 0.15, 0.35);
+    }
+    score
+}
+
+fn vowel_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+    let mut score = 0.0;
+    score += 1.25 * closeness(frame.voicing, 0.82, 0.28);
+    score += 0.8 * closeness(frame.energy_norm, 0.68, 0.45);
+    score += 0.5 * closeness(frame.zero_crossing_rate, 0.08, 0.09);
+    score += 0.55 * closeness(frame.high_ratio, 0.15, 0.25);
+    score += formant_region_score(phone, frame);
+    score
+}
+
+fn stop_score(voicing: Option<&str>, frame: &AcousticFrameFeatures) -> f32 {
+    let closure =
+        closeness(frame.energy_norm, 0.08, 0.20) + 0.45 * closeness(frame.low_ratio, 0.72, 0.30);
+    let release = 0.7 * closeness(frame.spectral_flux, 0.75, 0.35)
+        + 0.45 * closeness(frame.high_ratio, 0.45, 0.35)
+        + 0.3 * closeness(frame.spectral_centroid_hz, 2600.0, 2200.0);
+    let mut score = closure.max(release);
+    if matches!(voicing, Some("voiceless")) {
+        score += 0.3 * closeness(frame.voicing, 0.18, 0.35);
+    }
+    score
+}
+
+fn fricative_score(voicing: Option<&str>, frame: &AcousticFrameFeatures) -> f32 {
+    let mut score = 0.0;
+    score += 1.1 * closeness(frame.high_ratio, 0.70, 0.35);
+    score += 0.8 * closeness(frame.zero_crossing_rate, 0.22, 0.16);
+    score += 0.7 * closeness(frame.spectral_centroid_hz, 4200.0, 2600.0);
+    score += 0.35 * closeness(frame.energy_norm, 0.42, 0.40);
+    if matches!(voicing, Some("voiced")) {
+        score += 0.25 * closeness(frame.voicing, 0.55, 0.40);
+    } else {
+        score += 0.35 * closeness(frame.voicing, 0.16, 0.35);
+    }
+    score
+}
+
+fn nasal_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.95 * closeness(frame.voicing, 0.75, 0.30)
+        + 0.75 * closeness(frame.low_ratio, 0.72, 0.25)
+        + 0.45 * closeness(frame.spectral_centroid_hz, 900.0, 900.0)
+        + 0.25 * closeness(frame.energy_norm, 0.38, 0.35)
+}
+
+fn liquid_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.95 * closeness(frame.voicing, 0.76, 0.30)
+        + 0.45 * closeness(frame.energy_norm, 0.50, 0.40)
+        + 0.45 * closeness(frame.zero_crossing_rate, 0.08, 0.10)
+        + 0.35 * closeness(frame.spectral_centroid_hz, 1500.0, 1300.0)
+}
+
+fn glide_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.85 * closeness(frame.voicing, 0.72, 0.32)
+        + 0.50 * closeness(frame.energy_norm, 0.42, 0.38)
+        + 0.50 * closeness(frame.zero_crossing_rate, 0.07, 0.10)
+}
+
+fn neutral_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.3 * closeness(frame.energy_norm, 0.45, 0.50) + 0.2 * closeness(frame.voicing, 0.45, 0.55)
+}
+
+fn formant_region_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+    let mut score = 0.0;
+    if let Some(height) = phone_feature_category(phone, "phonology.vowel_height") {
+        let target = match height {
+            "high" => 350.0,
+            "mid" | "rhotic" => 520.0,
+            "low" => 760.0,
+            _ => 550.0,
+        };
+        score += 0.9 * closeness(frame.f1_hz, target, 260.0);
+    }
+    if let Some(backness) = phone_feature_category(phone, "phonology.vowel_backness") {
+        let target = match backness {
+            "front" => 2100.0,
+            "central" => 1450.0,
+            "back" => 950.0,
+            _ => 1450.0,
+        };
+        score += 1.0 * closeness(frame.f2_hz, target, 650.0);
+    }
+    if matches!(
+        phone_feature_category(phone, "phonology.roundedness"),
+        Some("rounded")
+    ) {
+        score += 0.35 * closeness(frame.f2_hz, 900.0, 700.0);
+    }
+    score
+}
+
+fn closeness(value: f32, target: f32, spread: f32) -> f32 {
+    if !value.is_finite() || !target.is_finite() || spread <= 0.0 {
+        return 0.0;
+    }
+    let distance = ((value - target) / spread).abs();
+    (1.0 - distance).clamp(-1.5, 1.0)
+}
+
+fn phone_class(phone: &PhoneToken) -> PhoneClass {
+    match phone_feature_category(phone, "phonology.manner") {
+        Some("vowel") => PhoneClass::Vowel,
+        Some("stop") => PhoneClass::Stop,
+        Some("fricative") => PhoneClass::Fricative,
+        Some("affricate") => PhoneClass::Affricate,
+        Some("nasal") => PhoneClass::Nasal,
+        Some("liquid") => PhoneClass::Liquid,
+        Some("glide") => PhoneClass::Glide,
+        _ if matches!(
+            phone_feature_category(phone, "phonology.major"),
+            Some("vowel")
+        ) =>
+        {
+            PhoneClass::Vowel
+        }
+        _ => PhoneClass::Other,
+    }
+}
+
+fn phone_feature_category<'a>(phone: &'a PhoneToken, feature_id: &str) -> Option<&'a str> {
+    let value = phone.features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn extract_acoustic_features(samples: &[f32], sample_rate_hz: u32) -> Vec<AcousticFrameFeatures> {
+    if samples.is_empty() || sample_rate_hz == 0 {
+        return Vec::new();
+    }
+    let frame_len = ((u64::from(sample_rate_hz) * ALIGN_FRAME_MS) / 1000).max(1) as usize;
+    let hop_len = ((u64::from(sample_rate_hz) * ALIGN_HOP_MS) / 1000).max(1) as usize;
+    let mut raw = Vec::new();
+    let mut previous_magnitudes = Vec::new();
+    let mut start = 0usize;
+    while start < samples.len() {
+        let end = (start + frame_len).min(samples.len());
+        let frame = &samples[start..end];
+        let start_ms = (start as u128 * 1000 / u128::from(sample_rate_hz)) as u64;
+        let end_ms = (end as u128 * 1000 / u128::from(sample_rate_hz)) as u64;
+        let (mut features, magnitudes) =
+            analyze_frame(frame, sample_rate_hz, start_ms, end_ms.max(start_ms + 1));
+        features.spectral_flux = spectral_flux(&magnitudes, &previous_magnitudes);
+        previous_magnitudes = magnitudes;
+        raw.push(features);
+        if end == samples.len() {
+            break;
+        }
+        start = start.saturating_add(hop_len);
+    }
+
+    let min_db = raw
+        .iter()
+        .map(|frame| frame.energy_norm)
+        .fold(f32::INFINITY, f32::min);
+    let max_db = raw
+        .iter()
+        .map(|frame| frame.energy_norm)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let range = (max_db - min_db).max(1.0);
+    for frame in &mut raw {
+        frame.energy_norm = ((frame.energy_norm - min_db) / range).clamp(0.0, 1.0);
+    }
+    raw
+}
+
+fn analyze_frame(
+    frame: &[f32],
+    sample_rate_hz: u32,
+    start_ms: u64,
+    end_ms: u64,
+) -> (AcousticFrameFeatures, Vec<f32>) {
+    let len = frame.len().max(1);
+    let mut windowed = Vec::with_capacity(frame.len());
+    let mut sum_sq = 0.0_f32;
+    let mut crossings = 0usize;
+    let mut previous = 0.0_f32;
+    for (index, sample) in frame.iter().enumerate() {
+        if index > 0 && ((*sample >= 0.0) != (previous >= 0.0)) {
+            crossings += 1;
+        }
+        previous = *sample;
+        let window = hann(index, len);
+        let value = sample.clamp(-1.0, 1.0) * window;
+        sum_sq += value * value;
+        windowed.push(value);
+    }
+    let rms = (sum_sq / len as f32).sqrt();
+    let energy_db = 20.0 * (rms + 1.0e-6).log10();
+    let zero_crossing_rate = crossings as f32 / len as f32;
+    let magnitudes = magnitude_spectrum(&windowed);
+    let (spectral_centroid_hz, high_ratio, low_ratio) = spectral_shape(&magnitudes, sample_rate_hz);
+    let (f1_hz, f2_hz) = rough_formants(&magnitudes, sample_rate_hz);
+    let voicing = autocorrelation_voicing(frame, sample_rate_hz);
+
+    (
+        AcousticFrameFeatures {
+            start_ms,
+            end_ms,
+            energy_norm: energy_db,
+            zero_crossing_rate,
+            spectral_centroid_hz,
+            high_ratio,
+            low_ratio,
+            voicing,
+            f1_hz,
+            f2_hz,
+            spectral_flux: 0.0,
+        },
+        magnitudes,
+    )
+}
+
+fn hann(index: usize, len: usize) -> f32 {
+    if len <= 1 {
+        return 1.0;
+    }
+    let phase = 2.0 * std::f32::consts::PI * index as f32 / (len - 1) as f32;
+    0.5 - 0.5 * phase.cos()
+}
+
+fn magnitude_spectrum(frame: &[f32]) -> Vec<f32> {
+    let len = frame.len().max(1);
+    let bins = (len / 2).max(1);
+    let mut magnitudes = Vec::with_capacity(bins);
+    for bin in 0..bins {
+        let mut real = 0.0_f32;
+        let mut imag = 0.0_f32;
+        for (index, sample) in frame.iter().enumerate() {
+            let phase = -2.0 * std::f32::consts::PI * bin as f32 * index as f32 / len as f32;
+            real += sample * phase.cos();
+            imag += sample * phase.sin();
+        }
+        magnitudes.push((real * real + imag * imag).sqrt());
+    }
+    magnitudes
+}
+
+fn spectral_shape(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32, f32) {
+    let total = magnitudes.iter().map(|value| value * value).sum::<f32>() + 1.0e-8;
+    let bin_hz = sample_rate_hz as f32 / (2.0 * magnitudes.len().max(1) as f32);
+    let mut centroid_num = 0.0_f32;
+    let mut high = 0.0_f32;
+    let mut low = 0.0_f32;
+    for (index, magnitude) in magnitudes.iter().enumerate() {
+        let hz = index as f32 * bin_hz;
+        let power = magnitude * magnitude;
+        centroid_num += hz * power;
+        if hz >= 3000.0 {
+            high += power;
+        }
+        if hz <= 1000.0 {
+            low += power;
+        }
+    }
+    (centroid_num / total, high / total, low / total)
+}
+
+fn rough_formants(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32) {
+    let f1 = strongest_peak_hz(magnitudes, sample_rate_hz, 250.0, 1000.0).unwrap_or(550.0);
+    let f2 = strongest_peak_hz(magnitudes, sample_rate_hz, 800.0, 3200.0).unwrap_or(1500.0);
+    (f1, f2.max(f1 + 150.0))
+}
+
+fn strongest_peak_hz(
+    magnitudes: &[f32],
+    sample_rate_hz: u32,
+    low_hz: f32,
+    high_hz: f32,
+) -> Option<f32> {
+    if magnitudes.is_empty() {
+        return None;
+    }
+    let bin_hz = sample_rate_hz as f32 / (2.0 * magnitudes.len() as f32);
+    let start = (low_hz / bin_hz).floor().max(1.0) as usize;
+    let end = ((high_hz / bin_hz).ceil() as usize).min(magnitudes.len().saturating_sub(1));
+    if start >= end {
+        return None;
+    }
+    let mut best = None;
+    for index in start..=end {
+        let value = magnitudes[index];
+        let is_peak = index == start
+            || index == end
+            || (value >= magnitudes[index - 1] && value >= magnitudes[index + 1]);
+        if is_peak && best.is_none_or(|(_, best_value)| value > best_value) {
+            best = Some((index, value));
+        }
+    }
+    best.map(|(index, _)| index as f32 * bin_hz)
+}
+
+fn autocorrelation_voicing(frame: &[f32], sample_rate_hz: u32) -> f32 {
+    if frame.len() < 8 || sample_rate_hz == 0 {
+        return 0.0;
+    }
+    let energy = frame.iter().map(|sample| sample * sample).sum::<f32>() + 1.0e-8;
+    let min_lag = (sample_rate_hz / 420).max(1) as usize;
+    let max_lag = (sample_rate_hz / 70).max(min_lag as u32) as usize;
+    let max_lag = max_lag.min(frame.len().saturating_sub(1));
+    let mut best = 0.0_f32;
+    for lag in min_lag..=max_lag {
+        let mut sum = 0.0_f32;
+        for index in 0..frame.len() - lag {
+            sum += frame[index] * frame[index + lag];
+        }
+        best = best.max(sum / energy);
+    }
+    best.clamp(0.0, 1.0)
+}
+
+fn spectral_flux(current: &[f32], previous: &[f32]) -> f32 {
+    if current.is_empty() || previous.is_empty() {
+        return 0.0;
+    }
+    let len = current.len().min(previous.len());
+    let current_total = current.iter().take(len).sum::<f32>() + 1.0e-8;
+    let previous_total = previous.iter().take(len).sum::<f32>() + 1.0e-8;
+    let flux = current
+        .iter()
+        .zip(previous.iter())
+        .take(len)
+        .map(|(current, previous)| (current / current_total - previous / previous_total).max(0.0))
+        .sum::<f32>();
+    (flux * 12.0).clamp(0.0, 1.0)
 }
 
 fn alignment_tracks(

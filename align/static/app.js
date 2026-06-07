@@ -165,7 +165,7 @@ async function alignAudio() {
   }, (payload) => {
     renderPhonemicization(payload.phonemicization);
     renderAlignment(payload);
-    setStatus('Aligned with ASR timings');
+    setStatus('Aligned with acoustic Viterbi');
   });
 }
 
