@@ -545,9 +545,14 @@ Pete should think in terms of sensations, impressions, experiences, memories, re
 
 ```bash
 cargo fmt
-cargo test
-cargo check
+just test
+cargo check -p styletts2
 ```
+
+`just test` runs the inexpensive local test set: speech plus the StyleTTS2
+contract tests without default StyleTTS2 backend features. Full-workspace checks
+are intentionally not the default development loop because the runtime defaults
+include native model backends and accelerator providers.
 
 ## Reference mock implementations
 

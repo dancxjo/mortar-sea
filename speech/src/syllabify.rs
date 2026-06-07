@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn extra_uses_maximum_onset_for_legal_str_cluster() {
-        assert_eq!(syllables_to_ipa(&syllables_for("extra")), "ˈɛk.stɹə");
+        assert_eq!(syllables_to_ipa(&syllables_for("extra")), "ˈɛk.st˭ɹə");
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn rhotic_vowels_add_typed_coda_r_in_syllables() {
-        assert_eq!(syllables_to_ipa(&syllables_for("current")), "ˈkɝɹ.ənt");
+        assert_eq!(syllables_to_ipa(&syllables_for("current")), "ˈkʰɝɹ.ənt");
         assert_eq!(syllables_to_ipa(&syllables_for("derived")), "dɚɹ.ˈaɪvd");
         assert_eq!(syllables_to_ipa(&syllables_for("surface")), "ˈsɝɹ.fəs");
 

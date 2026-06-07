@@ -7,6 +7,11 @@ default:
 run *args:
     cargo run -- "$@"
 
+# Run the inexpensive local test set: speech plus StyleTTS2 contract tests.
+test:
+    cargo test -p speech
+    cargo test -p styletts2 --no-default-features --test contract
+
 # Launch the Face browser server.
 face:
     cargo run -- face

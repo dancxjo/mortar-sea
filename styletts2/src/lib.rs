@@ -19,8 +19,9 @@
 //! phonemes carry what is being said, and the prosody track carries timing,
 //! energy, and pitch intent.
 //!
-//! Real inference belongs behind [`StyleTts2Backend`] and is feature-gated by
-//! `styletts2-onnx`. The default build has no model runtime dependency.
+//! Real inference belongs behind [`StyleTts2Backend`]. ONNX accelerator support
+//! is enabled by default, while tests use the deterministic mock and contract
+//! paths unless they explicitly load a native backend.
 
 pub mod backend;
 pub mod config;

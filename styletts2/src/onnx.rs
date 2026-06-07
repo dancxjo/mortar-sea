@@ -3,7 +3,11 @@ use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ort::ep::ExecutionProviderDispatch;
+use ort::session::{
+    Session,
+    builder::{GraphOptimizationLevel, SessionBuilder},
+};
 use ort::value::{DynTensorValueType, Tensor};
 use speech::{StyleRef, StyleSource};
 
@@ -473,6 +477,12 @@ impl StyleTts2OnnxBackend {
         validate_style_vector(reference_features)?;
         let options = self.diffusion_options.clone();
         validate_diffusion_options(&options)?;
+        let static_inputs = DiffusionStaticInputs::new(
+            text_embedding_shape,
+            text_embedding,
+            reference_features,
+            options.embedding_scale,
+        )?;
         let sigmas = karras_sigmas(options.diffusion_steps, 0.0001, 3.0, 9.0);
         let mut rng = DeterministicRng::new(options.seed);
         let mut x = gaussian_vec(&mut rng, STYLE_VECTOR_DIMS)
@@ -483,16 +493,7 @@ impl StyleTts2OnnxBackend {
         for index in 0..options.diffusion_steps.saturating_sub(1) {
             let sigma = sigmas[index];
             let sigma_next = sigmas[index + 1];
-            x = self.adpm2_step(
-                x,
-                sigma,
-                sigma_next,
-                text_embedding_shape,
-                text_embedding,
-                reference_features,
-                options.embedding_scale,
-                &mut rng,
-            )?;
+            x = self.adpm2_step(x, sigma, sigma_next, &static_inputs, &mut rng)?;
         }
 
         validate_style_vector(&x)?;
@@ -505,10 +506,7 @@ impl StyleTts2OnnxBackend {
         x: Vec<f32>,
         sigma: f32,
         sigma_next: f32,
-        text_embedding_shape: &[i64],
-        text_embedding: &[f32],
-        reference_features: &[f32],
-        embedding_scale: f64,
+        static_inputs: &DiffusionStaticInputs,
         rng: &mut DeterministicRng,
     ) -> Result<Vec<f32>, StyleTts2Error> {
         let sigma_up = (sigma_next.powi(2) * (sigma.powi(2) - sigma_next.powi(2)) / sigma.powi(2))
@@ -516,24 +514,10 @@ impl StyleTts2OnnxBackend {
             .sqrt();
         let sigma_down = (sigma_next.powi(2) - sigma_up.powi(2)).max(0.0).sqrt();
         let sigma_mid = (sigma + sigma_down) * 0.5;
-        let denoised = self.diffusion_denoise(
-            &x,
-            sigma,
-            text_embedding_shape,
-            text_embedding,
-            reference_features,
-            embedding_scale,
-        )?;
+        let denoised = self.diffusion_denoise(&x, sigma, static_inputs)?;
         let derivative = diffusion_derivative(&x, &denoised, sigma)?;
         let midpoint = add_scaled(&x, &derivative, sigma_mid - sigma);
-        let denoised_mid = self.diffusion_denoise(
-            &midpoint,
-            sigma_mid,
-            text_embedding_shape,
-            text_embedding,
-            reference_features,
-            embedding_scale,
-        )?;
+        let denoised_mid = self.diffusion_denoise(&midpoint, sigma_mid, static_inputs)?;
         let derivative_mid = diffusion_derivative(&midpoint, &denoised_mid, sigma_mid)?;
         let mut next = add_scaled(&x, &derivative_mid, sigma_down - sigma);
         if sigma_up > 0.0 {
@@ -548,13 +532,9 @@ impl StyleTts2OnnxBackend {
         &mut self,
         x: &[f32],
         sigma: f32,
-        text_embedding_shape: &[i64],
-        text_embedding: &[f32],
-        reference_features: &[f32],
-        embedding_scale: f64,
+        static_inputs: &DiffusionStaticInputs,
     ) -> Result<Vec<f32>, StyleTts2Error> {
         validate_style_vector(x)?;
-        validate_style_vector(reference_features)?;
         if sigma <= 0.0 || !sigma.is_finite() {
             return Err(invalid_output(format!(
                 "StyleTTS2 diffusion sigma must be finite and positive, got {sigma}"
@@ -571,39 +551,14 @@ impl StyleTts2OnnxBackend {
                 backend_error(format!("failed to build diffusion sigma input: {error}"))
             })?
             .upcast();
-        let embedding =
-            Tensor::from_array((text_embedding_shape.to_vec(), text_embedding.to_vec()))
-                .map_err(|error| {
-                    backend_error(format!(
-                        "failed to build diffusion text embedding input: {error}"
-                    ))
-                })?
-                .upcast();
-        let embedding_scale = Tensor::from_array((Vec::<i64>::new(), vec![embedding_scale]))
-            .map_err(|error| {
-                backend_error(format!(
-                    "failed to build diffusion embedding scale input: {error}"
-                ))
-            })?
-            .upcast();
-        let features = Tensor::from_array((
-            vec![1_i64, STYLE_VECTOR_DIMS as i64],
-            reference_features.to_vec(),
-        ))
-        .map_err(|error| {
-            backend_error(format!(
-                "failed to build diffusion reference feature input: {error}"
-            ))
-        })?
-        .upcast();
         let outputs = self
             .diffusion
-            .run(vec![
-                ("a".to_string(), noise),
-                ("b".to_string(), sigma),
-                ("c".to_string(), embedding),
-                ("d".to_string(), embedding_scale),
-                ("e".to_string(), features),
+            .run(ort::inputs![
+                "a" => noise,
+                "b" => sigma,
+                "c" => static_inputs.text_embedding.view(),
+                "d" => static_inputs.embedding_scale.view(),
+                "e" => static_inputs.reference_features.view(),
             ])
             .map_err(|error| {
                 backend_error(format!("StyleTTS2 diffusion denoiser failed: {error}"))
@@ -615,6 +570,52 @@ impl StyleTts2OnnxBackend {
             )));
         }
         Ok(values)
+    }
+}
+
+struct DiffusionStaticInputs {
+    text_embedding: Tensor<f32>,
+    embedding_scale: Tensor<f64>,
+    reference_features: Tensor<f32>,
+}
+
+impl DiffusionStaticInputs {
+    fn new(
+        text_embedding_shape: &[i64],
+        text_embedding: &[f32],
+        reference_features: &[f32],
+        embedding_scale: f64,
+    ) -> Result<Self, StyleTts2Error> {
+        validate_style_vector(reference_features)?;
+        let text_embedding =
+            Tensor::from_array((text_embedding_shape.to_vec(), text_embedding.to_vec())).map_err(
+                |error| {
+                    backend_error(format!(
+                        "failed to build diffusion text embedding input: {error}"
+                    ))
+                },
+            )?;
+        let embedding_scale = Tensor::from_array((Vec::<i64>::new(), vec![embedding_scale]))
+            .map_err(|error| {
+                backend_error(format!(
+                    "failed to build diffusion embedding scale input: {error}"
+                ))
+            })?;
+        let reference_features = Tensor::from_array((
+            vec![1_i64, STYLE_VECTOR_DIMS as i64],
+            reference_features.to_vec(),
+        ))
+        .map_err(|error| {
+            backend_error(format!(
+                "failed to build diffusion reference feature input: {error}"
+            ))
+        })?;
+
+        Ok(Self {
+            text_embedding,
+            embedding_scale,
+            reference_features,
+        })
     }
 }
 
@@ -1054,7 +1055,52 @@ fn load_session(
     label: &str,
     options: StyleTts2OnnxOptions,
 ) -> Result<Session, StyleTts2Error> {
-    Session::builder()
+    let execution_providers = styletts2_execution_providers(options);
+    if execution_providers.is_empty() {
+        return load_session_with_execution_providers(path, label, options, &[]);
+    }
+
+    match load_session_with_execution_providers(path, label, options, &execution_providers) {
+        Ok(session) => Ok(session),
+        Err(accelerated_error) => load_session_with_execution_providers(path, label, options, &[])
+            .map_err(|cpu_error| {
+                backend_error(format!(
+                    "failed to load {label} with StyleTTS2 ONNX accelerators ({accelerated_error}); CPU fallback also failed: {cpu_error}"
+                ))
+            }),
+    }
+}
+
+fn styletts2_execution_providers(_options: StyleTts2OnnxOptions) -> Vec<ExecutionProviderDispatch> {
+    #[allow(unused_mut)]
+    let mut providers = Vec::new();
+
+    #[cfg(feature = "styletts2-onnx-cuda")]
+    providers.push(ort::ep::CUDA::default().build().fail_silently());
+
+    #[cfg(feature = "styletts2-onnx-onednn")]
+    providers.push(ort::ep::OneDNN::default().build().fail_silently());
+
+    #[cfg(feature = "styletts2-onnx-xnnpack")]
+    if let Some(threads) = std::num::NonZeroUsize::new(_options.intra_threads) {
+        providers.push(
+            ort::ep::XNNPACK::default()
+                .with_intra_op_num_threads(threads)
+                .build()
+                .fail_silently(),
+        );
+    }
+
+    providers
+}
+
+fn load_session_with_execution_providers(
+    path: &Path,
+    label: &str,
+    options: StyleTts2OnnxOptions,
+    execution_providers: &[ExecutionProviderDispatch],
+) -> Result<Session, StyleTts2Error> {
+    let builder = Session::builder()
         .map_err(|error| {
             backend_error(format!("failed to create {label} session builder: {error}"))
         })?
@@ -1079,12 +1125,32 @@ fn load_session(
         .with_optimization_level(options.optimization.graph_optimization_level())
         .map_err(|error| {
             backend_error(format!("failed to configure {label} optimization: {error}"))
-        })?
-        .commit_from_file(path)
+        })?;
+
+    let mut builder = configure_execution_providers(builder, label, execution_providers)?;
+
+    builder.commit_from_file(path).map_err(|error| {
+        backend_error(format!(
+            "failed to load {label} ONNX model from {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn configure_execution_providers(
+    builder: SessionBuilder,
+    label: &str,
+    execution_providers: &[ExecutionProviderDispatch],
+) -> Result<SessionBuilder, StyleTts2Error> {
+    if execution_providers.is_empty() {
+        return Ok(builder);
+    }
+
+    builder
+        .with_execution_providers(execution_providers)
         .map_err(|error| {
             backend_error(format!(
-                "failed to load {label} ONNX model from {}: {error}",
-                path.display()
+                "failed to configure {label} execution providers: {error}"
             ))
         })
 }

@@ -17,9 +17,12 @@ use axum::{
 use mortar_sea::speak::{SpeakBackend, SpeechSynthesisOptions, synthesize_phonemicized_to_wav};
 use serde::{Deserialize, Serialize};
 use speech::{
-    EnglishPhonemicizer, FeatureId, FeatureValue, PhoneToken, PhonemeToken, PhonemicizeOutput,
-    PhonemicizeRequest, Phonemicizer, PronunciationWarning, Spec, VarietyId, phone_display_symbol,
-    phoneme_default_phone_display_symbol,
+    AcousticCueDef, AcousticLandmarkKind, AcousticMeasurement, AcousticProfile,
+    AcousticTargetModel, CueDependency, CueDiagnosticity, EnglishPhonemicizer, FeatureId,
+    FeatureValue, NumericRange, PhoneId, PhoneToken, PhonemeToken, PhonemicizeOutput,
+    PhonemicizeRequest, Phonemicizer, PronunciationWarning, SegmentSamplingStrategy, Spec,
+    SubsegmentRole, VarietyId, phone_display_symbol, phoneme_default_phone_display_symbol,
+    variety_by_code,
 };
 use tokio::{fs, net::TcpListener};
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -510,11 +513,14 @@ struct AcousticFrameFeatures {
     energy_norm: f32,
     zero_crossing_rate: f32,
     spectral_centroid_hz: f32,
+    spectral_skew: f32,
     high_ratio: f32,
     low_ratio: f32,
+    low_band_peak_hz: f32,
     voicing: f32,
     f1_hz: f32,
     f2_hz: f32,
+    f3_hz: f32,
     spectral_flux: f32,
     sonority: f32,
     vowel_nucleus_likelihood: f32,
@@ -544,6 +550,34 @@ struct AlignedPhone<'a> {
     span: PhoneSpan,
 }
 
+struct AlignedBoundary {
+    after_word_index: usize,
+    token_id: String,
+    label: String,
+    span: PhoneSpan,
+}
+
+struct AlignedSegments<'a> {
+    phones: Vec<AlignedPhone<'a>>,
+    boundaries: Vec<AlignedBoundary>,
+}
+
+#[derive(Debug, Clone)]
+enum AlignableUnit<'a> {
+    Phone {
+        token: &'a PhoneToken,
+        word_index: usize,
+    },
+    Boundary {
+        after_word_index: usize,
+        phone_id: PhoneId,
+    },
+}
+
+struct AlignmentAcousticContext {
+    profile: Option<AcousticProfile>,
+}
+
 fn forced_alignment_tracks(
     output: &PhonemicizeOutput,
     decoded: &DecodedWav,
@@ -552,8 +586,12 @@ fn forced_alignment_tracks(
     Vec<SegmentAlignment>,
     Vec<SegmentAlignment>,
 )> {
-    let phones = alignable_phones(output);
-    if phones.is_empty() {
+    let context = AlignmentAcousticContext::for_output(output);
+    let units = alignable_units(output, &context);
+    if units
+        .iter()
+        .all(|unit| !matches!(unit, AlignableUnit::Phone { .. }))
+    {
         return None;
     }
     let samples = resample_linear(
@@ -562,22 +600,14 @@ fn forced_alignment_tracks(
         ALIGN_SAMPLE_RATE_HZ,
     );
     let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
-    if frames.len() < phones.len().min(3) {
+    if frames.len() < units.len().min(3) {
         return None;
     }
-    let spans = viterbi_phone_spans(output, &phones, &frames, decoded.duration_ms)?;
-    let aligned_phones = phones
-        .into_iter()
-        .zip(spans)
-        .map(|((token, word_index), span)| AlignedPhone {
-            token,
-            word_index,
-            span,
-        })
-        .collect::<Vec<_>>();
-    Some(alignment_tracks_from_phone_spans(
+    let spans = viterbi_unit_spans(output, &units, &frames, decoded.duration_ms, &context)?;
+    let aligned_segments = aligned_segments_from_units(units, spans, output, &context);
+    Some(alignment_tracks_from_segments(
         output,
-        &aligned_phones,
+        &aligned_segments,
         decoded.duration_ms,
     ))
 }
@@ -586,21 +616,146 @@ fn alignable_phones(output: &PhonemicizeOutput) -> Vec<(&PhoneToken, usize)> {
     output
         .phones
         .iter()
-        .filter_map(|token| {
-            let Spec::Known(id) = &token.phone else {
-                return None;
-            };
-            if id.as_str().starts_with("boundary.") {
-                return None;
+        .filter_map(|token| match &token.phone {
+            Spec::Known(id) if !id.as_str().starts_with("boundary.") => {
+                Some((token, phone_word_index(token)?))
             }
-            Some((token, phone_word_index(token)?))
+            _ => None,
         })
         .collect()
 }
 
-fn alignment_tracks_from_phone_spans(
+fn alignable_units<'a>(
+    output: &'a PhonemicizeOutput,
+    context: &AlignmentAcousticContext,
+) -> Vec<AlignableUnit<'a>> {
+    let pause_boundaries = output
+        .boundaries
+        .iter()
+        .filter_map(|boundary| {
+            let phone_id = if boundary.terminal.is_some() {
+                PhoneId::from("boundary.terminal_pause")
+            } else if boundary.pause.is_some() {
+                PhoneId::from("boundary.phrase_pause")
+            } else {
+                return None;
+            };
+            if context.phone_model(&phone_id).is_none() {
+                return None;
+            }
+            Some((boundary.after_grapheme_index, phone_id))
+        })
+        .collect::<Vec<_>>();
+
+    let mut units = Vec::new();
+    let mut next_pause = 0usize;
+    let alignable = alignable_phones(output);
+    for (index, (token, word_index)) in alignable.iter().copied().enumerate() {
+        units.push(AlignableUnit::Phone { token, word_index });
+        let next_word = alignable.get(index + 1).map(|(_, word)| *word);
+        if next_word != Some(word_index) {
+            while let Some((after_word_index, phone_id)) = pause_boundaries.get(next_pause) {
+                if *after_word_index != word_index {
+                    break;
+                }
+                units.push(AlignableUnit::Boundary {
+                    after_word_index: *after_word_index,
+                    phone_id: phone_id.clone(),
+                });
+                next_pause += 1;
+            }
+        }
+    }
+    units
+}
+
+fn aligned_segments_from_units<'a>(
+    units: Vec<AlignableUnit<'a>>,
+    spans: Vec<PhoneSpan>,
+    output: &PhonemicizeOutput,
+    context: &AlignmentAcousticContext,
+) -> AlignedSegments<'a> {
+    let mut phones = Vec::new();
+    let mut boundaries = Vec::new();
+    for (unit, span) in units.into_iter().zip(spans) {
+        match unit {
+            AlignableUnit::Phone { token, word_index } => phones.push(AlignedPhone {
+                token,
+                word_index,
+                span,
+            }),
+            AlignableUnit::Boundary {
+                after_word_index,
+                phone_id,
+            } => boundaries.push(AlignedBoundary {
+                after_word_index,
+                token_id: phone_id.as_str().to_string(),
+                label: boundary_label(&phone_id, context),
+                span,
+            }),
+        }
+    }
+    boundaries.extend(non_silent_boundary_points(output, &phones, context));
+    boundaries.sort_by(|left, right| {
+        left.after_word_index
+            .cmp(&right.after_word_index)
+            .then(left.span.start_ms.cmp(&right.span.start_ms))
+            .then(left.token_id.cmp(&right.token_id))
+    });
+    AlignedSegments { phones, boundaries }
+}
+
+fn non_silent_boundary_points(
     output: &PhonemicizeOutput,
     aligned_phones: &[AlignedPhone<'_>],
+    context: &AlignmentAcousticContext,
+) -> Vec<AlignedBoundary> {
+    let mut boundaries = Vec::new();
+    for boundary in &output.boundaries {
+        if boundary.pause.is_some() || boundary.terminal.is_some() {
+            continue;
+        }
+        let phone_id = PhoneId::from(if boundary.kind == speech::BoundaryKind::Word {
+            "boundary.word"
+        } else {
+            "boundary.letter"
+        });
+        let point = boundary_alignment_point(boundary.after_grapheme_index, aligned_phones);
+        boundaries.push(AlignedBoundary {
+            after_word_index: boundary.after_grapheme_index,
+            token_id: phone_id.as_str().to_string(),
+            label: boundary_label(&phone_id, context),
+            span: PhoneSpan {
+                start_ms: point,
+                end_ms: point.saturating_add(1),
+            },
+        });
+    }
+    boundaries
+}
+
+fn boundary_alignment_point(after_word_index: usize, aligned_phones: &[AlignedPhone<'_>]) -> u64 {
+    let previous_end = aligned_phones
+        .iter()
+        .filter(|phone| phone.word_index == after_word_index)
+        .map(|phone| phone.span.end_ms)
+        .max();
+    let next_start = aligned_phones
+        .iter()
+        .filter(|phone| phone.word_index == after_word_index.saturating_add(1))
+        .map(|phone| phone.span.start_ms)
+        .min();
+    match (previous_end, next_start) {
+        (Some(left), Some(right)) => left.saturating_add(right).saturating_div(2),
+        (Some(left), None) => left,
+        (None, Some(right)) => right,
+        (None, None) => 0,
+    }
+}
+
+fn alignment_tracks_from_segments(
+    output: &PhonemicizeOutput,
+    aligned_segments: &AlignedSegments<'_>,
     duration_ms: u64,
 ) -> (
     Vec<WordAlignment>,
@@ -615,6 +770,7 @@ fn alignment_tracks_from_phone_spans(
     let mut words = Vec::new();
     let mut phonemes = Vec::new();
     let mut phones = Vec::new();
+    let aligned_phones = &aligned_segments.phones;
 
     for (word_index, text) in canonical_words.iter().enumerate() {
         let word_phone_refs = aligned_phones
@@ -680,6 +836,22 @@ fn alignment_tracks_from_phone_spans(
                 end_ms: span.end_ms,
             });
         }
+
+        for (boundary_index, boundary) in aligned_segments
+            .boundaries
+            .iter()
+            .filter(|boundary| boundary.after_word_index == word_index)
+            .enumerate()
+        {
+            phones.push(SegmentAlignment {
+                word_index,
+                index: word_phone_refs.len() + boundary_index,
+                label: boundary.label.clone(),
+                token_id: boundary.token_id.clone(),
+                start_ms: boundary.span.start_ms,
+                end_ms: boundary.span.end_ms,
+            });
+        }
     }
 
     (words, phonemes, phones)
@@ -743,55 +915,69 @@ fn phoneme_spans_from_phone_spans(
     spans
 }
 
-fn viterbi_phone_spans(
+fn viterbi_unit_spans(
     output: &PhonemicizeOutput,
-    phones: &[(&PhoneToken, usize)],
+    units: &[AlignableUnit<'_>],
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
+    context: &AlignmentAcousticContext,
 ) -> Option<Vec<PhoneSpan>> {
-    let (active_start, active_end) = active_frame_range(frames)?;
+    let (active_start, active_end) = active_frame_range_for_units(frames, units)?;
     let active = &frames[active_start..active_end];
-    if active.len() < phones.len() {
+    if active.len() < units.len() {
         return Some(
-            distribute_spans(0, duration_ms, phones.len())
+            distribute_spans(0, duration_ms, units.len())
                 .into_iter()
                 .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
                 .collect(),
         );
     }
 
-    let phone_count = phones.len();
+    let unit_count = units.len();
     let frame_count = active.len();
-    let average_frames = ((frame_count + phone_count - 1) / phone_count).max(1);
-    let nucleus_phone_indices = syllable_nucleus_phone_indices(output, phones);
+    let average_frames = ((frame_count + unit_count - 1) / unit_count).max(1);
+    let alignable_phones = units
+        .iter()
+        .filter_map(|unit| match unit {
+            AlignableUnit::Phone { token, word_index } => Some((*token, *word_index)),
+            AlignableUnit::Boundary { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let phone_unit_indices = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| matches!(unit, AlignableUnit::Phone { .. }).then_some(index))
+        .collect::<Vec<_>>();
+    let nucleus_phone_indices = syllable_nucleus_phone_indices(output, &alignable_phones);
     let nucleus_targets = nucleus_target_frames(active, nucleus_phone_indices.len());
-    let mut nucleus_target_by_phone = vec![None; phone_count];
+    let mut nucleus_target_by_unit = vec![None; unit_count];
     for (phone_index, target_frame) in nucleus_phone_indices
         .iter()
         .copied()
         .zip(nucleus_targets.iter().copied())
     {
-        if phone_index < phone_count {
-            nucleus_target_by_phone[phone_index] = Some(target_frame);
+        if let Some(unit_index) = phone_unit_indices.get(phone_index).copied() {
+            nucleus_target_by_unit[unit_index] = Some(target_frame);
         }
     }
     let nucleus_target_prefix = nucleus_target_prefix(frame_count, &nucleus_targets);
-    let mut prefix_scores = vec![vec![0.0_f32; frame_count + 1]; phone_count];
-    for (phone_index, (phone, _)) in phones.iter().enumerate() {
+    let mut prefix_scores = vec![vec![0.0_f32; frame_count + 1]; unit_count];
+    for (unit_index, unit) in units.iter().enumerate() {
         for (frame_index, frame) in active.iter().enumerate() {
-            prefix_scores[phone_index][frame_index + 1] =
-                prefix_scores[phone_index][frame_index] + phone_frame_score(phone, frame);
+            prefix_scores[unit_index][frame_index + 1] =
+                prefix_scores[unit_index][frame_index] + unit_frame_score(unit, frame, context);
         }
     }
 
     let neg = f32::NEG_INFINITY;
-    let mut dp = vec![vec![neg; frame_count + 1]; phone_count + 1];
-    let mut previous_len = vec![vec![0usize; frame_count + 1]; phone_count + 1];
+    let mut dp = vec![vec![neg; frame_count + 1]; unit_count + 1];
+    let mut previous_len = vec![vec![0usize; frame_count + 1]; unit_count + 1];
     dp[0][0] = 0.0;
 
-    for phone_index in 1..=phone_count {
-        let class = phone_class(phones[phone_index - 1].0);
-        let (min_len, max_len, expected_len) = duration_limits(class, average_frames);
+    for unit_index in 1..=unit_count {
+        let unit = &units[unit_index - 1];
+        let class = unit_phone_class(unit);
+        let (min_len, max_len, expected_len) = duration_limits(unit, average_frames, context);
         for end in 1..=frame_count {
             let max_len = max_len.min(end);
             if max_len < min_len {
@@ -799,31 +985,37 @@ fn viterbi_phone_spans(
             }
             for len in min_len..=max_len {
                 let start = end - len;
-                let previous = dp[phone_index - 1][start];
+                let previous = dp[unit_index - 1][start];
                 if !previous.is_finite() {
                     continue;
                 }
                 let emission =
-                    prefix_scores[phone_index - 1][end] - prefix_scores[phone_index - 1][start];
+                    prefix_scores[unit_index - 1][end] - prefix_scores[unit_index - 1][start];
                 let anchor = nucleus_anchor_score(
-                    phone_index - 1,
+                    unit_index - 1,
                     class,
                     start,
                     end,
                     active,
-                    &nucleus_target_by_phone,
+                    &nucleus_target_by_unit,
                     &nucleus_target_prefix,
                 );
-                let candidate = previous + emission + duration_score(len, expected_len) + anchor;
-                if candidate > dp[phone_index][end] {
-                    dp[phone_index][end] = candidate;
-                    previous_len[phone_index][end] = len;
+                let segment_score =
+                    unit_segment_score(unit, &active[start..end], context, expected_len);
+                let candidate = previous
+                    + emission
+                    + duration_score(len, expected_len)
+                    + anchor
+                    + segment_score;
+                if candidate > dp[unit_index][end] {
+                    dp[unit_index][end] = candidate;
+                    previous_len[unit_index][end] = len;
                 }
             }
         }
     }
 
-    if !dp[phone_count][frame_count].is_finite() {
+    if !dp[unit_count][frame_count].is_finite() {
         return None;
     }
 
@@ -832,11 +1024,11 @@ fn viterbi_phone_spans(
             start_ms: 0,
             end_ms: 1
         };
-        phone_count
+        unit_count
     ];
     let mut end = frame_count;
-    for phone_index in (1..=phone_count).rev() {
-        let len = previous_len[phone_index][end];
+    for unit_index in (1..=unit_count).rev() {
+        let len = previous_len[unit_index][end];
         if len == 0 {
             return None;
         }
@@ -850,7 +1042,7 @@ fn viterbi_phone_spans(
         }
         .min(duration_ms)
         .max(start_ms.saturating_add(1));
-        spans[phone_index - 1] = PhoneSpan { start_ms, end_ms };
+        spans[unit_index - 1] = PhoneSpan { start_ms, end_ms };
         end = start;
     }
     Some(spans)
@@ -1001,7 +1193,26 @@ fn active_frame_range(frames: &[AcousticFrameFeatures]) -> Option<(usize, usize)
     }
 }
 
-fn duration_limits(class: PhoneClass, average_frames: usize) -> (usize, usize, f32) {
+fn active_frame_range_for_units(
+    frames: &[AcousticFrameFeatures],
+    units: &[AlignableUnit<'_>],
+) -> Option<(usize, usize)> {
+    let (start, mut end) = active_frame_range(frames)?;
+    if units
+        .last()
+        .is_some_and(|unit| matches!(unit, AlignableUnit::Boundary { phone_id, .. } if phone_id.as_str() == "boundary.terminal_pause"))
+    {
+        end = frames.len();
+    }
+    Some((start, end))
+}
+
+fn duration_limits(
+    unit: &AlignableUnit<'_>,
+    average_frames: usize,
+    context: &AlignmentAcousticContext,
+) -> (usize, usize, f32) {
+    let class = unit_phone_class(unit);
     let expected_ms = match class {
         PhoneClass::Vowel => 90,
         PhoneClass::Fricative => 95,
@@ -1011,7 +1222,7 @@ fn duration_limits(class: PhoneClass, average_frames: usize) -> (usize, usize, f
         PhoneClass::Stop => 55,
         PhoneClass::Other => 65,
     };
-    let expected = ((expected_ms + ALIGN_HOP_MS - 1) / ALIGN_HOP_MS) as usize;
+    let mut expected = ((expected_ms + ALIGN_HOP_MS - 1) / ALIGN_HOP_MS) as usize;
     let min = match class {
         PhoneClass::Stop => 1,
         PhoneClass::Glide => 1,
@@ -1026,7 +1237,22 @@ fn duration_limits(class: PhoneClass, average_frames: usize) -> (usize, usize, f
         PhoneClass::Stop => 28,
         PhoneClass::Other => 40,
     };
-    let max = class_max.max(average_frames.saturating_mul(5)).max(min);
+    let mut min = min;
+    let mut max = class_max.max(average_frames.saturating_mul(5)).max(min);
+    if let Some(model) = context.unit_model(unit) {
+        if let Some(duration) = model_duration_range(model) {
+            let min_frames = ms_to_frames(duration.min).max(1);
+            let max_frames = ms_to_frames(duration.max).max(min_frames);
+            let midpoint_frames = ms_to_frames((duration.min + duration.max) * 0.5).max(1);
+            min = min.min(min_frames).max(1);
+            max = max.max(max_frames).min(class_max.max(max_frames).max(min));
+            expected = midpoint_frames;
+        }
+        if is_silent_boundary_model(model) {
+            min = 1;
+            max = max.max(ms_to_frames(1200.0));
+        }
+    }
     (min, max, expected.max(1) as f32)
 }
 
@@ -1036,7 +1262,28 @@ fn duration_score(length: usize, expected: f32) -> f32 {
     -0.55 * ratio
 }
 
-fn phone_frame_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+fn unit_frame_score(
+    unit: &AlignableUnit<'_>,
+    frame: &AcousticFrameFeatures,
+    context: &AlignmentAcousticContext,
+) -> f32 {
+    match unit {
+        AlignableUnit::Phone { token, .. } => phone_frame_score(token, frame, context),
+        AlignableUnit::Boundary { phone_id, .. } => {
+            let model_score = context
+                .phone_model(phone_id)
+                .map(|model| acoustic_model_frame_score(model, frame, context))
+                .unwrap_or(0.0);
+            1.6 * silence_frame_score(frame) + model_score
+        }
+    }
+}
+
+fn phone_frame_score(
+    phone: &PhoneToken,
+    frame: &AcousticFrameFeatures,
+    context: &AlignmentAcousticContext,
+) -> f32 {
     let class = phone_class(phone);
     let voicing = phone_feature_category(phone, "phonology.voicing");
     let mut score = match class {
@@ -1056,6 +1303,9 @@ fn phone_frame_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
         score += 0.5 * closeness(frame.voicing, 0.72, 0.35);
     } else if matches!(voicing, Some("voiceless")) {
         score += 0.25 * closeness(frame.voicing, 0.15, 0.35);
+    }
+    if let Some(model) = context.phone_token_model(phone) {
+        score += acoustic_model_frame_score(model, frame, context);
     }
     score
 }
@@ -1151,7 +1401,571 @@ fn formant_region_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f3
     ) {
         score += 0.35 * closeness(frame.f2_hz, 900.0, 700.0);
     }
+    if matches!(
+        phone_feature_category(phone, "phonology.rhoticity"),
+        Some("rhotic")
+    ) {
+        score += 0.45 * closeness(frame.f3_hz, 1700.0, 550.0);
+    }
     score
+}
+
+fn acoustic_model_frame_score(
+    model: &AcousticTargetModel,
+    frame: &AcousticFrameFeatures,
+    context: &AlignmentAcousticContext,
+) -> f32 {
+    let cue_scale = model_cue_scale(model, context);
+    let mut score = 0.0;
+    let mut count = 0.0_f32;
+    for target in model.range_targets.iter().chain(
+        model
+            .landmarks
+            .iter()
+            .flat_map(|landmark| landmark.range_targets.iter()),
+    ) {
+        let Some(value) = frame_measurement_value(&target.measurement, frame) else {
+            continue;
+        };
+        let reliability = target.confidence.clamp(0.15, 1.0);
+        score += reliability * range_membership(value, &target.range);
+        count += reliability;
+    }
+    if count > 0.0 {
+        score = 1.35 * cue_scale * score / count;
+    }
+    score + weighted_cue_frame_score(model, frame, context)
+}
+
+fn weighted_cue_frame_score(
+    model: &AcousticTargetModel,
+    frame: &AcousticFrameFeatures,
+    context: &AlignmentAcousticContext,
+) -> f32 {
+    model
+        .weighted_cues
+        .iter()
+        .map(|cue| {
+            let reliability = context.cue_reliability(&cue.cue.0);
+            cue.weight * reliability * cue_frame_match(cue.cue.0.as_str(), frame)
+        })
+        .sum::<f32>()
+        * 0.45
+}
+
+fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f32 {
+    match cue_id {
+        "acoustic.cue.f1_region" => formant_plausibility(frame.f1_hz, 180.0, 1050.0),
+        "acoustic.cue.f2_region" => formant_plausibility(frame.f2_hz, 700.0, 3400.0),
+        "acoustic.cue.f3_region" => formant_plausibility(frame.f3_hz, 1200.0, 4200.0),
+        "acoustic.cue.vowel_nucleus" => frame.vowel_nucleus_likelihood,
+        "acoustic.cue.sonority_peak" => frame.sonority,
+        "acoustic.cue.periodic_voicing" => positive_closeness(frame.voicing, 0.78, 0.35),
+        "acoustic.cue.vowel_reduction" => {
+            0.5 * positive_closeness(frame.f1_hz, 520.0, 260.0)
+                + 0.5 * positive_closeness(frame.f2_hz, 1500.0, 650.0)
+        }
+        "acoustic.cue.stop_closure" => {
+            0.65 * positive_closeness(frame.energy_norm, 0.08, 0.20)
+                + 0.35 * positive_closeness(frame.low_ratio, 0.72, 0.30)
+        }
+        "acoustic.cue.release_burst" => frame.spectral_flux,
+        "acoustic.cue.aspiration_noise" => {
+            0.55 * positive_closeness(frame.high_ratio, 0.62, 0.35)
+                + 0.45 * positive_closeness(frame.voicing, 0.12, 0.35)
+        }
+        "acoustic.cue.closure_voicing" => positive_closeness(frame.voicing, 0.52, 0.45),
+        "acoustic.cue.voice_onset_time" => {
+            0.5 * positive_closeness(frame.spectral_flux, 0.72, 0.35)
+                + 0.5 * positive_closeness(frame.voicing, 0.42, 0.45)
+        }
+        "acoustic.cue.frication_noise" => {
+            0.55 * positive_closeness(frame.high_ratio, 0.70, 0.35)
+                + 0.45 * positive_closeness(frame.zero_crossing_rate, 0.22, 0.16)
+        }
+        "acoustic.cue.frication_spectral_shape" => {
+            positive_closeness(frame.spectral_centroid_hz, 4200.0, 2800.0)
+        }
+        "acoustic.cue.frication_spectral_skew" => {
+            positive_closeness(frame.spectral_skew, 0.35, 0.9)
+        }
+        "acoustic.cue.affricate_release" => {
+            0.5 * frame.spectral_flux + 0.5 * positive_closeness(frame.high_ratio, 0.65, 0.35)
+        }
+        "acoustic.cue.nasal_murmur" => {
+            0.55 * positive_closeness(frame.low_band_peak_hz, 260.0, 190.0)
+                + 0.45 * positive_closeness(frame.voicing, 0.76, 0.30)
+        }
+        "acoustic.cue.nasal_antiresonance" => {
+            0.5 * positive_closeness(frame.low_ratio, 0.72, 0.28)
+                + 0.5 * positive_closeness(frame.spectral_centroid_hz, 900.0, 900.0)
+        }
+        "acoustic.cue.nasal_place" | "acoustic.cue.nasal_place_transition" => {
+            positive_closeness(frame.f2_hz, 1500.0, 900.0)
+        }
+        "acoustic.cue.approximant_formants"
+        | "acoustic.cue.approximant_formant_transition_detail"
+        | "acoustic.cue.formant_trajectory"
+        | "acoustic.cue.consonant_place_transition"
+        | "acoustic.cue.place_formant_locus" => {
+            0.45 * frame.sonority
+                + 0.30 * positive_closeness(frame.spectral_flux, 0.35, 0.35)
+                + 0.25 * formant_plausibility(frame.f2_hz, 700.0, 3400.0)
+        }
+        "acoustic.cue.tap_closure" => positive_closeness(frame.energy_norm, 0.12, 0.22),
+        "acoustic.cue.segment_boundary" => {
+            0.5 * positive_closeness(frame.spectral_flux, 0.55, 0.40)
+                + 0.5 * silence_frame_score(frame).max(0.0)
+        }
+        "acoustic.cue.boundary_gap" => silence_frame_score(frame).max(0.0),
+        _ => 0.0,
+    }
+}
+
+fn formant_plausibility(value: f32, min: f32, max: f32) -> f32 {
+    if (min..=max).contains(&value) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn frame_measurement_value(
+    measurement: &AcousticMeasurement,
+    frame: &AcousticFrameFeatures,
+) -> Option<f32> {
+    match measurement {
+        AcousticMeasurement::Formant { index: 1 } => Some(frame.f1_hz),
+        AcousticMeasurement::Formant { index: 2 } => Some(frame.f2_hz),
+        AcousticMeasurement::Formant { index: 3 } => Some(frame.f3_hz),
+        AcousticMeasurement::SpectralCentroid => Some(frame.spectral_centroid_hz),
+        AcousticMeasurement::SpectralSkew => Some(frame.spectral_skew),
+        AcousticMeasurement::NasalMurmurBand => Some(frame.low_band_peak_hz),
+        AcousticMeasurement::NasalAntiresonance => Some(frame.spectral_centroid_hz),
+        AcousticMeasurement::NasalPlaceTransition => Some(frame.f2_hz),
+        AcousticMeasurement::FormantTransition { index: 1 } => Some(frame.f1_hz),
+        AcousticMeasurement::FormantTransition { index: 2 } => Some(frame.f2_hz),
+        AcousticMeasurement::FormantTransition { index: 3 } => Some(frame.f3_hz),
+        _ => None,
+    }
+}
+
+fn unit_segment_score(
+    unit: &AlignableUnit<'_>,
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    expected_len: f32,
+) -> f32 {
+    let Some(model) = context.unit_model(unit) else {
+        return 0.0;
+    };
+    let mut score = 0.0;
+    score += sampled_range_score(model, frames, context);
+    score += duration_range_score(model, frames);
+    score += temporal_order_score(model, frames);
+    score += subsegment_score(model, frames, expected_len);
+    score
+}
+
+fn sampled_range_score(
+    model: &AcousticTargetModel,
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+) -> f32 {
+    let sampled = sampled_frames(model, frames);
+    if sampled.is_empty() {
+        return 0.0;
+    }
+    let score = sampled
+        .iter()
+        .map(|frame| acoustic_model_frame_score(model, frame, context))
+        .sum::<f32>()
+        / sampled.len() as f32;
+    score * 0.55
+}
+
+fn sampled_frames<'a>(
+    model: &AcousticTargetModel,
+    frames: &'a [AcousticFrameFeatures],
+) -> Vec<&'a AcousticFrameFeatures> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let midpoint = frames.len() / 2;
+    match model.temporal.sampling_strategy {
+        Some(SegmentSamplingStrategy::UseOnsetTransition) => {
+            frames.iter().take(frames.len().min(3)).collect()
+        }
+        Some(SegmentSamplingStrategy::UseOffsetTransition) => {
+            frames.iter().rev().take(frames.len().min(3)).collect()
+        }
+        Some(SegmentSamplingStrategy::UseOnsetAndOffsetTransitions) => frames
+            .iter()
+            .take(frames.len().min(2))
+            .chain(frames.iter().rev().take(frames.len().min(2)))
+            .collect(),
+        Some(SegmentSamplingStrategy::UseFullTrajectory) => frames.iter().collect(),
+        Some(SegmentSamplingStrategy::UseMidpoint) | None => vec![&frames[midpoint]],
+    }
+}
+
+fn duration_range_score(model: &AcousticTargetModel, frames: &[AcousticFrameFeatures]) -> f32 {
+    let duration_ms = segment_duration_ms(frames);
+    if duration_ms <= 0.0 {
+        return 0.0;
+    }
+    let mut score = 0.0;
+    let mut weight_sum = 0.0_f32;
+    for target in model.range_targets.iter().chain(
+        model
+            .landmarks
+            .iter()
+            .flat_map(|landmark| landmark.range_targets.iter()),
+    ) {
+        let Some(value) = segment_measurement_value(&target.measurement, frames, model) else {
+            continue;
+        };
+        let weight = target.confidence.clamp(0.15, 1.0);
+        score += weight * range_membership(value, &target.range);
+        weight_sum += weight;
+    }
+    if weight_sum == 0.0 {
+        0.0
+    } else {
+        1.2 * score / weight_sum
+    }
+}
+
+fn segment_measurement_value(
+    measurement: &AcousticMeasurement,
+    frames: &[AcousticFrameFeatures],
+    model: &AcousticTargetModel,
+) -> Option<f32> {
+    let duration = segment_duration_ms(frames);
+    match measurement {
+        AcousticMeasurement::VoiceOnsetTime => Some(vot_estimate_ms(frames)),
+        AcousticMeasurement::ClosureDuration => {
+            Some(duration * subsegment_midpoint(model, SubsegmentRole::Closure).unwrap_or(1.0))
+        }
+        AcousticMeasurement::FricationDuration => {
+            Some(duration * subsegment_midpoint(model, SubsegmentRole::Frication).unwrap_or(1.0))
+        }
+        AcousticMeasurement::AffricateClosureToFrication => {
+            Some(affricate_transition_estimate_ms(frames))
+        }
+        AcousticMeasurement::SilenceDuration => Some(duration),
+        _ => None,
+    }
+}
+
+fn vot_estimate_ms(frames: &[AcousticFrameFeatures]) -> f32 {
+    if frames.is_empty() {
+        return 0.0;
+    }
+    let release_index = frames
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.spectral_flux.total_cmp(&right.spectral_flux))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let release_ms = frames[release_index].start_ms as f32;
+    if let Some((onset_index, onset)) = frames
+        .iter()
+        .enumerate()
+        .skip(release_index)
+        .find(|(_, frame)| frame.voicing > 0.45)
+    {
+        onset.start_ms as f32 - release_ms + onset_index.saturating_sub(release_index) as f32
+    } else if frames
+        .iter()
+        .take(release_index)
+        .any(|frame| frame.voicing > 0.45)
+    {
+        -((release_index as u64 * ALIGN_HOP_MS) as f32)
+    } else {
+        segment_duration_ms(frames).min(120.0)
+    }
+}
+
+fn affricate_transition_estimate_ms(frames: &[AcousticFrameFeatures]) -> f32 {
+    if frames.is_empty() {
+        return 0.0;
+    }
+    let release_index = frames
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.spectral_flux.total_cmp(&right.spectral_flux))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let frication_index = frames
+        .iter()
+        .enumerate()
+        .skip(release_index)
+        .find(|(_, frame)| frame.high_ratio > 0.50 && frame.zero_crossing_rate > 0.12)
+        .map(|(index, _)| index)
+        .unwrap_or(release_index);
+    frication_index.saturating_sub(release_index) as f32 * ALIGN_HOP_MS as f32
+}
+
+fn temporal_order_score(model: &AcousticTargetModel, frames: &[AcousticFrameFeatures]) -> f32 {
+    if model.temporal.landmark_order.len() < 2 || frames.is_empty() {
+        return 0.0;
+    }
+    let mut previous = None;
+    let mut score = 0.0;
+    for step in &model.temporal.landmark_order {
+        let event = landmark_event_index(&step.kind, frames);
+        match (previous, event) {
+            (Some(left), Some(right)) if right >= left => score += 0.35,
+            (Some(_), Some(_)) if step.required => score -= 0.75,
+            (_, None) if step.required => score -= 0.45,
+            _ => {}
+        }
+        if event.is_some() {
+            previous = event;
+        }
+    }
+    score
+}
+
+fn landmark_event_index(
+    kind: &AcousticLandmarkKind,
+    frames: &[AcousticFrameFeatures],
+) -> Option<usize> {
+    match kind {
+        AcousticLandmarkKind::Closure => frames
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.energy_norm.total_cmp(&right.energy_norm))
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::ReleaseBurst => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.spectral_flux.total_cmp(&right.spectral_flux))
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::Aspiration => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                aspiration_frame_score(left).total_cmp(&aspiration_frame_score(right))
+            })
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::VoicingOnset => frames
+            .iter()
+            .enumerate()
+            .find(|(_, frame)| frame.voicing > 0.45)
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::VowelTarget => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                left.vowel_nucleus_likelihood
+                    .total_cmp(&right.vowel_nucleus_likelihood)
+            })
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::FormantTransition => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.spectral_flux.total_cmp(&right.spectral_flux))
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::PeriodicVoicing => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.voicing.total_cmp(&right.voicing))
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::AperiodicNoise => frames
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.high_ratio.total_cmp(&right.high_ratio))
+            .map(|(index, _)| index),
+        AcousticLandmarkKind::Boundary => Some(frames.len() / 2),
+    }
+}
+
+fn aspiration_frame_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.55 * frame.high_ratio + 0.45 * positive_closeness(frame.voicing, 0.12, 0.35)
+}
+
+fn subsegment_score(
+    model: &AcousticTargetModel,
+    frames: &[AcousticFrameFeatures],
+    expected_len: f32,
+) -> f32 {
+    if model.temporal.subsegments.is_empty() || frames.is_empty() {
+        return 0.0;
+    }
+    let observed = frames.len() as f32;
+    let expected = expected_len.max(1.0);
+    let ratio_score = closeness(observed / expected, 1.0, 0.75);
+    let coverage = model
+        .temporal
+        .subsegments
+        .iter()
+        .map(|subsegment| {
+            let midpoint = (subsegment.proportion.min + subsegment.proportion.max) * 0.5;
+            closeness(midpoint, midpoint.clamp(0.05, 0.95), 0.50).max(0.0)
+        })
+        .sum::<f32>()
+        / model.temporal.subsegments.len() as f32;
+    0.35 * ratio_score + 0.25 * coverage
+}
+
+fn subsegment_midpoint(model: &AcousticTargetModel, role: SubsegmentRole) -> Option<f32> {
+    model
+        .temporal
+        .subsegments
+        .iter()
+        .find(|subsegment| subsegment.role == role)
+        .map(|subsegment| (subsegment.proportion.min + subsegment.proportion.max) * 0.5)
+}
+
+fn model_duration_range(model: &AcousticTargetModel) -> Option<&NumericRange> {
+    model
+        .range_targets
+        .iter()
+        .chain(
+            model
+                .landmarks
+                .iter()
+                .flat_map(|landmark| landmark.range_targets.iter()),
+        )
+        .find_map(|target| match target.measurement {
+            AcousticMeasurement::ClosureDuration
+            | AcousticMeasurement::FricationDuration
+            | AcousticMeasurement::SilenceDuration => Some(&target.range),
+            _ => None,
+        })
+}
+
+fn is_silent_boundary_model(model: &AcousticTargetModel) -> bool {
+    matches!(
+        model
+            .expected_features
+            .values
+            .get(&FeatureId("acoustic.silent_boundary".into())),
+        Some(Spec::Known(FeatureValue::Bool(true)))
+    )
+}
+
+fn model_cue_scale(model: &AcousticTargetModel, context: &AlignmentAcousticContext) -> f32 {
+    if model.weighted_cues.is_empty() {
+        return 0.75;
+    }
+    let weighted = model
+        .weighted_cues
+        .iter()
+        .map(|cue| cue.weight * context.cue_reliability(&cue.cue.0))
+        .sum::<f32>();
+    (weighted / model.weighted_cues.len() as f32).clamp(0.25, 1.2)
+}
+
+fn range_membership(value: f32, range: &NumericRange) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    if value >= range.min && value <= range.max {
+        return 1.0;
+    }
+    let width = (range.max - range.min).abs().max(1.0);
+    let distance = if value < range.min {
+        range.min - value
+    } else {
+        value - range.max
+    };
+    (1.0 - distance / width).clamp(-1.0, 1.0)
+}
+
+fn segment_duration_ms(frames: &[AcousticFrameFeatures]) -> f32 {
+    let Some(first) = frames.first() else {
+        return 0.0;
+    };
+    let Some(last) = frames.last() else {
+        return 0.0;
+    };
+    last.end_ms.saturating_sub(first.start_ms) as f32
+}
+
+fn silence_frame_score(frame: &AcousticFrameFeatures) -> f32 {
+    0.55 * closeness(frame.energy_norm, 0.02, 0.16)
+        + 0.25 * closeness(frame.voicing, 0.02, 0.18)
+        + 0.20 * closeness(frame.high_ratio, 0.05, 0.18)
+}
+
+fn ms_to_frames(ms: f32) -> usize {
+    ((ms.max(0.0) / ALIGN_HOP_MS as f32).ceil() as usize).max(1)
+}
+
+impl AlignmentAcousticContext {
+    fn for_output(output: &PhonemicizeOutput) -> Self {
+        let profile =
+            variety_by_code(&output.variety.0).and_then(|variety| variety.acoustic_profile);
+        Self { profile }
+    }
+
+    fn phone_token_model(&self, token: &PhoneToken) -> Option<&AcousticTargetModel> {
+        let Spec::Known(id) = &token.phone else {
+            return None;
+        };
+        self.phone_model(id)
+    }
+
+    fn phone_model(&self, id: &PhoneId) -> Option<&AcousticTargetModel> {
+        self.profile.as_ref()?.phone_models.get(id)
+    }
+
+    fn unit_model(&self, unit: &AlignableUnit<'_>) -> Option<&AcousticTargetModel> {
+        match unit {
+            AlignableUnit::Phone { token, .. } => self.phone_token_model(token),
+            AlignableUnit::Boundary { phone_id, .. } => self.phone_model(phone_id),
+        }
+    }
+
+    fn cue_def(&self, id: &str) -> Option<&AcousticCueDef> {
+        self.profile
+            .as_ref()?
+            .cues
+            .get(&speech::AcousticCueId(id.into()))
+    }
+
+    fn cue_reliability(&self, id: &str) -> f32 {
+        let Some(def) = self.cue_def(id) else {
+            return 0.65;
+        };
+        let diagnosticity = match def.diagnosticity {
+            CueDiagnosticity::Robust => 1.0,
+            CueDiagnosticity::Moderate => 0.72,
+            CueDiagnosticity::Weak => 0.38,
+        };
+        let dependency_scale = def
+            .dependencies
+            .iter()
+            .map(|dependency| match dependency {
+                CueDependency::SpeakerDependent => 0.88,
+                CueDependency::ContextDependent => 0.92,
+                CueDependency::StyleDependent => 0.86,
+            })
+            .product::<f32>();
+        (diagnosticity * dependency_scale).clamp(0.15, 1.0)
+    }
+}
+
+fn unit_phone_class(unit: &AlignableUnit<'_>) -> PhoneClass {
+    match unit {
+        AlignableUnit::Phone { token, .. } => phone_class(token),
+        AlignableUnit::Boundary { .. } => PhoneClass::Other,
+    }
+}
+
+fn boundary_label(phone_id: &PhoneId, context: &AlignmentAcousticContext) -> String {
+    if context.phone_model(phone_id).is_some() {
+        return phone_display_symbol(phone_id).to_string();
+    }
+    match phone_id.as_str() {
+        "boundary.word" | "boundary.letter" => "|".into(),
+        "boundary.phrase_pause" => "||".into(),
+        "boundary.terminal_pause" => "|||".into(),
+        _ => phone_id.as_str().into(),
+    }
 }
 
 fn closeness(value: f32, target: f32, spread: f32) -> f32 {
@@ -1300,8 +2114,9 @@ fn analyze_frame(
     let energy_db = 20.0 * (rms + 1.0e-6).log10();
     let zero_crossing_rate = crossings as f32 / len as f32;
     let magnitudes = magnitude_spectrum(&windowed);
-    let (spectral_centroid_hz, high_ratio, low_ratio) = spectral_shape(&magnitudes, sample_rate_hz);
-    let (f1_hz, f2_hz) = rough_formants(&magnitudes, sample_rate_hz);
+    let (spectral_centroid_hz, spectral_skew, high_ratio, low_ratio, low_band_peak_hz) =
+        spectral_shape(&magnitudes, sample_rate_hz);
+    let (f1_hz, f2_hz, f3_hz) = rough_formants(&magnitudes, sample_rate_hz);
     let voicing = autocorrelation_voicing(frame, sample_rate_hz);
 
     (
@@ -1311,11 +2126,14 @@ fn analyze_frame(
             energy_norm: energy_db,
             zero_crossing_rate,
             spectral_centroid_hz,
+            spectral_skew,
             high_ratio,
             low_ratio,
+            low_band_peak_hz,
             voicing,
             f1_hz,
             f2_hz,
+            f3_hz,
             spectral_flux: 0.0,
             sonority: 0.0,
             vowel_nucleus_likelihood: 0.0,
@@ -1349,12 +2167,15 @@ fn magnitude_spectrum(frame: &[f32]) -> Vec<f32> {
     magnitudes
 }
 
-fn spectral_shape(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32, f32) {
+fn spectral_shape(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32, f32, f32, f32) {
     let total = magnitudes.iter().map(|value| value * value).sum::<f32>() + 1.0e-8;
     let bin_hz = sample_rate_hz as f32 / (2.0 * magnitudes.len().max(1) as f32);
     let mut centroid_num = 0.0_f32;
+    let mut third_moment = 0.0_f32;
+    let mut variance = 0.0_f32;
     let mut high = 0.0_f32;
     let mut low = 0.0_f32;
+    let mut low_peak = (0.0_f32, 0.0_f32);
     for (index, magnitude) in magnitudes.iter().enumerate() {
         let hz = index as f32 * bin_hz;
         let power = magnitude * magnitude;
@@ -1364,15 +2185,38 @@ fn spectral_shape(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32, f32) {
         }
         if hz <= 1000.0 {
             low += power;
+            if power > low_peak.1 {
+                low_peak = (hz, power);
+            }
         }
     }
-    (centroid_num / total, high / total, low / total)
+    let centroid = centroid_num / total;
+    for (index, magnitude) in magnitudes.iter().enumerate() {
+        let hz = index as f32 * bin_hz;
+        let power = magnitude * magnitude;
+        let centered = hz - centroid;
+        variance += centered * centered * power;
+        third_moment += centered * centered * centered * power;
+    }
+    let std_dev = (variance / total).sqrt().max(1.0);
+    let skew = (third_moment / total) / (std_dev * std_dev * std_dev);
+    (
+        centroid,
+        skew.clamp(-3.0, 3.0),
+        high / total,
+        low / total,
+        low_peak.0,
+    )
 }
 
-fn rough_formants(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32) {
+fn rough_formants(magnitudes: &[f32], sample_rate_hz: u32) -> (f32, f32, f32) {
     let f1 = strongest_peak_hz(magnitudes, sample_rate_hz, 250.0, 1000.0).unwrap_or(550.0);
     let f2 = strongest_peak_hz(magnitudes, sample_rate_hz, 800.0, 3200.0).unwrap_or(1500.0);
-    (f1, f2.max(f1 + 150.0))
+    let f2 = f2.max(f1 + 150.0);
+    let f3 = strongest_peak_hz(magnitudes, sample_rate_hz, 1600.0, 4200.0)
+        .unwrap_or(2600.0)
+        .max(f2 + 150.0);
+    (f1, f2, f3)
 }
 
 fn strongest_peak_hz(
@@ -2148,6 +2992,90 @@ mod tests {
         assert!(containing > missing);
     }
 
+    #[test]
+    fn alignable_units_include_profile_backed_pause_boundaries() {
+        let output = phonemicized("hello, world");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let units = alignable_units(&output, &context);
+
+        assert!(units.iter().any(|unit| {
+            matches!(
+                unit,
+                AlignableUnit::Boundary { phone_id, .. }
+                    if phone_id.as_str() == "boundary.phrase_pause"
+            )
+        }));
+    }
+
+    #[test]
+    fn non_silent_word_boundaries_are_alignment_points() {
+        let output = phonemicized("hello world");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let phone = output
+            .phones
+            .iter()
+            .find(|phone| phone_word_index(phone) == Some(0) && !is_boundary_phone(phone))
+            .expect("first word phone");
+        let next_phone = output
+            .phones
+            .iter()
+            .find(|phone| phone_word_index(phone) == Some(1) && !is_boundary_phone(phone))
+            .expect("second word phone");
+        let aligned = vec![
+            AlignedPhone {
+                token: phone,
+                word_index: 0,
+                span: PhoneSpan {
+                    start_ms: 20,
+                    end_ms: 80,
+                },
+            },
+            AlignedPhone {
+                token: next_phone,
+                word_index: 1,
+                span: PhoneSpan {
+                    start_ms: 100,
+                    end_ms: 160,
+                },
+            },
+        ];
+
+        let boundaries = non_silent_boundary_points(&output, &aligned, &context);
+
+        assert!(boundaries.iter().any(|boundary| {
+            boundary.token_id == "boundary.word"
+                && boundary.span.start_ms == 90
+                && boundary.span.end_ms == 91
+        }));
+    }
+
+    #[test]
+    fn profile_range_score_prefers_matching_vowel_formants() {
+        let output = phonemicized("see");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let phone = output
+            .phones
+            .iter()
+            .find(|phone| known_phone_id(phone) == Some("ipa.phone.iː"))
+            .expect("i phone");
+        let model = context.phone_token_model(phone).expect("i model");
+        let mut matching = test_frame(0);
+        matching.f1_hz = 300.0;
+        matching.f2_hz = 2500.0;
+        matching.f3_hz = 3200.0;
+        matching.voicing = 0.85;
+        matching.vowel_nucleus_likelihood = 0.92;
+        let mut mismatching = matching;
+        mismatching.f1_hz = 900.0;
+        mismatching.f2_hz = 900.0;
+        mismatching.f3_hz = 1600.0;
+
+        assert!(
+            acoustic_model_frame_score(model, &matching, &context)
+                > acoustic_model_frame_score(model, &mismatching, &context)
+        );
+    }
+
     fn known_phone_id(token: &PhoneToken) -> Option<&str> {
         match &token.phone {
             Spec::Known(id) => Some(id.as_str()),
@@ -2162,11 +3090,14 @@ mod tests {
             energy_norm: 0.1,
             zero_crossing_rate: 0.2,
             spectral_centroid_hz: 3200.0,
+            spectral_skew: 0.2,
             high_ratio: 0.7,
             low_ratio: 0.2,
+            low_band_peak_hz: 260.0,
             voicing: 0.1,
             f1_hz: 550.0,
             f2_hz: 1500.0,
+            f3_hz: 2600.0,
             spectral_flux: 0.6,
             sonority: 0.05,
             vowel_nucleus_likelihood: 0.05,

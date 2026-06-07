@@ -49,7 +49,28 @@ pub struct AcousticCueDef {
     pub name: String,
     pub feature: FeatureId,
     pub targets: Vec<CueTarget>,
+    #[serde(default)]
+    pub diagnosticity: CueDiagnosticity,
+    #[serde(default)]
+    pub dependencies: Vec<CueDependency>,
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CueDiagnosticity {
+    Robust,
+    #[default]
+    Moderate,
+    Weak,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CueDependency {
+    SpeakerDependent,
+    ContextDependent,
+    StyleDependent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,7 +106,57 @@ pub struct AcousticTargetModel {
     #[serde(default)]
     pub range_targets: Vec<AcousticRangeTarget>,
     #[serde(default)]
+    pub temporal: AcousticTemporalModel,
+    #[serde(default)]
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AcousticTemporalModel {
+    #[serde(default)]
+    pub landmark_order: Vec<LandmarkOrderStep>,
+    #[serde(default)]
+    pub subsegments: Vec<SubsegmentProportion>,
+    #[serde(default)]
+    pub sampling_strategy: Option<SegmentSamplingStrategy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LandmarkOrderStep {
+    pub kind: AcousticLandmarkKind,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubsegmentProportion {
+    pub role: SubsegmentRole,
+    pub proportion: NumericRange,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsegmentRole {
+    Closure,
+    Burst,
+    Aspiration,
+    VoiceOnsetLag,
+    Frication,
+    TapClosure,
+    VowelOnsetTransition,
+    VowelSteadyTarget,
+    VowelOffsetTransition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentSamplingStrategy {
+    UseMidpoint,
+    UseOnsetTransition,
+    UseOffsetTransition,
+    UseOnsetAndOffsetTransitions,
+    UseFullTrajectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,8 +200,13 @@ pub enum AcousticMeasurement {
     ClosureDuration,
     FricationDuration,
     SpectralCentroid,
+    SpectralSkew,
     NasalMurmurBand,
     NasalAntiresonance,
+    NasalPlaceTransition,
+    FormantTransition { index: u8 },
+    AffricateClosureToFrication,
+    SilenceDuration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

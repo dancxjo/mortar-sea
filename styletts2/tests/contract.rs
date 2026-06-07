@@ -393,12 +393,12 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 #[test]
 fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
     for (input, expected) in [
-        ("I R", "ˈaɪ jˈɑːɹ"),
+        ("I R", "ˈaɪj ˈɑːɹ"),
         (
             "I’ll inspect the current English rule.",
             "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl .",
         ),
-        ("StyleTTS2", "stˈaɪl tˈiː tˈiː jˈɛs tˈuː"),
+        ("StyleTTS2", "stˈaɪl tˈiː tˈiːj ˈɛs tˈuː"),
         ("current", "kˈɜːɹənt"),
         ("derived", "dᵻɹˈaɪvd"),
         ("surface", "sˈɜːɹfəs"),
@@ -460,6 +460,80 @@ fn prepared_plan_chunks_long_input_on_word_boundaries() {
             .iter()
             .all(|chunk| chunk.symbols.len() <= 3)
     );
+}
+
+#[test]
+fn prepared_plan_coalesces_sentences_up_to_symbol_limit() {
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![
+            phone_token("variety.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variety.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variety.phone.a"),
+        ],
+        vec![
+            terminal_boundary(0, TerminalPunctuation::Period),
+            terminal_boundary(1, TerminalPunctuation::Period),
+            terminal_boundary(2, TerminalPunctuation::Period),
+        ],
+        Some("a. a. a.".into()),
+    );
+    let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variety.phone.a", "alpha");
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &symbol_set,
+        StyleTts2PlanOptions {
+            max_symbols_per_chunk: 6,
+            chunking_enabled: true,
+        },
+    )
+    .expect("prepare plan");
+
+    assert_eq!(backend_plan.chunks.len(), 1);
+    assert_eq!(backend_plan.chunks[0].symbols.len(), 6);
+}
+
+#[test]
+fn prepared_plan_splits_oversized_input_at_sentence_boundaries_first() {
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![
+            phone_token("variety.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variety.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variety.phone.a"),
+        ],
+        vec![
+            terminal_boundary(0, TerminalPunctuation::Period),
+            terminal_boundary(1, TerminalPunctuation::Period),
+            terminal_boundary(2, TerminalPunctuation::Period),
+        ],
+        Some("a. a. a.".into()),
+    );
+    let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variety.phone.a", "alpha");
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &symbol_set,
+        StyleTts2PlanOptions {
+            max_symbols_per_chunk: 3,
+            chunking_enabled: true,
+        },
+    )
+    .expect("prepare plan");
+    let chunk_lengths = backend_plan
+        .chunks
+        .iter()
+        .map(|chunk| chunk.symbols.len())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chunk_lengths, [2, 2, 2]);
 }
 
 #[test]

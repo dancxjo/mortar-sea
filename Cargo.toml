@@ -12,10 +12,20 @@ resolver = "2"
 llama-cpp-sys-4 = { path = "target/patched-crates/llama-cpp-sys-4" }
 
 [features]
-default = ["llm-test", "llama-cuda", "styletts2-onnx", "piper-onnx"]
+default = [
+    "llm-test",
+    "llama-cuda",
+    "styletts2-onnx-cuda",
+    "styletts2-onnx-onednn",
+    "styletts2-onnx-xnnpack",
+    "piper-onnx",
+]
 llm-test = ["dep:psyche"]
 llama-cuda = ["llm-test", "psyche/llama-cuda"]
 styletts2-onnx = ["styletts2/styletts2-onnx"]
+styletts2-onnx-cuda = ["styletts2-onnx", "styletts2/styletts2-onnx-cuda"]
+styletts2-onnx-onednn = ["styletts2-onnx", "styletts2/styletts2-onnx-onednn"]
+styletts2-onnx-xnnpack = ["styletts2-onnx", "styletts2/styletts2-onnx-xnnpack"]
 piper-onnx = ["dep:ort"]
 
 [dependencies]

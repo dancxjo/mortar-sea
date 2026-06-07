@@ -328,15 +328,6 @@ impl SymbolSet {
         let mut previous_word_index = None;
 
         for syllable in syllables {
-            let word_index = syllable_word_index(syllable);
-            if let (Some(previous), Some(current)) = (previous_word_index, word_index)
-                && current != previous
-            {
-                if !self.push_boundary_after_word(&mut lowered, boundaries, previous) {
-                    self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
-                }
-            }
-
             let stress_marker = stress_marker(syllable_stress(syllable));
             let nucleus_index = syllable.nucleus_index;
             for (phone_index, phone) in syllable.phones.iter().enumerate() {
@@ -345,6 +336,13 @@ impl SymbolSet {
                 };
                 if token_id.starts_with("boundary.") {
                     continue;
+                }
+                let word_index = phone_usize_feature(phone, "orthography.word_index");
+                if let (Some(previous), Some(current)) = (previous_word_index, word_index)
+                    && current != previous
+                    && !self.push_boundary_after_word(&mut lowered, boundaries, previous)
+                {
+                    self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
                 }
                 if nucleus_index == Some(phone_index)
                     && let Some(marker) = stress_marker
@@ -359,9 +357,8 @@ impl SymbolSet {
                     symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
                     source: StyleTts2SymbolSource::Phone,
                 });
+                previous_word_index = word_index.or(previous_word_index);
             }
-
-            previous_word_index = word_index.or(previous_word_index);
         }
 
         if let Some(word_index) = previous_word_index {
@@ -550,17 +547,24 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.iː", "IY"),
         ("ipa.phone.dʒ", "JH"),
         ("ipa.phone.k", "K"),
+        ("ipa.phone.kʰ", "K"),
+        ("ipa.phone.k˭", "K"),
         ("ipa.phone.l", "L"),
+        ("ipa.phone.ɫ", "L"),
         ("ipa.phone.m", "M"),
         ("ipa.phone.n", "N"),
         ("ipa.phone.ŋ", "NG"),
         ("ipa.phone.oʊ", "OW"),
         ("ipa.phone.ɔɪ", "OY"),
         ("ipa.phone.p", "P"),
+        ("ipa.phone.pʰ", "P"),
+        ("ipa.phone.p˭", "P"),
         ("ipa.phone.ɹ", "R"),
         ("ipa.phone.s", "S"),
         ("ipa.phone.ʃ", "SH"),
         ("ipa.phone.t", "T"),
+        ("ipa.phone.tʰ", "T"),
+        ("ipa.phone.t˭", "T"),
         ("ipa.phone.ɾ", "ɾ"),
         ("ipa.phone.θ", "TH"),
         ("ipa.phone.ʊ", "UH"),
@@ -649,13 +653,6 @@ fn stress_digit(stress: &str) -> Option<&'static str> {
         "secondary" => Some("2"),
         _ => None,
     }
-}
-
-fn syllable_word_index(syllable: &Syllable) -> Option<usize> {
-    syllable
-        .phones
-        .iter()
-        .find_map(|phone| phone_usize_feature(phone, "orthography.word_index"))
 }
 
 fn phone_usize_feature(token: &PhoneToken, feature_id: &str) -> Option<usize> {

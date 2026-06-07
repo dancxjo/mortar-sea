@@ -233,22 +233,7 @@ fn chunk_symbols(
         return vec![chunk_from_tokens(tokens)];
     }
 
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    for token in tokens {
-        let terminal = terminal_for_symbol(&token.symbol).is_some();
-        current.push(token);
-        if terminal {
-            chunks.extend(split_oversized_chunk(
-                std::mem::take(&mut current),
-                max_symbols_per_chunk,
-            ));
-        }
-    }
-    if !current.is_empty() {
-        chunks.extend(split_oversized_chunk(current, max_symbols_per_chunk));
-    }
-    chunks
+    split_oversized_chunk(tokens, max_symbols_per_chunk)
         .into_iter()
         .filter(|chunk| !chunk.symbols.is_empty())
         .collect()
@@ -273,6 +258,11 @@ fn split_oversized_chunk(
 
 fn best_split_index(tokens: &[StyleTts2SymbolToken], max_symbols_per_chunk: usize) -> usize {
     let search_len = max_symbols_per_chunk.min(tokens.len());
+    for index in (0..search_len).rev() {
+        if terminal_for_symbol(&tokens[index].symbol).is_some() {
+            return index + 1;
+        }
+    }
     for index in (0..search_len).rev() {
         if is_phrase_punctuation(&tokens[index]) {
             return index + 1;

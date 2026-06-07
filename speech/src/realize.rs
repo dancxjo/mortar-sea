@@ -6,7 +6,7 @@ use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::Stress;
 use crate::rules::{AllophoneRule, EpenthesisRule, RuleCondition};
-use crate::segment::SegmentMatcher;
+use crate::segment::{SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
 use crate::variety::LinguisticVariety;
 
@@ -133,6 +133,17 @@ pub fn token_is_vowel(variety: &LinguisticVariety, token: &PhonemeToken) -> bool
     )
 }
 
+fn token_syllable_position(
+    variety: &LinguisticVariety,
+    token: &PhonemeToken,
+) -> Option<SyllablePosition> {
+    if token_is_vowel(variety, token) {
+        Some(SyllablePosition::Nucleus)
+    } else {
+        None
+    }
+}
+
 fn rule_applies(
     rule: &AllophoneRule,
     variety: &LinguisticVariety,
@@ -165,6 +176,7 @@ fn environment_matches(
     phonemes: &[PhonemeToken],
     index: usize,
 ) -> bool {
+    let token = &phonemes[index];
     let before_matches = rule.environment.before.is_empty()
         || index.checked_sub(1).is_some_and(|previous| {
             rule.environment
@@ -179,8 +191,20 @@ fn environment_matches(
                 .iter()
                 .any(|matcher| segment_matches(variety, next, matcher))
         });
+    let stress_matches = match &rule.environment.stress_context {
+        Spec::Known(expected) => token_stress(token).is_some_and(|actual| actual == *expected),
+        Spec::Unspecified => true,
+        _ => false,
+    };
+    let syllable_position_matches = match &rule.environment.syllable_position {
+        Spec::Known(expected) => {
+            token_syllable_position(variety, token).is_some_and(|actual| actual == *expected)
+        }
+        Spec::Unspecified => true,
+        _ => false,
+    };
 
-    before_matches && after_matches
+    before_matches && after_matches && stress_matches && syllable_position_matches
 }
 
 fn condition_matches(
@@ -306,13 +330,14 @@ fn phone_from_rule(
 ) -> PhoneToken {
     let phone = rule.output.phone.clone();
     let features = match &phone {
-        Spec::Known(_) if !rule.output.features.values.is_empty() => rule.output.features.clone(),
-        Spec::Known(id) => variety
-            .phones
-            .phones
-            .get(id)
-            .map(|phone| phone.features.clone())
-            .unwrap_or_else(|| default_phone.features.clone()),
+        Spec::Known(id) => {
+            let mut features = default_phone.features.clone();
+            if let Some(phone) = variety.phones.phones.get(id) {
+                features.values.extend(phone.features.values.clone());
+            }
+            features.values.extend(rule.output.features.values.clone());
+            features
+        }
         _ => rule.output.features.clone(),
     };
 
@@ -627,6 +652,117 @@ mod tests {
         );
 
         assert_eq!(symbols(&phones), ["ə", "t", "ɚ"]);
+    }
+
+    #[test]
+    fn voiceless_stops_aspirate_before_stressed_vowels_but_not_after_s() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let aspirated = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "P"), phoneme("en-US-GA", "AY1")],
+            &RealizationOptions::default(),
+        );
+        let s_cluster = realize_phonemes(
+            &variety,
+            &[
+                phoneme("en-US-GA", "S"),
+                phoneme("en-US-GA", "P"),
+                phoneme("en-US-GA", "AY1"),
+            ],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&aspirated), ["pʰ", "aɪ"]);
+        assert_eq!(symbols(&s_cluster), ["s", "p˭", "aɪ"]);
+    }
+
+    #[test]
+    fn d_flaps_between_stressed_and_unstressed_vowels() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let phones = realize_phonemes(
+            &variety,
+            &[
+                phoneme("en-US-GA", "AA1"),
+                phoneme("en-US-GA", "D"),
+                phoneme("en-US-GA", "ER0"),
+            ],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&phones), ["ɑ", "ɾ", "ɚ"]);
+    }
+
+    #[test]
+    fn l_has_light_and_dark_contextual_models() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let light = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "L"), phoneme("en-US-GA", "AY1")],
+            &RealizationOptions::default(),
+        );
+        let dark = realize_phonemes(
+            &variety,
+            &[
+                phoneme("en-US-GA", "B"),
+                phoneme("en-US-GA", "AO1"),
+                phoneme("en-US-GA", "L"),
+            ],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&light), ["l", "aɪ"]);
+        assert_eq!(symbols(&dark), ["b", "ɔ", "ɫ"]);
+        assert_eq!(
+            light[0]
+                .features
+                .values
+                .get(&FeatureId("phonology.l_quality".into())),
+            Some(&Spec::Known(FeatureValue::Category("light".into())))
+        );
+        assert_eq!(
+            dark[2]
+                .features
+                .values
+                .get(&FeatureId("phonology.l_quality".into())),
+            Some(&Spec::Known(FeatureValue::Category("dark".into())))
+        );
+    }
+
+    #[test]
+    fn voiced_obstruents_can_partially_devoice_before_voiceless_obstruents() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let phones = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "B"), phoneme("en-US-GA", "T")],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&phones), ["b", "t"]);
+        assert_eq!(
+            phones[0]
+                .features
+                .values
+                .get(&FeatureId("phonology.partial_devoicing".into())),
+            Some(&Spec::Known(FeatureValue::Bool(true)))
+        );
+    }
+
+    #[test]
+    fn unstressed_vowel_reduction_is_a_contextual_allophone_rule() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let phones = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "AH0")],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&phones), ["ə"]);
+        assert!(
+            phones[0]
+                .provenance
+                .method
+                .contains("unstressed_ah_nucleus_reduction")
+        );
     }
 
     #[test]

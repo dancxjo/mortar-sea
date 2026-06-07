@@ -1534,7 +1534,7 @@ mod tests {
         let current = EnglishPhonemicizer
             .phonemicize(&request("current", "en-US"))
             .expect("current");
-        assert_eq!(phone_symbols(&current), ["k", "ɝ", "ə", "n", "t"]);
+        assert_eq!(phone_symbols(&current), ["kʰ", "ɝ", "ə", "n", "t"]);
 
         let termination = EnglishPhonemicizer
             .phonemicize(&request("termination", "en-US"))

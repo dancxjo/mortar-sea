@@ -5,8 +5,11 @@ edition = "2024"
 description = "Backend-gated StyleTTS2 synthesis seam for Mortar speech plans"
 
 [features]
-default = []
+default = ["styletts2-onnx-cuda", "styletts2-onnx-onednn", "styletts2-onnx-xnnpack"]
 styletts2-onnx = ["dep:ort"]
+styletts2-onnx-cuda = ["styletts2-onnx", "ort/cuda"]
+styletts2-onnx-onednn = ["styletts2-onnx", "ort/onednn"]
+styletts2-onnx-xnnpack = ["styletts2-onnx", "ort/xnnpack"]
 
 [dependencies]
 hound = "3"
