@@ -551,6 +551,23 @@ enum AlignmentDirection {
     Reverse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryLandmarkKind {
+    SpeechStart,
+    SpeechEnd,
+    Word,
+    PauseStart,
+    PauseEnd,
+}
+
+#[derive(Debug, Clone)]
+struct BoundaryLandmarkPrior {
+    boundary_index: usize,
+    target_frame: usize,
+    window_frames: usize,
+    strength: f32,
+}
+
 struct AlignedPhone<'a> {
     token: &'a PhoneToken,
     word_index: usize,
@@ -939,6 +956,7 @@ fn viterbi_unit_spans(
                 .collect(),
         );
     }
+    let boundary_priors = boundary_landmark_priors(units, frames, active_start, active_end);
 
     let forward = directional_viterbi_unit_spans(
         output,
@@ -946,6 +964,7 @@ fn viterbi_unit_spans(
         frames,
         active_start,
         active_end,
+        &boundary_priors,
         duration_ms,
         context,
         AlignmentDirection::Forward,
@@ -956,6 +975,7 @@ fn viterbi_unit_spans(
         frames,
         active_start,
         active_end,
+        &boundary_priors,
         duration_ms,
         context,
         AlignmentDirection::Reverse,
@@ -979,6 +999,7 @@ fn directional_viterbi_unit_spans(
     frames: &[AcousticFrameFeatures],
     active_start: usize,
     active_end: usize,
+    boundary_priors: &[BoundaryLandmarkPrior],
     duration_ms: u64,
     context: &AlignmentAcousticContext,
     direction: AlignmentDirection,
@@ -992,14 +1013,22 @@ fn directional_viterbi_unit_spans(
         AlignmentDirection::Forward => active.to_vec(),
         AlignmentDirection::Reverse => active.iter().rev().copied().collect::<Vec<_>>(),
     };
+    let directed_boundary_priors =
+        directed_boundary_landmark_priors(boundary_priors, frame_count, direction);
     let nucleus_unit_indices = syllable_nucleus_unit_indices(output, units);
     let directed_nucleus_unit_indices = directed_units
         .iter()
         .copied()
         .filter(|unit_index| nucleus_unit_indices.contains(unit_index))
         .collect::<Vec<_>>();
-    let nucleus_targets =
-        nucleus_target_frames(&directed_frames, directed_nucleus_unit_indices.len());
+    let nucleus_targets = directed_nucleus_target_frames(
+        frames,
+        &directed_frames,
+        active_start,
+        active_end,
+        direction,
+        directed_nucleus_unit_indices.len(),
+    );
     let mut nucleus_target_by_unit = vec![None; unit_count];
     for (unit_index, target_frame) in directed_nucleus_unit_indices
         .iter()
@@ -1053,11 +1082,17 @@ fn directional_viterbi_unit_spans(
                     &nucleus_target_prefix,
                 );
                 let segment_score = unit_segment_score(unit, segment_frames, context, expected_len);
+                let boundary_score = boundary_landmark_score(
+                    &directed_boundary_priors,
+                    directed_segment_end_boundary_index(original_unit_index, direction),
+                    end,
+                );
                 let candidate = previous
                     + emission
                     + duration_score(len, expected_len)
                     + anchor
-                    + segment_score;
+                    + segment_score
+                    + boundary_score;
                 if candidate > dp[unit_index][end] {
                     dp[unit_index][end] = candidate;
                     previous_len[unit_index][end] = len;
@@ -1110,6 +1145,16 @@ fn directed_unit_indices(unit_count: usize, direction: AlignmentDirection) -> Ve
     }
 }
 
+fn directed_segment_end_boundary_index(
+    original_unit_index: usize,
+    direction: AlignmentDirection,
+) -> usize {
+    match direction {
+        AlignmentDirection::Forward => original_unit_index + 1,
+        AlignmentDirection::Reverse => original_unit_index,
+    }
+}
+
 fn chronological_segment_frames(
     frames: &[AcousticFrameFeatures],
     directed_start: usize,
@@ -1141,6 +1186,226 @@ fn directed_span_frame_range(
     }
 }
 
+fn boundary_landmark_priors(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    active_start: usize,
+    active_end: usize,
+) -> Vec<BoundaryLandmarkPrior> {
+    let Some((speech_start, speech_end)) = active_frame_range(frames) else {
+        return Vec::new();
+    };
+    let speech_start = speech_start.clamp(active_start, active_end);
+    let speech_end = speech_end.clamp(speech_start, active_end);
+    if speech_start >= speech_end || active_start >= active_end {
+        return Vec::new();
+    }
+
+    let active = &frames[active_start..active_end];
+    let speech_start = speech_start.saturating_sub(active_start);
+    let speech_end = speech_end.saturating_sub(active_start);
+    let speech_len = speech_end.saturating_sub(speech_start).max(1);
+    let mut priors = Vec::new();
+
+    for boundary_index in 0..=units.len() {
+        let Some(kind) = boundary_landmark_kind(units, boundary_index) else {
+            continue;
+        };
+        let ideal = match kind {
+            BoundaryLandmarkKind::SpeechStart => speech_start,
+            BoundaryLandmarkKind::SpeechEnd => speech_end,
+            _ => speech_start + speech_len.saturating_mul(boundary_index) / units.len().max(1),
+        }
+        .min(active.len());
+        let window = boundary_landmark_window(kind, active.len(), units.len());
+        let Some((target_frame, acoustic_score)) =
+            best_boundary_landmark(active, kind, ideal, window)
+        else {
+            continue;
+        };
+        if acoustic_score < boundary_landmark_threshold(kind) {
+            continue;
+        }
+        priors.push(BoundaryLandmarkPrior {
+            boundary_index,
+            target_frame,
+            window_frames: window,
+            strength: boundary_landmark_strength(kind, acoustic_score),
+        });
+    }
+
+    priors
+}
+
+fn boundary_landmark_kind(
+    units: &[AlignableUnit<'_>],
+    boundary_index: usize,
+) -> Option<BoundaryLandmarkKind> {
+    if boundary_index == 0 {
+        return Some(BoundaryLandmarkKind::SpeechStart);
+    }
+
+    let before = units.get(boundary_index.saturating_sub(1));
+    let after = units.get(boundary_index);
+    match (before, after) {
+        (_, Some(AlignableUnit::Boundary { phone_id, .. }))
+            if phone_id.as_str() == "boundary.terminal_pause" =>
+        {
+            Some(BoundaryLandmarkKind::SpeechEnd)
+        }
+        (_, Some(AlignableUnit::Boundary { .. })) => Some(BoundaryLandmarkKind::PauseStart),
+        (Some(AlignableUnit::Boundary { .. }), Some(AlignableUnit::Phone { .. })) => {
+            Some(BoundaryLandmarkKind::PauseEnd)
+        }
+        (
+            Some(AlignableUnit::Phone {
+                word_index: previous,
+                ..
+            }),
+            Some(AlignableUnit::Phone {
+                word_index: next, ..
+            }),
+        ) if previous != next => Some(BoundaryLandmarkKind::Word),
+        (Some(AlignableUnit::Phone { .. }), None) => Some(BoundaryLandmarkKind::SpeechEnd),
+        _ => None,
+    }
+}
+
+fn boundary_landmark_window(
+    kind: BoundaryLandmarkKind,
+    frame_count: usize,
+    unit_count: usize,
+) -> usize {
+    let local = (frame_count / unit_count.max(1)).max(1);
+    match kind {
+        BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => local.max(10),
+        BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => local.max(12),
+        BoundaryLandmarkKind::Word => local.max(12),
+    }
+}
+
+fn best_boundary_landmark(
+    frames: &[AcousticFrameFeatures],
+    kind: BoundaryLandmarkKind,
+    ideal: usize,
+    window: usize,
+) -> Option<(usize, f32)> {
+    if frames.is_empty() {
+        return None;
+    }
+    let start = ideal.saturating_sub(window);
+    let end = ideal.saturating_add(window).min(frames.len());
+    (start..=end)
+        .map(|boundary| {
+            let distance = boundary.abs_diff(ideal) as f32;
+            let score =
+                boundary_energy_score(frames, boundary, kind) - 0.035 * distance.min(window as f32);
+            (boundary, score)
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+}
+
+fn boundary_energy_score(
+    frames: &[AcousticFrameFeatures],
+    boundary: usize,
+    kind: BoundaryLandmarkKind,
+) -> f32 {
+    let left = boundary.checked_sub(1).and_then(|index| frames.get(index));
+    let right = frames.get(boundary);
+    let left_activity = left.map(speech_activity).unwrap_or(0.0);
+    let right_activity = right.map(speech_activity).unwrap_or(0.0);
+    let left_silence = left.map(silence_frame_score).unwrap_or(0.0).max(0.0);
+    let right_silence = right.map(silence_frame_score).unwrap_or(0.0).max(0.0);
+    let flux = right
+        .or(left)
+        .map(|frame| frame.spectral_flux.max(0.0))
+        .unwrap_or(0.0);
+    let energy_delta = (right.map(|frame| frame.energy_norm).unwrap_or(0.0)
+        - left.map(|frame| frame.energy_norm).unwrap_or(0.0))
+    .abs();
+    let sonority_delta = (right.map(|frame| frame.sonority).unwrap_or(0.0)
+        - left.map(|frame| frame.sonority).unwrap_or(0.0))
+    .abs();
+    let transition = 0.45 * flux + 0.35 * energy_delta + 0.20 * sonority_delta;
+
+    match kind {
+        BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::PauseEnd => {
+            transition + 0.95 * (right_activity - left_activity).max(0.0) + 0.35 * right_activity
+        }
+        BoundaryLandmarkKind::SpeechEnd | BoundaryLandmarkKind::PauseStart => {
+            transition + 0.95 * (left_activity - right_activity).max(0.0) + 0.35 * right_silence
+        }
+        BoundaryLandmarkKind::Word => {
+            transition
+                + 0.25 * left_activity.min(right_activity)
+                + 0.55 * (right_activity - left_activity).max(0.0)
+                + 0.15 * (left_silence - right_silence).abs()
+        }
+    }
+}
+
+fn speech_activity(frame: &AcousticFrameFeatures) -> f32 {
+    (0.48 * frame.energy_norm + 0.32 * frame.voicing + 0.20 * frame.sonority).clamp(0.0, 1.0)
+}
+
+fn boundary_landmark_threshold(kind: BoundaryLandmarkKind) -> f32 {
+    match kind {
+        BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => 0.18,
+        BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => 0.20,
+        BoundaryLandmarkKind::Word => 0.16,
+    }
+}
+
+fn boundary_landmark_strength(kind: BoundaryLandmarkKind, acoustic_score: f32) -> f32 {
+    let confidence = acoustic_score.clamp(0.0, 1.0);
+    let base = match kind {
+        BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => 3.8,
+        BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => 3.4,
+        BoundaryLandmarkKind::Word => 2.4,
+    };
+    base * (0.55 + 0.45 * confidence)
+}
+
+fn directed_boundary_landmark_priors(
+    priors: &[BoundaryLandmarkPrior],
+    frame_count: usize,
+    direction: AlignmentDirection,
+) -> Vec<BoundaryLandmarkPrior> {
+    priors
+        .iter()
+        .map(|prior| BoundaryLandmarkPrior {
+            boundary_index: prior.boundary_index,
+            target_frame: match direction {
+                AlignmentDirection::Forward => prior.target_frame,
+                AlignmentDirection::Reverse => frame_count.saturating_sub(prior.target_frame),
+            },
+            window_frames: prior.window_frames,
+            strength: prior.strength,
+        })
+        .collect()
+}
+
+fn boundary_landmark_score(
+    priors: &[BoundaryLandmarkPrior],
+    boundary_index: usize,
+    frame_index: usize,
+) -> f32 {
+    priors
+        .iter()
+        .filter(|prior| prior.boundary_index == boundary_index)
+        .map(|prior| {
+            let distance = frame_index.abs_diff(prior.target_frame);
+            let window = prior.window_frames.max(1);
+            if distance <= window {
+                prior.strength * (1.0 - distance as f32 / window as f32)
+            } else {
+                let overflow = distance.saturating_sub(window).min(window * 2) as f32;
+                -0.10 * prior.strength * overflow / window as f32
+            }
+        })
+        .sum()
+}
+
 fn syllable_nucleus_unit_indices(
     output: &PhonemicizeOutput,
     units: &[AlignableUnit<'_>],
@@ -1162,6 +1427,49 @@ fn syllable_nucleus_unit_indices(
         .into_iter()
         .filter_map(|phone_index| phone_unit_indices.get(phone_index).copied())
         .collect()
+}
+
+fn directed_nucleus_target_frames(
+    frames: &[AcousticFrameFeatures],
+    directed_frames: &[AcousticFrameFeatures],
+    active_start: usize,
+    active_end: usize,
+    direction: AlignmentDirection,
+    nucleus_count: usize,
+) -> Vec<usize> {
+    if nucleus_count == 0 || directed_frames.is_empty() {
+        return Vec::new();
+    }
+    let Some((speech_start, speech_end)) = active_frame_range(frames) else {
+        return nucleus_target_frames(directed_frames, nucleus_count);
+    };
+    let speech_start = speech_start.clamp(active_start, active_end);
+    let speech_end = speech_end.clamp(speech_start, active_end);
+    if speech_start >= speech_end {
+        return nucleus_target_frames(directed_frames, nucleus_count);
+    }
+
+    let frame_count = active_end.saturating_sub(active_start);
+    let speech_start = speech_start.saturating_sub(active_start);
+    let speech_end = speech_end.saturating_sub(active_start);
+    let (directed_start, directed_end) = match direction {
+        AlignmentDirection::Forward => (speech_start, speech_end),
+        AlignmentDirection::Reverse => (
+            frame_count.saturating_sub(speech_end),
+            frame_count.saturating_sub(speech_start),
+        ),
+    };
+    if directed_start >= directed_end || directed_end > directed_frames.len() {
+        return nucleus_target_frames(directed_frames, nucleus_count);
+    }
+
+    nucleus_target_frames(
+        &directed_frames[directed_start..directed_end],
+        nucleus_count,
+    )
+    .into_iter()
+    .map(|frame_index| directed_start + frame_index)
+    .collect()
 }
 
 fn reconcile_bidirectional_spans(
@@ -1357,22 +1665,32 @@ fn active_frame_range(frames: &[AcousticFrameFeatures]) -> Option<(usize, usize)
     if frames.is_empty() {
         return None;
     }
-    let first = frames
-        .iter()
-        .position(|frame| frame.energy_norm > 0.08 || frame.voicing > 0.35)
+    let activity_threshold = speech_activity_threshold(frames);
+    let first = (0..frames.len())
+        .position(|index| frame_is_speech_active(&frames[index], activity_threshold))
         .unwrap_or(0)
-        .saturating_sub(3);
-    let last = frames
-        .iter()
-        .rposition(|frame| frame.energy_norm > 0.08 || frame.voicing > 0.35)
+        .saturating_sub(1);
+    let last = (0..frames.len())
+        .rposition(|index| frame_is_speech_active(&frames[index], activity_threshold))
         .unwrap_or(frames.len() - 1)
-        .saturating_add(4)
+        .saturating_add(2)
         .min(frames.len());
     if first >= last {
         Some((0, frames.len()))
     } else {
         Some((first, last))
     }
+}
+
+fn speech_activity_threshold(frames: &[AcousticFrameFeatures]) -> f32 {
+    let max_activity = frames.iter().map(speech_activity).fold(0.0_f32, f32::max);
+    (max_activity * 0.30).clamp(0.07, 0.22)
+}
+
+fn frame_is_speech_active(frame: &AcousticFrameFeatures, threshold: f32) -> bool {
+    speech_activity(frame) >= threshold
+        || frame.energy_norm >= threshold * 1.25
+        || frame.voicing > 0.35
 }
 
 fn active_frame_range_for_units(
@@ -3248,6 +3566,177 @@ mod tests {
     }
 
     #[test]
+    fn terminal_silence_does_not_push_nucleus_targets_late() {
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in frames.iter_mut().skip(38) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.high_ratio = 0.0;
+            frame.sonority = 0.0;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+        frames[10].vowel_nucleus_likelihood = 0.95;
+        frames[30].vowel_nucleus_likelihood = 0.95;
+        let directed = frames.clone();
+
+        let targets = directed_nucleus_target_frames(
+            &frames,
+            &directed,
+            0,
+            frames.len(),
+            AlignmentDirection::Forward,
+            2,
+        );
+
+        assert_eq!(targets, vec![10, 30]);
+    }
+
+    #[test]
+    fn reverse_nucleus_targets_stay_inside_speech_active_range() {
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in frames.iter_mut().skip(38) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.high_ratio = 0.0;
+            frame.sonority = 0.0;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+        frames[10].vowel_nucleus_likelihood = 0.95;
+        frames[30].vowel_nucleus_likelihood = 0.95;
+        let directed = frames.iter().rev().copied().collect::<Vec<_>>();
+
+        let targets = directed_nucleus_target_frames(
+            &frames,
+            &directed,
+            0,
+            frames.len(),
+            AlignmentDirection::Reverse,
+            2,
+        );
+
+        assert_eq!(targets, vec![49, 69]);
+    }
+
+    #[test]
+    fn active_range_ignores_low_level_leading_noise() {
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.04;
+            frame.voicing = 0.0;
+            frame.sonority = 0.0;
+            frame.high_ratio = 0.02;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+        for frame in frames.iter_mut().skip(30).take(20) {
+            frame.energy_norm = 0.78;
+            frame.voicing = 0.55;
+            frame.sonority = 0.62;
+            frame.vowel_nucleus_likelihood = 0.45;
+        }
+
+        let (start, end) = active_frame_range(&frames).expect("active range");
+
+        assert_eq!(start, 29);
+        assert_eq!(end, 51);
+    }
+
+    #[test]
+    fn energy_landmarks_anchor_word_boundaries_to_flux() {
+        let output = phonemicized("your love");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let units = alignable_units(&output, &context);
+        let boundary_index = word_boundary_index(&units).expect("word boundary");
+        let mut frames = (0..50).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.spectral_flux = 0.0;
+        }
+        frames[20].spectral_flux = 0.96;
+
+        let priors = boundary_landmark_priors(&units, &frames, 0, frames.len());
+        let prior = priors
+            .iter()
+            .find(|prior| prior.boundary_index == boundary_index)
+            .expect("word boundary prior");
+
+        assert_eq!(prior.target_frame, 20);
+        assert!(boundary_landmark_score(&priors, boundary_index, 20) > 1.0);
+    }
+
+    #[test]
+    fn energy_landmarks_anchor_word_boundaries_to_right_onsets() {
+        let output = phonemicized("forgotten treasures");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let units = alignable_units(&output, &context);
+        let boundary_index = word_boundary_index(&units).expect("word boundary");
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.34;
+            frame.voicing = 0.24;
+            frame.sonority = 0.24;
+            frame.spectral_flux = 0.05;
+        }
+        let (speech_start, speech_end) = active_frame_range(&frames).expect("active range");
+        let ideal =
+            speech_start + speech_end.saturating_sub(speech_start) * boundary_index / units.len();
+        let onset_frame = ideal.saturating_sub(4);
+        for frame in frames.iter_mut().skip(onset_frame) {
+            frame.energy_norm = 0.82;
+            frame.voicing = 0.58;
+            frame.sonority = 0.62;
+        }
+        frames[onset_frame].spectral_flux = 0.82;
+
+        let priors = boundary_landmark_priors(&units, &frames, 0, frames.len());
+        let prior = priors
+            .iter()
+            .find(|prior| prior.boundary_index == boundary_index)
+            .expect("word boundary prior");
+
+        assert_eq!(prior.target_frame, onset_frame);
+        assert!(boundary_landmark_score(&priors, boundary_index, onset_frame) > 1.5);
+    }
+
+    #[test]
+    fn energy_landmarks_anchor_terminal_pause_to_speech_offset() {
+        let output = phonemicized("your love.");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let units = alignable_units(&output, &context);
+        let terminal_boundary = units
+            .iter()
+            .position(|unit| {
+                matches!(
+                    unit,
+                    AlignableUnit::Boundary { phone_id, .. }
+                        if phone_id.as_str() == "boundary.terminal_pause"
+                )
+            })
+            .expect("terminal boundary");
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.spectral_flux = 0.0;
+            frame.energy_norm = 0.58;
+            frame.voicing = 0.55;
+            frame.sonority = 0.58;
+        }
+        for frame in frames.iter_mut().skip(38) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.high_ratio = 0.0;
+            frame.sonority = 0.0;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+
+        let priors = boundary_landmark_priors(&units, &frames, 0, frames.len());
+        let prior = priors
+            .iter()
+            .find(|prior| prior.boundary_index == terminal_boundary)
+            .expect("terminal pause prior");
+
+        assert_eq!(prior.target_frame, 38);
+        assert!(boundary_landmark_score(&priors, terminal_boundary, 38) > 2.0);
+    }
+
+    #[test]
     fn full_trajectory_sampling_is_bounded_and_spread_across_segment() {
         let frames = (0..30).map(test_frame).collect::<Vec<_>>();
         let sampled = sampled_full_trajectory_frames(&frames, 7);
@@ -3418,6 +3907,23 @@ mod tests {
             Spec::Known(id) => Some(id.as_str()),
             _ => None,
         }
+    }
+
+    fn word_boundary_index(units: &[AlignableUnit<'_>]) -> Option<usize> {
+        (1..units.len()).find(|boundary_index| {
+            matches!(
+                (units.get(boundary_index - 1), units.get(*boundary_index)),
+                (
+                    Some(AlignableUnit::Phone {
+                        word_index: previous,
+                        ..
+                    }),
+                    Some(AlignableUnit::Phone {
+                        word_index: next, ..
+                    })
+                ) if previous != next
+            )
+        })
     }
 
     fn test_frame(index: usize) -> AcousticFrameFeatures {
