@@ -10,6 +10,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Launch the speech alignment input web interface")]
+    Align,
     #[command(about = "Launch the browser Face server")]
     Face,
     #[command(about = "Fetch, select, and inspect local model assets")]
@@ -29,6 +31,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Align) => run_workspace_binary("align", "align"),
         Some(Command::Face) => run_face(),
         Some(Command::Models { command }) => mortar_sea::models::run(command),
         #[cfg(feature = "llm-test")]
@@ -40,12 +43,16 @@ fn main() -> Result<()> {
 }
 
 fn run_face() -> Result<()> {
+    run_workspace_binary("face", "face")
+}
+
+fn run_workspace_binary(package: &str, label: &str) -> Result<()> {
     let status =
         std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
-            .args(["run", "-p", "face"])
+            .args(["run", "-p", package])
             .status()?;
     if !status.success() {
-        anyhow::bail!("face exited with {status}");
+        anyhow::bail!("{label} exited with {status}");
     }
     Ok(())
 }

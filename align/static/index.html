@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mortar Align</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Pete Mortar-Sea</p>
+          <h1>Align</h1>
+        </div>
+        <div class="transport">
+          <button type="button" id="zoom-out" title="Zoom out">-</button>
+          <button type="button" id="zoom-in" title="Zoom in">+</button>
+          <button type="button" id="fit" title="Fit timeline">Fit</button>
+          <div class="status" id="status">Ready</div>
+        </div>
+      </header>
+
+      <section class="control-strip">
+        <div class="field text-field">
+          <label for="text">Text</label>
+          <textarea id="text" spellcheck="true">hello world</textarea>
+        </div>
+        <div class="field compact-field">
+          <label for="variant">Variant</label>
+          <input id="variant" name="variant" value="en-US" autocomplete="off" />
+        </div>
+        <div class="field compact-field">
+          <label for="backend">Renderer</label>
+          <select id="backend" aria-label="Renderer">
+            <option value="mock">mock</option>
+            <option value="piper">piper</option>
+            <option value="styletts2">styletts2</option>
+          </select>
+        </div>
+        <div class="button-stack">
+          <button type="button" id="phonemicize">Phonemicize</button>
+          <button type="button" id="synthesize">Synthesize</button>
+          <button type="button" id="align">Align ASR</button>
+        </div>
+        <div class="button-stack">
+          <label class="file-button" for="wav-file">Upload WAV</label>
+          <input id="wav-file" type="file" accept="audio/wav,.wav" />
+          <button type="button" id="record">Record</button>
+          <button type="button" id="stop-recording" disabled>Stop</button>
+        </div>
+      </section>
+
+      <section class="daw">
+        <aside class="track-labels" aria-hidden="true">
+          <div class="corner-label">Time</div>
+          <div>Wave</div>
+          <div>Words</div>
+          <div>Phonemes</div>
+          <div>Phones</div>
+        </aside>
+        <section class="timeline" id="timeline">
+          <canvas id="ruler" height="34"></canvas>
+          <canvas id="waveform" height="176"></canvas>
+          <canvas id="word-track" height="54"></canvas>
+          <canvas id="phoneme-track" height="66"></canvas>
+          <canvas id="phone-track" height="54"></canvas>
+        </section>
+      </section>
+
+      <section class="detail-grid">
+        <article>
+          <header>
+            <h2>Audio</h2>
+            <span id="audio-detail">No audio loaded</span>
+          </header>
+          <audio id="audio" controls></audio>
+        </article>
+
+        <article>
+          <header>
+            <h2>Phonemicization</h2>
+            <span id="phoneme-detail">Waiting</span>
+          </header>
+          <dl class="compact-readout">
+            <div><dt>Phonemes</dt><dd id="phonemes"></dd></div>
+            <div><dt>Phones</dt><dd id="phones"></dd></div>
+            <div><dt>Syllables</dt><dd id="syllables"></dd></div>
+            <div><dt>Warnings</dt><dd id="warnings"></dd></div>
+          </dl>
+        </article>
+
+        <article>
+          <header>
+            <h2>ASR</h2>
+            <span id="alignment-detail">No alignment</span>
+          </header>
+          <pre id="asr"></pre>
+        </article>
+
+        <article>
+          <header>
+            <h2>Speech IR</h2>
+            <button type="button" id="toggle-ir">Show</button>
+          </header>
+          <pre id="ir" hidden></pre>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

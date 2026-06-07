@@ -85,6 +85,54 @@ impl SpeechSynthesisArtifact {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeechSynthesisOptions {
+    pub sample_rate_hz: u32,
+    pub voice_wav: Option<PathBuf>,
+    pub style_wav: Option<PathBuf>,
+    pub diffusion_steps: usize,
+    pub style_alpha: f32,
+    pub style_beta: f32,
+    pub embedding_scale: f64,
+    pub style_seed: u64,
+    pub max_tts_symbols: usize,
+    pub no_tts_chunking: bool,
+}
+
+impl Default for SpeechSynthesisOptions {
+    fn default() -> Self {
+        Self {
+            sample_rate_hz: 24_000,
+            voice_wav: None,
+            style_wav: None,
+            diffusion_steps: 5,
+            style_alpha: 0.3,
+            style_beta: 0.7,
+            embedding_scale: 1.0,
+            style_seed: 0,
+            max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
+            no_tts_chunking: false,
+        }
+    }
+}
+
+impl From<&SpeakCommand> for SpeechSynthesisOptions {
+    fn from(command: &SpeakCommand) -> Self {
+        Self {
+            sample_rate_hz: command.sample_rate_hz,
+            voice_wav: command.voice_wav.clone(),
+            style_wav: command.style_wav.clone(),
+            diffusion_steps: command.diffusion_steps,
+            style_alpha: command.style_alpha,
+            style_beta: command.style_beta,
+            embedding_scale: command.embedding_scale,
+            style_seed: command.style_seed,
+            max_tts_symbols: command.max_tts_symbols,
+            no_tts_chunking: command.no_tts_chunking,
+        }
+    }
+}
+
 pub struct PiperTextSynthesizer {
     backend: PiperOnnxBackend,
 }
@@ -142,6 +190,48 @@ impl PiperTextSynthesizer {
     }
 }
 
+pub fn synthesize_phonemicized_to_wav(
+    phonemicized: &PhonemicizeOutput,
+    backend: SpeakBackend,
+    output_path: &Path,
+    options: &SpeechSynthesisOptions,
+) -> Result<SpeechSynthesisArtifact> {
+    let plan = utterance_plan_from_phonemicized(phonemicized);
+    let styletts2_plan = match backend {
+        SpeakBackend::Mock | SpeakBackend::Styletts2 => Some(
+            prepare_styletts2_plan(
+                &plan,
+                &styletts2_en_us_symbol_set(),
+                styletts2_options_from(options.max_tts_symbols, options.no_tts_chunking),
+            )
+            .context("failed to prepare StyleTTS2 synthesis plan")?,
+        ),
+        SpeakBackend::Piper => None,
+    };
+
+    match backend {
+        SpeakBackend::Mock => synthesize_backend_plan_with_mock_to_wav(
+            styletts2_plan.expect("StyleTTS2 plan should be prepared"),
+            output_path,
+            options.sample_rate_hz,
+        ),
+        SpeakBackend::Styletts2 => {
+            let primary_model = ensure_styletts2_model_available()?;
+            synthesize_backend_plan_with_styletts2_to_wav(
+                styletts2_plan.expect("StyleTTS2 plan should be prepared"),
+                &plan,
+                &primary_model,
+                output_path,
+                options,
+            )
+        }
+        SpeakBackend::Piper => {
+            let voice_model = ensure_piper_voice_model_available()?;
+            synthesize_plan_with_piper_to_wav(plan, &voice_model, output_path)
+        }
+    }
+}
+
 pub fn run(command: SpeakCommand) -> Result<()> {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
@@ -176,7 +266,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
             prepare_styletts2_plan(
                 &plan,
                 &styletts2_en_us_symbol_set(),
-                styletts2_options(&command),
+                styletts2_options_from(command.max_tts_symbols, command.no_tts_chunking),
             )
             .context("failed to prepare StyleTTS2 synthesis plan")?,
         ),
@@ -227,7 +317,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
                 &plan,
                 &primary_model,
                 &command.output,
-                &command,
+                &SpeechSynthesisOptions::from(&command),
             )?
         }
         SpeakBackend::Piper => {
@@ -294,7 +384,7 @@ pub fn synthesize_text_with_piper_to_wav(
     synthesize_plan_with_piper_to_wav(plan, &voice_model, output_path)
 }
 
-fn synthesize_plan_with_piper_to_wav(
+pub fn synthesize_plan_with_piper_to_wav(
     plan: UtterancePlan,
     voice_model_path: &Path,
     output_path: &Path,
@@ -302,7 +392,7 @@ fn synthesize_plan_with_piper_to_wav(
     PiperTextSynthesizer::load(voice_model_path)?.synthesize_plan_to_wav(plan, output_path)
 }
 
-pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
+pub fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
     UtterancePlan {
         id: UtteranceId("styletts2.demo.utterance".into()),
         variant: output.variant.clone(),
@@ -324,10 +414,10 @@ pub(crate) fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> Ut
     }
 }
 
-fn styletts2_options(command: &SpeakCommand) -> StyleTts2PlanOptions {
+fn styletts2_options_from(max_tts_symbols: usize, no_tts_chunking: bool) -> StyleTts2PlanOptions {
     StyleTts2PlanOptions {
-        max_symbols_per_chunk: command.max_tts_symbols,
-        chunking_enabled: !command.no_tts_chunking,
+        max_symbols_per_chunk: max_tts_symbols,
+        chunking_enabled: !no_tts_chunking,
     }
 }
 
@@ -348,7 +438,7 @@ fn format_warning(warning: &PronunciationWarning) -> String {
     }
 }
 
-pub(crate) fn synthesize_plan_with_mock_to_wav(
+pub fn synthesize_plan_with_mock_to_wav(
     plan: UtterancePlan,
     output_path: &Path,
     sample_rate_hz: u32,
@@ -395,7 +485,7 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
     plan: &UtterancePlan,
     primary_model_path: &Path,
     output_path: &Path,
-    command: &SpeakCommand,
+    options: &SpeechSynthesisOptions,
 ) -> Result<SpeechSynthesisArtifact> {
     let model_dir = primary_model_path
         .parent()
@@ -403,11 +493,11 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
     let mut backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
         .context("failed to load native StyleTTS2 ONNX backend")?
         .with_diffusion_options(StyleTts2DiffusionOptions {
-            diffusion_steps: command.diffusion_steps,
-            alpha: command.style_alpha,
-            beta: command.style_beta,
-            embedding_scale: command.embedding_scale,
-            seed: command.style_seed,
+            diffusion_steps: options.diffusion_steps,
+            alpha: options.style_alpha,
+            beta: options.style_beta,
+            embedding_scale: options.embedding_scale,
+            seed: options.style_seed,
         })
         .context("invalid StyleTTS2 diffusion options")?;
     let mut request = StyleTts2SynthesisRequest::from_backend_plan(
@@ -418,12 +508,12 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
     );
     let default_references = ensure_styletts2_default_reference_audio_available()
         .context("failed to prepare default StyleTTS2 reference audio")?;
-    let voice_reference = command
+    let voice_reference = options
         .voice_wav
         .as_ref()
         .unwrap_or(&default_references.voice);
-    let style_reference = command.style_wav.as_ref().unwrap_or_else(|| {
-        command
+    let style_reference = options.style_wav.as_ref().unwrap_or_else(|| {
+        options
             .voice_wav
             .as_ref()
             .unwrap_or(&default_references.style)
@@ -450,7 +540,7 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
     _plan: &UtterancePlan,
     _primary_model_path: &Path,
     _output_path: &Path,
-    _command: &SpeakCommand,
+    _options: &SpeechSynthesisOptions,
 ) -> Result<SpeechSynthesisArtifact> {
     anyhow::bail!(
         "native StyleTTS2 inference requires building mortar-sea with the `styletts2-onnx` feature"
