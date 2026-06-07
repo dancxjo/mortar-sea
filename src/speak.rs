@@ -19,7 +19,9 @@ use styletts2::{
 use styletts2::{StyleTts2DiffusionOptions, StyleTts2OnnxBackend};
 
 #[cfg(feature = "styletts2-onnx")]
-use crate::models::ensure_styletts2_default_reference_audio_available;
+use crate::models::{
+    StyleTts2ReferenceAudioPaths, ensure_styletts2_default_reference_audio_available,
+};
 use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
 use crate::piper::{
     PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
@@ -187,6 +189,124 @@ impl PiperTextSynthesizer {
             sample_rate_hz: output.sample_rate_hz,
             samples: output.pcm_mono_f32.len(),
         })
+    }
+}
+
+#[cfg(feature = "styletts2-onnx")]
+pub struct StyleTts2TextSynthesizer {
+    backend: StyleTts2OnnxBackend,
+    default_references: StyleTts2ReferenceAudioPaths,
+    options: SpeechSynthesisOptions,
+}
+
+#[cfg(feature = "styletts2-onnx")]
+impl StyleTts2TextSynthesizer {
+    pub fn load_selected(options: SpeechSynthesisOptions) -> Result<Self> {
+        let primary_model = ensure_styletts2_model_available()?;
+        Self::load(primary_model, options)
+    }
+
+    pub fn load(
+        primary_model_path: impl AsRef<Path>,
+        options: SpeechSynthesisOptions,
+    ) -> Result<Self> {
+        let primary_model_path = primary_model_path.as_ref();
+        let model_dir = primary_model_path
+            .parent()
+            .context("StyleTTS2 primary model path has no parent directory")?;
+        let backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
+            .context("failed to load native StyleTTS2 ONNX backend")?
+            .with_diffusion_options(styletts2_diffusion_options_from(&options))
+            .context("invalid StyleTTS2 diffusion options")?;
+        let default_references = ensure_styletts2_default_reference_audio_available()
+            .context("failed to prepare default StyleTTS2 reference audio")?;
+
+        Ok(Self {
+            backend,
+            default_references,
+            options,
+        })
+    }
+
+    pub fn synthesize_text_to_wav(
+        &mut self,
+        text: impl Into<String>,
+        variety: impl Into<String>,
+        output_path: &Path,
+    ) -> Result<SpeechSynthesisArtifact> {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: text.into(),
+                variety: VarietyId(variety.into()),
+                style: None,
+            })
+            .context("failed to phonemicize text into a speech plan")?;
+        let plan = utterance_plan_from_phonemicized(&phonemicized);
+        self.synthesize_plan_to_wav(plan, output_path)
+    }
+
+    pub fn synthesize_plan_to_wav(
+        &mut self,
+        plan: UtterancePlan,
+        output_path: &Path,
+    ) -> Result<SpeechSynthesisArtifact> {
+        let backend_plan = prepare_styletts2_plan(
+            &plan,
+            &styletts2_en_us_symbol_set(),
+            styletts2_options_from(self.options.max_tts_symbols, self.options.no_tts_chunking),
+        )
+        .context("failed to prepare StyleTTS2 synthesis plan")?;
+        self.synthesize_backend_plan_to_wav(backend_plan, &plan, output_path)
+    }
+
+    pub fn synthesize_backend_plan_to_wav(
+        &mut self,
+        backend_plan: BackendSynthesisPlan,
+        plan: &UtterancePlan,
+        output_path: &Path,
+    ) -> Result<SpeechSynthesisArtifact> {
+        let request = self.synthesis_request(backend_plan, plan);
+        let output = self
+            .backend
+            .synthesize(&request)
+            .context("native StyleTTS2 synthesis failed")?;
+
+        write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+            .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
+
+        Ok(SpeechSynthesisArtifact {
+            path: output_path.to_path_buf(),
+            sample_rate_hz: output.sample_rate_hz,
+            samples: output.pcm_mono_f32.len(),
+        })
+    }
+
+    fn synthesis_request(
+        &self,
+        backend_plan: BackendSynthesisPlan,
+        plan: &UtterancePlan,
+    ) -> StyleTts2SynthesisRequest {
+        let mut request = StyleTts2SynthesisRequest::from_backend_plan(
+            backend_plan,
+            plan.speaker.clone(),
+            plan.style.clone(),
+            plan.target_prosody.clone(),
+        );
+        let voice_reference = self
+            .options
+            .voice_wav
+            .as_ref()
+            .unwrap_or(&self.default_references.voice);
+        let style_reference = self.options.style_wav.as_ref().unwrap_or_else(|| {
+            self.options
+                .voice_wav
+                .as_ref()
+                .unwrap_or(&self.default_references.style)
+        });
+
+        request = request.with_speaker_reference_audio_uri(voice_reference.display().to_string());
+        request = request.with_style_reference_audio_uri(style_reference.display().to_string());
+        request
     }
 }
 
@@ -421,6 +541,17 @@ fn styletts2_options_from(max_tts_symbols: usize, no_tts_chunking: bool) -> Styl
     }
 }
 
+#[cfg(feature = "styletts2-onnx")]
+fn styletts2_diffusion_options_from(options: &SpeechSynthesisOptions) -> StyleTts2DiffusionOptions {
+    StyleTts2DiffusionOptions {
+        diffusion_steps: options.diffusion_steps,
+        alpha: options.style_alpha,
+        beta: options.style_beta,
+        embedding_scale: options.embedding_scale,
+        seed: options.style_seed,
+    }
+}
+
 fn is_guessed_pronunciation(warning: &PronunciationWarning) -> bool {
     matches!(
         warning.kind,
@@ -487,51 +618,8 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
     output_path: &Path,
     options: &SpeechSynthesisOptions,
 ) -> Result<SpeechSynthesisArtifact> {
-    let model_dir = primary_model_path
-        .parent()
-        .context("StyleTTS2 primary model path has no parent directory")?;
-    let mut backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
-        .context("failed to load native StyleTTS2 ONNX backend")?
-        .with_diffusion_options(StyleTts2DiffusionOptions {
-            diffusion_steps: options.diffusion_steps,
-            alpha: options.style_alpha,
-            beta: options.style_beta,
-            embedding_scale: options.embedding_scale,
-            seed: options.style_seed,
-        })
-        .context("invalid StyleTTS2 diffusion options")?;
-    let mut request = StyleTts2SynthesisRequest::from_backend_plan(
-        backend_plan,
-        plan.speaker.clone(),
-        plan.style.clone(),
-        plan.target_prosody.clone(),
-    );
-    let default_references = ensure_styletts2_default_reference_audio_available()
-        .context("failed to prepare default StyleTTS2 reference audio")?;
-    let voice_reference = options
-        .voice_wav
-        .as_ref()
-        .unwrap_or(&default_references.voice);
-    let style_reference = options.style_wav.as_ref().unwrap_or_else(|| {
-        options
-            .voice_wav
-            .as_ref()
-            .unwrap_or(&default_references.style)
-    });
-    request = request.with_speaker_reference_audio_uri(voice_reference.display().to_string());
-    request = request.with_style_reference_audio_uri(style_reference.display().to_string());
-    let output = backend
-        .synthesize(&request)
-        .context("native StyleTTS2 synthesis failed")?;
-
-    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
-        .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
-
-    Ok(SpeechSynthesisArtifact {
-        path: output_path.to_path_buf(),
-        sample_rate_hz: output.sample_rate_hz,
-        samples: output.pcm_mono_f32.len(),
-    })
+    StyleTts2TextSynthesizer::load(primary_model_path, options.clone())?
+        .synthesize_backend_plan_to_wav(backend_plan, plan, output_path)
 }
 
 #[cfg(not(feature = "styletts2-onnx"))]

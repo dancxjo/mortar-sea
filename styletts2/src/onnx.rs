@@ -70,6 +70,27 @@ impl Default for StyleTts2DiffusionOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleTts2OnnxOptimization {
+    Generation,
+    Deterministic,
+}
+
+impl Default for StyleTts2OnnxOptimization {
+    fn default() -> Self {
+        Self::Generation
+    }
+}
+
+impl StyleTts2OnnxOptimization {
+    fn graph_optimization_level(self) -> GraphOptimizationLevel {
+        match self {
+            Self::Generation => GraphOptimizationLevel::Level3,
+            Self::Deterministic => GraphOptimizationLevel::Disable,
+        }
+    }
+}
+
 pub struct StyleTts2OnnxBackend {
     diffusion: Session,
     style_encoder: Session,
@@ -85,6 +106,17 @@ pub struct StyleTts2OnnxBackend {
 
 impl StyleTts2OnnxBackend {
     pub fn load(paths: StyleTts2OnnxPaths) -> Result<Self, StyleTts2Error> {
+        Self::load_with_optimization(paths, StyleTts2OnnxOptimization::Generation)
+    }
+
+    pub fn load_deterministic(paths: StyleTts2OnnxPaths) -> Result<Self, StyleTts2Error> {
+        Self::load_with_optimization(paths, StyleTts2OnnxOptimization::Deterministic)
+    }
+
+    pub fn load_with_optimization(
+        paths: StyleTts2OnnxPaths,
+        optimization: StyleTts2OnnxOptimization,
+    ) -> Result<Self, StyleTts2Error> {
         ensure_file(&paths.diffusion, "StyleTTS2 diffusion denoiser")?;
         ensure_file(&paths.style_encoder, "StyleTTS2 style encoder")?;
         ensure_file(&paths.text_encoder, "StyleTTS2 text encoder")?;
@@ -92,10 +124,22 @@ impl StyleTts2OnnxBackend {
         initialize_ort_runtime()?;
 
         Ok(Self {
-            diffusion: load_session(&paths.diffusion, "StyleTTS2 diffusion denoiser")?,
-            style_encoder: load_session(&paths.style_encoder, "StyleTTS2 style encoder")?,
-            text_encoder: load_session(&paths.text_encoder, "StyleTTS2 text encoder")?,
-            decoder: load_session(&paths.decoder, "StyleTTS2 decoder")?,
+            diffusion: load_session(
+                &paths.diffusion,
+                "StyleTTS2 diffusion denoiser",
+                optimization,
+            )?,
+            style_encoder: load_session(
+                &paths.style_encoder,
+                "StyleTTS2 style encoder",
+                optimization,
+            )?,
+            text_encoder: load_session(
+                &paths.text_encoder,
+                "StyleTTS2 text encoder",
+                optimization,
+            )?,
+            decoder: load_session(&paths.decoder, "StyleTTS2 decoder", optimization)?,
             style_vector: vec![0.0; STYLE_VECTOR_DIMS],
             speaker_reference_audio_uri: None,
             style_reference_audio_uri: None,
@@ -107,6 +151,19 @@ impl StyleTts2OnnxBackend {
 
     pub fn from_model_dir(model_dir: impl AsRef<Path>) -> Result<Self, StyleTts2Error> {
         Self::load(StyleTts2OnnxPaths::from_model_dir(model_dir))
+    }
+
+    pub fn from_model_dir_deterministic(
+        model_dir: impl AsRef<Path>,
+    ) -> Result<Self, StyleTts2Error> {
+        Self::load_deterministic(StyleTts2OnnxPaths::from_model_dir(model_dir))
+    }
+
+    pub fn from_model_dir_with_optimization(
+        model_dir: impl AsRef<Path>,
+        optimization: StyleTts2OnnxOptimization,
+    ) -> Result<Self, StyleTts2Error> {
+        Self::load_with_optimization(StyleTts2OnnxPaths::from_model_dir(model_dir), optimization)
     }
 
     pub fn with_style_vector(mut self, style_vector: Vec<f32>) -> Result<Self, StyleTts2Error> {
@@ -896,7 +953,11 @@ fn find_onnxruntime_dylib_in_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Op
     candidates.pop()
 }
 
-fn load_session(path: &Path, label: &str) -> Result<Session, StyleTts2Error> {
+fn load_session(
+    path: &Path,
+    label: &str,
+    optimization: StyleTts2OnnxOptimization,
+) -> Result<Session, StyleTts2Error> {
     Session::builder()
         .map_err(|error| {
             backend_error(format!("failed to create {label} session builder: {error}"))
@@ -919,7 +980,7 @@ fn load_session(path: &Path, label: &str) -> Result<Session, StyleTts2Error> {
                 "failed to configure {label} intra-op spinning: {error}"
             ))
         })?
-        .with_optimization_level(GraphOptimizationLevel::Disable)
+        .with_optimization_level(optimization.graph_optimization_level())
         .map_err(|error| {
             backend_error(format!("failed to configure {label} optimization: {error}"))
         })?
@@ -974,6 +1035,22 @@ mod tests {
     use super::*;
     use crate::symbols::StyleTts2SymbolSource;
     use crate::symbols::StyleTts2SymbolToken;
+
+    #[test]
+    fn onnx_optimization_modes_map_to_expected_levels() {
+        assert_eq!(
+            StyleTts2OnnxOptimization::Generation.graph_optimization_level(),
+            GraphOptimizationLevel::Level3
+        );
+        assert_eq!(
+            StyleTts2OnnxOptimization::Deterministic.graph_optimization_level(),
+            GraphOptimizationLevel::Disable
+        );
+        assert_eq!(
+            StyleTts2OnnxOptimization::default(),
+            StyleTts2OnnxOptimization::Generation
+        );
+    }
 
     #[test]
     fn arpabet_symbols_map_to_styletts2_token_ids() {
