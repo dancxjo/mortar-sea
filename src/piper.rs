@@ -169,7 +169,7 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             } else if phone_id.0 == "boundary.letter" {
                 continue;
             } else {
-                push_symbol(&mut symbols, piper_symbol_for_phone_id(&phone_id.0));
+                push_symbol(&mut symbols, piper_symbol_for_phone(token));
                 in_word = true;
             }
         }
@@ -247,11 +247,21 @@ fn piper_pause_after_ms(symbol: &str) -> Option<u32> {
     }
 }
 
+fn piper_symbol_for_phone(token: &PhoneToken) -> &str {
+    let Spec::Known(phone_id) = &token.phone else {
+        return "";
+    };
+    match phone_id.as_str() {
+        "ipa.phone.ʌ" => "AH1",
+        _ => piper_symbol_for_phone_id(phone_id.as_str()),
+    }
+}
+
 fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
     match phone_id {
         "ipa.phone.ɑ" => "AA",
         "ipa.phone.æ" => "AE",
-        "ipa.phone.ʌ" => "AH",
+        "ipa.phone.ʌ" => "AH1",
         "ipa.phone.ɔ" => "AO",
         "ipa.phone.aʊ" => "AW",
         "ipa.phone.aɪ" => "AY",
@@ -1469,6 +1479,78 @@ mod tests {
                 "ə", " ", "ə", "JH", "EY", "S", "ə", "N", "T", " ", "K", "ER", "ə", "N", "T", " ",
                 "F", "OW", "N", "ə", "L", "AA", "JH", "IH", "K", "ə", "L", "."
             ]
+        );
+    }
+
+    #[test]
+    fn piper_sequence_marks_stressed_strut_before_piper_compatibility_lowering() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "discuss".into(),
+                variant: VariantId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variant: phonemicized.variant,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(sequence.symbols, vec!["D", "IH", "S", "K", "AH1", "S", "."]);
+    }
+
+    #[test]
+    fn piper_compatibility_lowers_stressed_strut_without_reducing_to_schwa() {
+        let config = config_from_json(
+            r#"
+            {
+              "audio": { "sample_rate": 22050 },
+              "phoneme_id_map": {
+                "^": [1],
+                "_": [2],
+                "$": [3],
+                ".": [4],
+                "d": [5],
+                "ɪ": [6],
+                "s": [7],
+                "k": [8],
+                "ˈ": [9],
+                "ʌ": [10],
+                "ə": [11]
+              }
+            }
+            "#,
+        );
+
+        let sequence = PiperPhonemeSequence {
+            symbols: vec![
+                "D".into(),
+                "IH".into(),
+                "S".into(),
+                "K".into(),
+                "AH1".into(),
+                "S".into(),
+            ],
+        }
+        .to_symbols_compatible(&config)
+        .expect("compatible symbols");
+
+        assert_eq!(
+            sequence.symbols,
+            vec!["d", "ɪ", "s", "k", "ˈ", "ʌ", "s", "."]
         );
     }
 

@@ -1,12 +1,11 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex, mpsc as std_mpsc};
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, bail};
 use chrono::{DateTime, Utc};
-use mortar_sea::speak::{PiperTextSynthesizer, SpeechSynthesisArtifact};
+use mortar_sea::speak::SpeechSynthesisArtifact;
 #[cfg(test)]
 use mortar_sea::voice_stream::parse_voice_stream;
 #[cfg(test)]
@@ -39,27 +38,8 @@ const VOICE_RESTART_DELAY: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
-const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
 const DIALOGUE_VOICE_MAX_TOKENS_PER_TURN: usize = 96;
-
-static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-#[derive(Debug, Clone)]
-struct PiperSynthesisWorker {
-    id: Uuid,
-    tx: std_mpsc::Sender<PiperSynthesisJob>,
-}
-
-#[derive(Debug)]
-struct PiperSynthesisJob {
-    utterance_id: Uuid,
-    generation_id: Uuid,
-    text: String,
-    output_path: PathBuf,
-    response_tx: std_mpsc::Sender<anyhow::Result<SpeechSynthesisArtifact>>,
-}
 
 pub(crate) fn mouth_audio_dir() -> PathBuf {
     PathBuf::from("target/face-mouth")
@@ -71,107 +51,6 @@ fn mouth_audio_filename(utterance_id: Uuid) -> String {
 
 fn mouth_audio_url(utterance_id: Uuid) -> String {
     format!("/mouth-audio/{}", mouth_audio_filename(utterance_id))
-}
-
-impl PiperSynthesisWorker {
-    fn shared() -> anyhow::Result<Self> {
-        let mut worker = PIPER_SYNTHESIS_WORKER
-            .lock()
-            .expect("piper synthesis worker lock poisoned");
-        if let Some(worker) = worker.as_ref() {
-            return Ok(worker.clone());
-        }
-
-        let (tx, rx) = std_mpsc::channel::<PiperSynthesisJob>();
-        std::thread::Builder::new()
-            .name("mortar-piper-synthesis".to_string())
-            .spawn(move || run_piper_synthesis_worker(rx))
-            .map_err(|error| anyhow::anyhow!("failed to spawn Piper synthesis worker: {error}"))?;
-        let created = Self {
-            id: Uuid::new_v4(),
-            tx,
-        };
-        *worker = Some(created.clone());
-        Ok(created)
-    }
-
-    fn synthesize_text_to_wav(
-        &self,
-        utterance_id: Uuid,
-        generation_id: Uuid,
-        text: String,
-        output_path: PathBuf,
-    ) -> anyhow::Result<SpeechSynthesisArtifact> {
-        let (response_tx, response_rx) = std_mpsc::channel();
-        self.tx
-            .send(PiperSynthesisJob {
-                utterance_id,
-                generation_id,
-                text,
-                output_path,
-                response_tx,
-            })
-            .map_err(|error| anyhow::anyhow!("failed to queue Piper synthesis job: {error}"))?;
-        match response_rx.recv_timeout(VOICE_PIPER_SYNTHESIS_TIMEOUT) {
-            Ok(result) => result,
-            Err(error) => {
-                drop_stale_piper_worker(self.id);
-                Err(anyhow::anyhow!(
-                    "Piper synthesis worker did not return within {} ms: {error}",
-                    VOICE_PIPER_SYNTHESIS_TIMEOUT.as_millis()
-                ))
-            }
-        }
-    }
-}
-
-fn run_piper_synthesis_worker(rx: std_mpsc::Receiver<PiperSynthesisJob>) {
-    let mut synthesizer = None::<PiperTextSynthesizer>;
-    for job in rx {
-        let result = (|| -> anyhow::Result<SpeechSynthesisArtifact> {
-            info!(
-                utterance_id = %job.utterance_id,
-                generation_id = %job.generation_id,
-                output_path = %job.output_path.display(),
-                text_chars = job.text.chars().count(),
-                "Piper synthesis worker started job"
-            );
-            if synthesizer.is_none() {
-                info!("loading warm Piper ONNX voice session");
-                synthesizer = Some(PiperTextSynthesizer::load_selected()?);
-                info!("warm Piper ONNX voice session ready");
-            }
-
-            let artifact = synthesizer
-                .as_mut()
-                .expect("Piper synthesizer initialized")
-                .synthesize_text_to_wav(job.text, "en-US", &job.output_path)?;
-            info!(
-                utterance_id = %job.utterance_id,
-                generation_id = %job.generation_id,
-                path = %artifact.path.display(),
-                sample_rate_hz = artifact.sample_rate_hz,
-                samples = artifact.samples,
-                duration_ms = artifact.duration_ms(),
-                "Piper synthesis worker completed job"
-            );
-            Ok(artifact)
-        })();
-        let _ = job.response_tx.send(result);
-    }
-}
-
-fn drop_stale_piper_worker(worker_id: Uuid) {
-    let mut worker = PIPER_SYNTHESIS_WORKER
-        .lock()
-        .expect("piper synthesis worker lock poisoned");
-    if worker.as_ref().is_some_and(|worker| worker.id == worker_id) {
-        *worker = None;
-        warn!(
-            %worker_id,
-            "discarded stale Piper synthesis worker; next utterance will create a fresh worker"
-        );
-    }
 }
 
 pub(crate) fn accept_mouth_event(state: &AppState, event: VoiceMouthEvent) {
@@ -617,6 +496,7 @@ async fn run_voice(state: AppState) {
                                 &state,
                                 &generation_tx,
                                 &recent_experiences,
+                                &recent_finalized_asr,
                                 &recent_thoughts,
                                 &conversation,
                                 &recent_speech_feedback,
@@ -674,6 +554,7 @@ async fn run_voice(state: AppState) {
                                 &state,
                                 &generation_tx,
                                 &recent_experiences,
+                                &recent_finalized_asr,
                                 &recent_thoughts,
                                 &conversation,
                                 &recent_speech_feedback,
@@ -1179,13 +1060,21 @@ async fn maybe_start_dialogue_voice_after_mouth(
     recent_experiences: &mut VecDeque<ExperienceRecord>,
     recent_finalized_asr: &mut VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
-    conversation: &VecDeque<VoiceConversationTurn>,
+    conversation: &mut VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
     answered_user_turns: &mut usize,
     last_experience_signature: &mut Option<String>,
 ) {
     sync_recent_experiences_from_state(state, recent_experiences, last_experience_signature);
-    sync_recent_finalized_asr_from_state(state, recent_finalized_asr);
+    for update in sync_recent_finalized_asr_from_state(state, recent_finalized_asr) {
+        remember_voice_conversation_turn(
+            conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: update.text,
+            },
+        );
+    }
     if active_generation_id.is_some()
         || pending_speech.is_some()
         || !voice_conversation_needs_response(conversation, *answered_user_turns)
@@ -1198,6 +1087,7 @@ async fn maybe_start_dialogue_voice_after_mouth(
         state,
         generation_tx,
         recent_experiences,
+        recent_finalized_asr,
         recent_thoughts,
         conversation,
         recent_speech_feedback,
@@ -1317,23 +1207,7 @@ fn synthesize_voice_speech_audio(
             let result = (|| -> anyhow::Result<_> {
                 let output_path = mouth_audio_dir().join(mouth_audio_filename(utterance_id));
                 let artifact =
-                    match synthesize_text_with_piper_command_to_wav(&text_for_task, &output_path) {
-                        Ok(artifact) => artifact,
-                        Err(command_error) => {
-                            warn!(
-                                %utterance_id,
-                                %generation_id,
-                                error = %format!("{command_error:#}"),
-                                "Mouth Piper command synthesis failed; falling back to in-process worker"
-                            );
-                            PiperSynthesisWorker::shared()?.synthesize_text_to_wav(
-                                utterance_id,
-                                generation_id,
-                                text_for_task,
-                                output_path,
-                            )?
-                        }
-                    };
+                    synthesize_text_with_piper_command_to_wav(&text_for_task, &output_path)?;
                 let byte_len = std::fs::metadata(&artifact.path)?.len();
                 Ok((byte_len, artifact))
             })();
@@ -1632,6 +1506,7 @@ fn start_dialogue_voice_generation(
     state: &AppState,
     generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
@@ -1645,6 +1520,7 @@ fn start_dialogue_voice_generation(
         prompt: String::new(),
         messages: build_dialogue_voice_messages(
             recent_experiences,
+            recent_finalized_asr,
             recent_thoughts,
             conversation,
             recent_speech_feedback,
@@ -1747,6 +1623,7 @@ fn build_voice_messages(
 
 fn build_dialogue_voice_messages(
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
@@ -1758,6 +1635,7 @@ fn build_dialogue_voice_messages(
         "user",
         build_dialogue_voice_context_prompt(
             recent_experiences,
+            recent_finalized_asr,
             recent_thoughts,
             recent_speech_feedback,
         ),
@@ -1821,6 +1699,7 @@ fn dialogue_voice_system_prompt() -> &'static str {
 
 fn build_dialogue_voice_context_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> String {
@@ -1845,6 +1724,15 @@ fn build_dialogue_voice_context_prompt(
                 experience.confidence,
                 prompt_json_string(&experience.what)
             ));
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Recent finalized ASR transcripts heard directly:\n");
+    if recent_finalized_asr.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for update in recent_finalized_asr {
+            prompt.push_str(&format_finalized_asr_update(update));
         }
     }
     prompt.push('\n');
@@ -1908,22 +1796,7 @@ fn build_voice_context_prompt(
         prompt.push_str("- None yet.\n");
     } else {
         for update in recent_finalized_asr {
-            prompt.push_str(&format!(
-                "- observed_at={} sequence_start={} sequence_end={}",
-                update.observed_at.to_rfc3339(),
-                update.sequence_start,
-                update.sequence_end,
-            ));
-            if let Some(sentence_index) = update.sentence_index {
-                prompt.push_str(&format!(" sentence_index={sentence_index}"));
-            }
-            if let Some(sentence_count) = update.sentence_count {
-                prompt.push_str(&format!(" sentence_count={sentence_count}"));
-            }
-            prompt.push_str(&format!(
-                " transcript={}\n",
-                prompt_json_string(&update.text)
-            ));
+            prompt.push_str(&format_finalized_asr_update(update));
         }
     }
     prompt.push('\n');
@@ -1955,6 +1828,26 @@ fn build_voice_context_prompt(
         }
     }
     prompt.push_str("\nContinue from this structured context.\n");
+    prompt
+}
+
+fn format_finalized_asr_update(update: &FinalizedAsrUpdate) -> String {
+    let mut prompt = format!(
+        "- observed_at={} sequence_start={} sequence_end={}",
+        update.observed_at.to_rfc3339(),
+        update.sequence_start,
+        update.sequence_end,
+    );
+    if let Some(sentence_index) = update.sentence_index {
+        prompt.push_str(&format!(" sentence_index={sentence_index}"));
+    }
+    if let Some(sentence_count) = update.sentence_count {
+        prompt.push_str(&format!(" sentence_count={sentence_count}"));
+    }
+    prompt.push_str(&format!(
+        " transcript={}\n",
+        prompt_json_string(&update.text)
+    ));
     prompt
 }
 
@@ -3326,6 +3219,7 @@ mod tests {
             &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
+            &VecDeque::new(),
         );
         let prompt = messages
             .into_iter()
@@ -3364,6 +3258,7 @@ mod tests {
         let messages = build_dialogue_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
+            &VecDeque::new(),
             &conversation,
             &VecDeque::new(),
         );
@@ -3377,6 +3272,37 @@ mod tests {
                 .any(|message| { message.role == "assistant" && message.content == "I am here." })
         );
         assert_no_adjacent_same_role(&messages);
+    }
+
+    #[test]
+    fn dialogue_voice_messages_include_recent_finalized_asr_updates() {
+        let observed_at = chrono::Utc::now();
+        let mut asr = VecDeque::new();
+        asr.push_back(FinalizedAsrUpdate {
+            observed_at,
+            text: "My name is Travis.".to_string(),
+            sequence_start: 10,
+            sequence_end: 12,
+            sentence_index: Some(0),
+            sentence_count: Some(1),
+        });
+
+        let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
+            &asr,
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+        );
+        let prompt = messages
+            .into_iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        assert!(prompt.contains("Recent finalized ASR transcripts heard directly:"));
+        assert!(prompt.contains("My name is Travis."));
+        assert!(prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
     }
 
     #[test]
@@ -3398,6 +3324,7 @@ mod tests {
         );
 
         let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
             &VecDeque::new(),
             &VecDeque::new(),
             &conversation,
