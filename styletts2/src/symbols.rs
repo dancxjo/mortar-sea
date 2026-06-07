@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
-    BoundaryKind, FeatureId, FeatureValue, LinguisticVariant, PauseKind, PhoneInventory,
+    BoundaryKind, FeatureId, FeatureValue, LinguisticVariety, PauseKind, PhoneInventory,
     PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, Stress, Syllable,
-    TerminalPunctuation, UtterancePlan, data::arpabet, epenthetic_phones_after, variant_by_code,
+    TerminalPunctuation, UtterancePlan, data::arpabet, epenthetic_phones_after, variety_by_code,
 };
 use thiserror::Error;
 
@@ -144,11 +144,11 @@ impl SymbolSet {
         }
 
         if !plan.intended_phonemes.is_empty() {
-            let variant = variant_by_code(&plan.variant.0);
+            let variety = variety_by_code(&plan.variety.0);
             return self.lower_phoneme_tokens_with_boundaries(
                 &plan.intended_phonemes,
                 &plan.boundaries,
-                variant.as_ref(),
+                variety.as_ref(),
             );
         }
 
@@ -198,7 +198,7 @@ impl SymbolSet {
         &self,
         tokens: &[PhonemeToken],
         boundaries: &[SpeechBoundaryToken],
-        variant: Option<&LinguisticVariant>,
+        variety: Option<&LinguisticVariety>,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         let mut lowered = Vec::new();
         let mut boundary_word_index = 0;
@@ -230,10 +230,10 @@ impl SymbolSet {
             }
 
             if in_word
-                && let Some(variant) = variant
+                && let Some(variety) = variety
                 && let Some(previous_index) = token_index.checked_sub(1)
             {
-                for phone in epenthetic_phones_after(variant, tokens, previous_index) {
+                for phone in epenthetic_phones_after(variety, tokens, previous_index) {
                     self.push_epenthetic_phone(&mut lowered, &phone)?;
                 }
             }
@@ -483,7 +483,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         set = set
             .with_alias(format!("en-US.arpabet.{symbol}"), symbol)
             .with_alias(format!("en-US.arpabet-phone.{symbol}"), symbol);
-        for variant in [
+        for variety in [
             "en-US",
             "en-US-GA",
             "en-US-singing",
@@ -491,11 +491,11 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
             "en-GB-ScotE",
             "en-US-AAE",
         ] {
-            set = set.with_alias(format!("{variant}.phoneme.{symbol}"), symbol);
+            set = set.with_alias(format!("{variety}.phoneme.{symbol}"), symbol);
         }
         for stress in ["0", "1", "2"] {
             set = set.with_alias(format!("en-US.arpabet.{symbol}{stress}"), symbol);
-            for variant in [
+            for variety in [
                 "en-US",
                 "en-US-GA",
                 "en-US-singing",
@@ -503,12 +503,12 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
                 "en-GB-ScotE",
                 "en-US-AAE",
             ] {
-                set = set.with_alias(format!("{variant}.phoneme.{symbol}{stress}"), symbol);
+                set = set.with_alias(format!("{variety}.phoneme.{symbol}{stress}"), symbol);
             }
         }
     }
     for entry in arpabet::ARPABET {
-        for variant in [
+        for variety in [
             "en-US",
             "en-US-GA",
             "en-US-singing",
@@ -516,7 +516,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
             "en-GB-ScotE",
             "en-US-AAE",
         ] {
-            set = set.with_alias(format!("{variant}.phoneme.{}", entry.ipa), entry.symbol);
+            set = set.with_alias(format!("{variety}.phoneme.{}", entry.ipa), entry.symbol);
         }
     }
     set = set

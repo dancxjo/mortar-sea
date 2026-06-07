@@ -125,7 +125,7 @@ utterance plan, then lowers that plan into backend-specific StyleTTS2 symbols:
 
 ```text
 text
-  -> variant-aware phonemicization
+  -> variety-aware phonemicization
   -> speech-spine phoneme and phone tokens
   -> StyleTTS2 synthesis request
   -> backend symbols
@@ -136,7 +136,7 @@ The default backend is still the deterministic mock backend, but it now consumes
 the phonemicized `UtterancePlan` rather than raw grapheme characters:
 
 ```sh
-cargo run speak --variant en-US "hello world"
+cargo run speak --variety en-US "hello world"
 ```
 
 Useful model commands:

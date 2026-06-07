@@ -6,7 +6,7 @@ use clap::Args;
 use speech::{
     BoundaryKind, Curve, CurvePoint, EnglishPhonemicizer, EvidenceProvenance, EvidenceSource,
     PhonemicizeRequest, Phonemicizer, ProsodicBreak, ProsodicLabel, ProsodicLabelKind,
-    ProsodyTrack, Spec, StyleRef, StyleSource, UtteranceId, UtterancePlan, VariantId,
+    ProsodyTrack, Spec, StyleRef, StyleSource, UtteranceId, UtterancePlan, VarietyId,
 };
 
 use crate::speak::{self, SpeechSynthesisArtifact};
@@ -175,13 +175,13 @@ impl Mouth for MouthGate {
 
 #[derive(Debug, Clone)]
 pub struct DefaultBreathGroupPlanner {
-    pub variant: VariantId,
+    pub variety: VarietyId,
 }
 
 impl Default for DefaultBreathGroupPlanner {
     fn default() -> Self {
         Self {
-            variant: VariantId("en-US".into()),
+            variety: VarietyId("en-US".into()),
         }
     }
 }
@@ -191,7 +191,7 @@ impl BreathGroupPlanner for DefaultBreathGroupPlanner {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: group.text.clone(),
-                variant: self.variant.clone(),
+                variety: self.variety.clone(),
                 style: None,
             })
             .map_err(|error| MouthError::Planning(error.to_string()))?;
@@ -255,9 +255,9 @@ impl<P, S> DefaultMouth<P, S> {
 }
 
 impl DefaultMouth<DefaultBreathGroupPlanner, MockWavSpeechSynthesizer> {
-    pub fn mock(output_dir: PathBuf, sample_rate_hz: u32, variant: VariantId) -> Self {
+    pub fn mock(output_dir: PathBuf, sample_rate_hz: u32, variety: VarietyId) -> Self {
         Self::new(
-            DefaultBreathGroupPlanner { variant },
+            DefaultBreathGroupPlanner { variety },
             MockWavSpeechSynthesizer::new(output_dir, sample_rate_hz),
         )
     }
@@ -317,7 +317,7 @@ pub struct MouthCommand {
     #[arg(default_value = "<say boundary=\"final\" tone=\"warm\">hello world</say>")]
     pub input: String,
     #[arg(long, default_value = "en-US")]
-    pub variant: String,
+    pub variety: String,
     #[arg(long, default_value = "target/mouth")]
     pub output_dir: PathBuf,
     #[arg(long, default_value_t = 24_000)]
@@ -329,7 +329,7 @@ pub fn run(command: MouthCommand) -> Result<()> {
     let mut mouth = DefaultMouth::mock(
         command.output_dir,
         command.sample_rate_hz,
-        VariantId(command.variant),
+        VarietyId(command.variety),
     );
 
     println!("voice events:");
@@ -495,7 +495,7 @@ fn speaking_rate_hint(pace: Option<&str>) -> Option<f32> {
 }
 
 pub fn run_mouth_to_mock_wavs(input: &str, output_dir: PathBuf) -> Result<Vec<MouthEvent>> {
-    let mut mouth = DefaultMouth::mock(output_dir, 24_000, VariantId("en-US".into()));
+    let mut mouth = DefaultMouth::mock(output_dir, 24_000, VarietyId("en-US".into()));
     let mut mouth_events = Vec::new();
     for event in parse_voice_stream(input) {
         mouth_events.extend(mouth.accept(event));
@@ -506,7 +506,7 @@ pub fn run_mouth_to_mock_wavs(input: &str, output_dir: PathBuf) -> Result<Vec<Mo
 pub fn run_command_for_test(input: &str, output_dir: PathBuf) -> Result<()> {
     run(MouthCommand {
         input: input.to_string(),
-        variant: "en-US".into(),
+        variety: "en-US".into(),
         output_dir,
         sample_rate_hz: 24_000,
     })

@@ -2,7 +2,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "mortar-sea", version, about = "Pete Mortar-Sea local runtime tools")]
+#[command(
+    name = "mortar-sea",
+    version,
+    about = "Pete Mortar-Sea local runtime tools"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

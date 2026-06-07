@@ -36,7 +36,7 @@ const canvases = {};
 window.addEventListener('DOMContentLoaded', () => {
   for (const id of [
     'status',
-    'variant',
+    'variety',
     'text',
     'backend',
     'styletts2-voice',
@@ -63,6 +63,8 @@ window.addEventListener('DOMContentLoaded', () => {
     'zoom-out',
     'fit',
     'timeline',
+    'timeline-scrollbar',
+    'timeline-scrollbar-spacer',
   ]) {
     elements[id] = document.getElementById(id);
   }
@@ -92,6 +94,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   elements.timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
   elements.timeline.addEventListener('pointerdown', onTimelinePointerDown);
+  elements['timeline-scrollbar'].addEventListener('scroll', onTimelineScrollbarScroll);
   window.addEventListener('pointermove', onTimelinePointerMove);
   window.addEventListener('pointerup', onTimelinePointerUp);
   window.addEventListener('resize', drawAll);
@@ -105,7 +108,7 @@ window.addEventListener('DOMContentLoaded', () => {
 async function phonemicize() {
   await runJsonAction('/api/phonemicize', {
     text: elements.text.value,
-    variant: elements.variant.value || 'en-US',
+    variety: elements.variety.value || 'en-US',
   }, (payload) => {
     renderPhonemicization(payload);
     clearAlignment();
@@ -116,7 +119,7 @@ async function phonemicize() {
 async function synthesize() {
   await runJsonAction('/api/synthesize', {
     text: elements.text.value,
-    variant: elements.variant.value || 'en-US',
+    variety: elements.variety.value || 'en-US',
     backend: elements.backend.value,
     styletts2_voice: elements['styletts2-voice'].value || null,
   }, async (payload) => {
@@ -171,7 +174,7 @@ async function alignAudio() {
   }
   await runJsonAction('/api/align', {
     text: elements.text.value,
-    variant: elements.variant.value || 'en-US',
+    variety: elements.variety.value || 'en-US',
     audio_url: state.currentAudioUrl,
   }, (payload) => {
     renderPhonemicization(payload.phonemicization);
@@ -344,7 +347,7 @@ function renderPhonemicization(payload) {
     .map((warning) => `${warning.token}: ${warning.message}`)
     .join('\n');
   elements.ir.textContent = JSON.stringify(payload.ir, null, 2);
-  elements['phoneme-detail'].textContent = `${payload.variant}, ${countItems(payload.phonemes)} phonemes`;
+  elements['phoneme-detail'].textContent = `${payload.variety}, ${countItems(payload.phonemes)} phonemes`;
   drawAll();
 }
 
@@ -436,6 +439,17 @@ function onTimelineWheel(event) {
   zoomAt(event.clientX - rect.left, multiplier);
 }
 
+function onTimelineScrollbarScroll() {
+  const scrollbar = elements['timeline-scrollbar'];
+  const maxScrollLeft = Math.max(0, scrollbar.scrollWidth - scrollbar.clientWidth);
+  const maxStart = maxViewStart();
+  const nextViewStart = maxScrollLeft > 0 ? (scrollbar.scrollLeft / maxScrollLeft) * maxStart : 0;
+  const clampedViewStart = clamp(nextViewStart, 0, maxStart);
+  if (Math.abs(state.viewStart - clampedViewStart) < 0.0005) return;
+  state.viewStart = clampedViewStart;
+  drawAll({ syncScrollbarPosition: false });
+}
+
 function onTimelinePointerDown(event) {
   event.preventDefault();
   elements.timeline.setPointerCapture?.(event.pointerId);
@@ -503,7 +517,8 @@ function startPlaybackLoop() {
   tick();
 }
 
-function drawAll() {
+function drawAll(options = {}) {
+  syncTimelineScrollbar(options);
   setupCanvases();
   drawRuler();
   drawWaveform();
@@ -543,6 +558,25 @@ function setupCanvases() {
     }
     const ctx = canvas.getContext('2d');
     ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  }
+}
+
+function syncTimelineScrollbar({ syncScrollbarPosition = true } = {}) {
+  const scrollbar = elements['timeline-scrollbar'];
+  const spacer = elements['timeline-scrollbar-spacer'];
+  if (!scrollbar || !spacer) return;
+
+  const viewportWidth = Math.max(1, elements.timeline.clientWidth);
+  const contentWidth = Math.max(viewportWidth, Math.round(viewportWidth * state.zoom));
+  spacer.style.width = `${contentWidth}px`;
+
+  if (!syncScrollbarPosition) return;
+
+  const maxScrollLeft = Math.max(0, scrollbar.scrollWidth - scrollbar.clientWidth);
+  const maxStart = maxViewStart();
+  const nextScrollLeft = maxStart > 0 ? (state.viewStart / maxStart) * maxScrollLeft : 0;
+  if (Math.abs(scrollbar.scrollLeft - nextScrollLeft) > 0.5) {
+    scrollbar.scrollLeft = nextScrollLeft;
   }
 }
 

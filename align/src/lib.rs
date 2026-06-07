@@ -18,7 +18,7 @@ use mortar_sea::speak::{SpeakBackend, SpeechSynthesisOptions, synthesize_phonemi
 use serde::{Deserialize, Serialize};
 use speech::{
     EnglishPhonemicizer, FeatureId, FeatureValue, PhoneToken, PhonemeToken, PhonemicizeOutput,
-    PhonemicizeRequest, Phonemicizer, PronunciationWarning, Spec, VariantId, phone_display_symbol,
+    PhonemicizeRequest, Phonemicizer, PronunciationWarning, Spec, VarietyId, phone_display_symbol,
     phoneme_default_phone_display_symbol,
 };
 use tokio::{fs, net::TcpListener};
@@ -42,15 +42,15 @@ struct AppState {
 #[derive(Debug, Deserialize)]
 struct PhonemicizeRequestBody {
     text: String,
-    #[serde(default = "default_variant")]
-    variant: String,
+    #[serde(default = "default_variety")]
+    variety: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct SynthesizeRequestBody {
     text: String,
-    #[serde(default = "default_variant")]
-    variant: String,
+    #[serde(default = "default_variety")]
+    variety: String,
     #[serde(default = "default_backend")]
     backend: AlignBackend,
     #[serde(default)]
@@ -60,8 +60,8 @@ struct SynthesizeRequestBody {
 #[derive(Debug, Deserialize)]
 struct AlignRequestBody {
     text: String,
-    #[serde(default = "default_variant")]
-    variant: String,
+    #[serde(default = "default_variety")]
+    variety: String,
     audio_url: String,
 }
 
@@ -76,7 +76,7 @@ enum AlignBackend {
 #[derive(Debug, Serialize)]
 struct PhonemicizeResponse {
     text: String,
-    variant: String,
+    variety: String,
     phonemes: String,
     phones: String,
     syllables: Vec<SyllableSummary>,
@@ -304,14 +304,14 @@ async fn index() -> Html<&'static str> {
 async fn phonemicize(
     Json(request): Json<PhonemicizeRequestBody>,
 ) -> Result<Json<PhonemicizeResponse>, AppError> {
-    Ok(Json(phonemicize_text(request.text, request.variant)?))
+    Ok(Json(phonemicize_text(request.text, request.variety)?))
 }
 
 async fn synthesize(
     State(state): State<AppState>,
     Json(request): Json<SynthesizeRequestBody>,
 ) -> Result<Json<SynthesizeResponse>, AppError> {
-    let phonemicized = phonemicize_text(request.text, request.variant)?;
+    let phonemicized = phonemicize_text(request.text, request.variety)?;
     let filename = format!("synth-{}-{}.wav", request.backend.as_str(), Uuid::new_v4());
     let output_path = state.audio_dir.join(&filename);
     let options = SpeechSynthesisOptions {
@@ -444,7 +444,7 @@ async fn align_audio(
         .await
         .with_context(|| format!("failed to read {}", audio_path.display()))?;
     let decoded = decode_wav(&audio_bytes)?;
-    let phonemicized = phonemicize_text(request.text, request.variant)?;
+    let phonemicized = phonemicize_text(request.text, request.variety)?;
     let asr_segments = if asr_transcript_enabled() {
         let asr_samples =
             resample_linear(&decoded.samples, decoded.sample_rate_hz, ASR_SAMPLE_RATE_HZ);
@@ -483,18 +483,18 @@ fn asr_transcript_enabled() -> bool {
     })
 }
 
-fn phonemicize_text(text: String, variant: String) -> Result<PhonemicizeResponse, AppError> {
+fn phonemicize_text(text: String, variety: String) -> Result<PhonemicizeResponse, AppError> {
     let output = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
             text,
-            variant: VariantId(variant),
+            variety: VarietyId(variety),
             style: None,
         })
         .context("failed to phonemicize text")?;
 
     Ok(PhonemicizeResponse {
         text: output.text.clone(),
-        variant: output.variant.0.clone(),
+        variety: output.variety.0.clone(),
         phonemes: format_phonemes(&output),
         phones: format_phones(&output),
         syllables: format_syllables(&output),
@@ -647,7 +647,7 @@ fn alignment_tracks_from_phone_spans(
             end_ms: word_end,
             phonemes: word_phonemes
                 .iter()
-                .map(|token| phoneme_label(token, &output.variant))
+                .map(|token| phoneme_label(token, &output.variety))
                 .collect::<Vec<_>>()
                 .join(" "),
             phones: word_phone_refs
@@ -674,7 +674,7 @@ fn alignment_tracks_from_phone_spans(
             phonemes.push(SegmentAlignment {
                 word_index,
                 index: phoneme_index,
-                label: phoneme_label(phoneme, &output.variant),
+                label: phoneme_label(phoneme, &output.variety),
                 token_id: phoneme_token_id(phoneme),
                 start_ms: span.start_ms,
                 end_ms: span.end_ms,
@@ -1482,7 +1482,7 @@ fn alignment_tracks(
             end_ms: timing.end_ms,
             phonemes: word_phonemes
                 .iter()
-                .map(|token| phoneme_label(token, &output.variant))
+                .map(|token| phoneme_label(token, &output.variety))
                 .collect::<Vec<_>>()
                 .join(" "),
             phones: word_phones
@@ -1498,7 +1498,7 @@ fn alignment_tracks(
             phonemes.push(SegmentAlignment {
                 word_index,
                 index: phoneme_index,
-                label: phoneme_label(phoneme, &output.variant),
+                label: phoneme_label(phoneme, &output.variety),
                 token_id: phoneme_token_id(phoneme),
                 start_ms: span.0,
                 end_ms: span.1,
@@ -1723,7 +1723,7 @@ fn format_phonemes(output: &PhonemicizeOutput) -> String {
         .phonemes
         .iter()
         .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variant)),
+            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variety)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1766,18 +1766,18 @@ fn format_syllables(output: &PhonemicizeOutput) -> Vec<SyllableSummary> {
         .collect()
 }
 
-fn phoneme_label(token: &PhonemeToken, variant: &VariantId) -> String {
+fn phoneme_label(token: &PhonemeToken, variety: &VarietyId) -> String {
     match &token.phoneme {
-        Spec::Known(id) => phoneme_default_phone_display_symbol(id, variant),
+        Spec::Known(id) => phoneme_default_phone_display_symbol(id, variety),
         Spec::Unknown => "?".into(),
         Spec::Unspecified => "_".into(),
         Spec::NotApplicable => "n/a".into(),
         Spec::Variable(values) => values
             .iter()
-            .map(|id| phoneme_default_phone_display_symbol(id, variant))
+            .map(|id| phoneme_default_phone_display_symbol(id, variety))
             .collect::<Vec<_>>()
             .join("|"),
-        Spec::Gradient { value, .. } => phoneme_default_phone_display_symbol(value, variant),
+        Spec::Gradient { value, .. } => phoneme_default_phone_display_symbol(value, variety),
     }
 }
 
@@ -2051,7 +2051,7 @@ impl AlignBackend {
     }
 }
 
-fn default_variant() -> String {
+fn default_variety() -> String {
     "en-US".into()
 }
 
@@ -2091,7 +2091,7 @@ mod tests {
         EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: text.into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize")

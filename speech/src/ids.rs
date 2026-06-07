@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct LanguageId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct VariantId(pub String);
+pub struct VarietyId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FeatureId(pub String);

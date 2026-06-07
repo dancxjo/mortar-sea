@@ -7,7 +7,7 @@ use clap::{Args, ValueEnum};
 use speech::{
     EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
     Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec, UtteranceId,
-    UtterancePlan, VariantId, phone_display_symbol, phoneme_default_phone_display_symbol,
+    UtterancePlan, VarietyId, phone_display_symbol, phoneme_default_phone_display_symbol,
 };
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
@@ -30,7 +30,7 @@ pub struct SpeakCommand {
     #[arg(default_value = "hello world")]
     pub text: String,
     #[arg(long, default_value = "en-US")]
-    pub variant: String,
+    pub variety: String,
     #[arg(long, value_enum, default_value_t = SpeakBackend::Mock)]
     pub backend: SpeakBackend,
     #[arg(long, default_value = "target/styletts2-speak.wav")]
@@ -155,13 +155,13 @@ impl PiperTextSynthesizer {
     pub fn synthesize_text_to_wav(
         &mut self,
         text: impl Into<String>,
-        variant: impl Into<String>,
+        variety: impl Into<String>,
         output_path: &Path,
     ) -> Result<SpeechSynthesisArtifact> {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: text.into(),
-                variant: VariantId(variant.into()),
+                variety: VarietyId(variety.into()),
                 style: None,
             })
             .context("failed to phonemicize text into a speech plan")?;
@@ -236,7 +236,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
             text: command.text.clone(),
-            variant: VariantId(command.variant.clone()),
+            variety: VarietyId(command.variety.clone()),
             style: None,
         })
         .context("failed to phonemicize text into a speech plan")?;
@@ -330,7 +330,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
 
     println!("Mortar speech synthesis plan");
     println!("backend: {backend_label}");
-    println!("variant: {}", phonemicized.variant.0);
+    println!("variety: {}", phonemicized.variety.0);
     println!("text: {}", phonemicized.text);
     println!("phonemes: {}", format_phonemes(&phonemicized));
     if command.debug_pronunciation {
@@ -368,14 +368,14 @@ pub fn run(command: SpeakCommand) -> Result<()> {
 
 pub fn synthesize_text_with_piper_to_wav(
     text: impl Into<String>,
-    variant: impl Into<String>,
+    variety: impl Into<String>,
     output_path: &Path,
 ) -> Result<SpeechSynthesisArtifact> {
     // Uses Piper voice ONNX assets through Mortar's backend; never invokes the Piper binary.
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
             text: text.into(),
-            variant: VariantId(variant.into()),
+            variety: VarietyId(variety.into()),
             style: None,
         })
         .context("failed to phonemicize text into a speech plan")?;
@@ -395,7 +395,7 @@ pub fn synthesize_plan_with_piper_to_wav(
 pub fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> UtterancePlan {
     UtterancePlan {
         id: UtteranceId("styletts2.demo.utterance".into()),
-        variant: output.variant.clone(),
+        variety: output.variety.clone(),
         speaker: None,
         intended_text: Some(output.text.clone()),
         intended_morphemes: Vec::new(),
@@ -552,7 +552,7 @@ fn format_phonemes(output: &PhonemicizeOutput) -> String {
         .phonemes
         .iter()
         .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variant)),
+            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variety)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -579,7 +579,7 @@ fn format_phonemes_with_features(output: &PhonemicizeOutput) -> String {
         .iter()
         .filter_map(|token| match &token.phoneme {
             Spec::Known(id) => {
-                let symbol = phoneme_default_phone_display_symbol(id, &output.variant);
+                let symbol = phoneme_default_phone_display_symbol(id, &output.variety);
                 let stress = token_feature_category(token, "stress");
                 let reduced = token_feature_bool(token, "reduced_vowel");
                 let mut annotations = Vec::new();
@@ -674,7 +674,7 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "hello world".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
@@ -704,7 +704,7 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "Hello my baby. Hello my darlin. Hello my ragtime gal.".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
@@ -737,7 +737,7 @@ mod tests {
     fn fail_on_guessed_pronunciation_stops_before_synthesis() {
         let error = run(SpeakCommand {
             text: "zzq".into(),
-            variant: "en-US".into(),
+            variety: "en-US".into(),
             backend: SpeakBackend::Mock,
             output: PathBuf::from("target/should-not-write.wav"),
             sample_rate_hz: 24_000,

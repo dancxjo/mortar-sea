@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use speech::{TerminalPunctuation, UtteranceId, UtterancePlan, VariantId};
+use speech::{TerminalPunctuation, UtteranceId, UtterancePlan, VarietyId};
 
 use crate::backend::StyleTts2Error;
 use crate::symbols::{
@@ -12,7 +12,7 @@ pub const DEFAULT_MAX_TTS_SYMBOLS: usize = 180;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendSynthesisPlan {
     pub utterance_id: UtteranceId,
-    pub variant: VariantId,
+    pub variety: VarietyId,
     pub text: Option<String>,
     pub chunks: Vec<SynthesisChunk>,
     pub max_symbols_per_chunk: usize,
@@ -57,7 +57,7 @@ pub fn prepare_styletts2_plan(
     }
     Ok(BackendSynthesisPlan {
         utterance_id: utterance_plan.id.clone(),
-        variant: utterance_plan.variant.clone(),
+        variety: utterance_plan.variety.clone(),
         text: utterance_plan.intended_text.clone(),
         chunks,
         max_symbols_per_chunk,

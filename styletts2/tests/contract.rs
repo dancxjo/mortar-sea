@@ -2,7 +2,7 @@ use speech::{
     BoundaryKind, EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, FeatureBundle,
     PauseKind, PhoneId, PhoneToken, PhonemeId, PhonemeToken, PhonemicizeRequest, Phonemicizer,
     ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken, StyleRef, StyleSource, TerminalPunctuation,
-    TextSpan, UtteranceId, UtterancePlan, VariantId,
+    TextSpan, UtteranceId, UtterancePlan, VarietyId,
 };
 use styletts2::{
     BackendSynthesisPlan, MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config,
@@ -61,11 +61,11 @@ fn parses_tolerant_config_metadata() {
 #[test]
 fn lowers_phoneme_and_phone_tokens_without_language_hardcoding() {
     let symbol_set = SymbolSet::new(["alpha", "beta"])
-        .with_alias("variant.phoneme.open", "alpha")
-        .with_alias("variant.phone.closed", "beta");
+        .with_alias("variety.phoneme.open", "alpha")
+        .with_alias("variety.phone.closed", "beta");
 
-    let phonemes = vec![phoneme_token("variant.phoneme.open")];
-    let phones = vec![phone_token("variant.phone.closed")];
+    let phonemes = vec![phoneme_token("variety.phoneme.open")];
+    let phones = vec![phone_token("variety.phone.closed")];
 
     let lowered_phonemes = symbol_set
         .lower_phoneme_tokens(&phonemes)
@@ -89,15 +89,15 @@ fn lowers_phoneme_and_phone_tokens_without_language_hardcoding() {
 #[test]
 fn lower_plan_tokens_preserves_typed_punctuation_at_word_boundaries() {
     let symbol_set =
-        SymbolSet::new(["alpha", "|", ".", "!"]).with_alias("variant.phone.a", "alpha");
+        SymbolSet::new(["alpha", "|", ".", "!"]).with_alias("variety.phone.a", "alpha");
     let plan = plan(
         None,
         None,
         Vec::new(),
         vec![
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
             phone_token("boundary.word"),
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
         ],
         vec![
             terminal_boundary(0, TerminalPunctuation::Exclamation),
@@ -135,20 +135,20 @@ fn lower_plan_tokens_preserves_typed_punctuation_at_word_boundaries() {
 #[test]
 fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
     let symbol_set = SymbolSet::new(["alpha", "|", ",", "."])
-        .with_alias("variant.phone.a", "alpha")
+        .with_alias("variety.phone.a", "alpha")
         .with_alias("boundary.word", "|");
     let plan = plan(
         None,
         None,
         Vec::new(),
         vec![
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
             phone_token("boundary.word"),
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
             phone_token("boundary.word"),
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
             phone_token("boundary.word"),
-            phone_token("variant.phone.a"),
+            phone_token("variety.phone.a"),
         ],
         vec![
             word_boundary(0),
@@ -176,12 +176,12 @@ fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
 
 #[test]
 fn lower_plan_tokens_does_not_invent_final_punctuation() {
-    let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variant.phone.a", "alpha");
+    let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variety.phone.a", "alpha");
     let plan = plan(
         None,
         None,
         Vec::new(),
-        vec![phone_token("variant.phone.a")],
+        vec![phone_token("variety.phone.a")],
         Vec::new(),
         Some("a".into()),
     );
@@ -286,14 +286,14 @@ fn empty_utterance_produces_empty_mock_waveform() {
 fn unknown_symbol_returns_clear_error() {
     let symbol_set = SymbolSet::new(["known"]);
     let error = symbol_set
-        .lower_phoneme_tokens(&[phoneme_token("variant.phoneme.missing")])
+        .lower_phoneme_tokens(&[phoneme_token("variety.phoneme.missing")])
         .expect_err("unknown symbol should fail");
 
     assert_eq!(
         error,
         SymbolLoweringError::UnknownSymbol {
             token_source: StyleTts2SymbolSource::Phoneme,
-            token_id: "variant.phoneme.missing".into()
+            token_id: "variety.phoneme.missing".into()
         }
     );
 }
@@ -421,13 +421,13 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
 #[test]
 fn prepared_plan_chunks_long_input_on_word_boundaries() {
     let phones = vec![
-        phone_token("variant.phone.a"),
+        phone_token("variety.phone.a"),
         phone_token("boundary.word"),
-        phone_token("variant.phone.a"),
+        phone_token("variety.phone.a"),
         phone_token("boundary.word"),
-        phone_token("variant.phone.a"),
+        phone_token("variety.phone.a"),
         phone_token("boundary.word"),
-        phone_token("variant.phone.a"),
+        phone_token("variety.phone.a"),
     ];
     let plan = plan(
         None,
@@ -442,7 +442,7 @@ fn prepared_plan_chunks_long_input_on_word_boundaries() {
         ],
         Some("a a a a".into()),
     );
-    let symbol_set = SymbolSet::new(["alpha", "|", "."]).with_alias("variant.phone.a", "alpha");
+    let symbol_set = SymbolSet::new(["alpha", "|", "."]).with_alias("variety.phone.a", "alpha");
     let backend_plan = prepare_styletts2_plan(
         &plan,
         &symbol_set,
@@ -466,7 +466,7 @@ fn prepared_plan_chunks_long_input_on_word_boundaries() {
 fn preflight_rejects_unknown_symbols_before_backend_runtime() {
     let plan = BackendSynthesisPlan {
         utterance_id: UtteranceId("utt.test".into()),
-        variant: VariantId("variant.test".into()),
+        variety: VarietyId("variety.test".into()),
         text: Some("bad".into()),
         max_symbols_per_chunk: 10,
         chunks: vec![SynthesisChunk {
@@ -487,13 +487,13 @@ fn styletts2_text_from_english(text: &str) -> String {
     let phonemicized = EnglishPhonemicizer
         .phonemicize(&PhonemicizeRequest {
             text: text.into(),
-            variant: VariantId("en-US".into()),
+            variety: VarietyId("en-US".into()),
             style: None,
         })
         .expect("phonemicize");
     let plan = UtterancePlan {
         id: UtteranceId("utt.styletts2.text".into()),
-        variant: phonemicized.variant,
+        variety: phonemicized.variety,
         speaker: None,
         intended_text: Some(phonemicized.text),
         intended_morphemes: Vec::new(),
@@ -532,7 +532,7 @@ fn plan(
 ) -> UtterancePlan {
     UtterancePlan {
         id: UtteranceId("utt.test".into()),
-        variant: VariantId("variant.test".into()),
+        variety: VarietyId("variety.test".into()),
         speaker,
         intended_text,
         intended_morphemes: Vec::new(),

@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 
+mod catalog;
+
 use crate::acoustics::{
     AcousticCueDef, AcousticLandmark, AcousticLandmarkKind, AcousticProfile, AcousticTargetModel,
     CueTarget, LandmarkAnchor, RelativeTimeWindow, WeightedCue,
 };
-use crate::data::arpabet::{self, ARPABET};
-use crate::data::cmudict::CmuPhoneme;
+use crate::data::lexicons::cmudict::CmuPhoneme;
+use crate::data::notation::arpabet::{self, ARPABET};
 use crate::feature::{FeatureBundle, FeatureSystem, FeatureValue};
-use crate::ids::{AcousticCueId, FeatureId, LanguageId, PhoneId, VariantId};
+use crate::ids::{AcousticCueId, FeatureId, LanguageId, PhoneId, VarietyId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::{PhonemeAllophone, PhonemeInventory};
@@ -18,59 +20,11 @@ use crate::rules::{
 };
 use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
-use crate::variant::{
-    LinguisticVariant, OrthographicUnitKind, OrthographicUnitPronunciation,
-    VariantImplementationStatus, VariantStatus, WeakFormFollowingContext, WeakFormRule,
+use crate::variety::{
+    LinguisticVariety, OrthographicUnitKind, OrthographicUnitPronunciation,
+    VarietyImplementationStatus, VarietyStatus, WeakFormFollowingContext, WeakFormRule,
     WeakFormStyleContext,
 };
-
-#[derive(Debug, Clone, Copy)]
-struct EnglishVariantRow {
-    id: &'static str,
-    name: &'static str,
-    implementation_status: ImplementationStatusSpec,
-    singing: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ImplementationStatusSpec {
-    Complete,
-    StubDerivedFrom(&'static str),
-    PermissiveProfile,
-}
-
-const VARIANTS: &[EnglishVariantRow] = &[
-    EnglishVariantRow {
-        id: "en-US-GA",
-        name: "General American English",
-        implementation_status: ImplementationStatusSpec::Complete,
-        singing: false,
-    },
-    EnglishVariantRow {
-        id: "en-US-singing",
-        name: "Permissive Singing Profile",
-        implementation_status: ImplementationStatusSpec::PermissiveProfile,
-        singing: true,
-    },
-    EnglishVariantRow {
-        id: "en-GB-RP",
-        name: "Received Pronunciation (stub)",
-        implementation_status: ImplementationStatusSpec::StubDerivedFrom("en-US-GA"),
-        singing: false,
-    },
-    EnglishVariantRow {
-        id: "en-GB-ScotE",
-        name: "Scottish English (stub)",
-        implementation_status: ImplementationStatusSpec::StubDerivedFrom("en-US-GA"),
-        singing: false,
-    },
-    EnglishVariantRow {
-        id: "en-US-AAE",
-        name: "African American English (stub)",
-        implementation_status: ImplementationStatusSpec::StubDerivedFrom("en-US-GA"),
-        singing: false,
-    },
-];
 
 const P: PhoneId = PhoneId::borrowed("ipa.phone.p");
 const B: PhoneId = PhoneId::borrowed("ipa.phone.b");
@@ -196,13 +150,10 @@ enum ClusterScope {
     Coda,
 }
 
-pub fn variant(id: &str) -> LinguisticVariant {
-    let row = VARIANTS
-        .iter()
-        .find(|row| row.id == id)
-        .unwrap_or(&VARIANTS[0]);
-    LinguisticVariant {
-        id: VariantId(row.id.into()),
+pub fn variety(id: &str) -> LinguisticVariety {
+    let row = catalog::get(id);
+    LinguisticVariety {
+        id: VarietyId(row.id.into()),
         language: LanguageId("en".into()),
         name: row.name.into(),
         feature_system: FeatureSystem::default(),
@@ -220,20 +171,20 @@ pub fn variant(id: &str) -> LinguisticVariant {
         morphology: None,
         acoustic_profile: Some(acoustic_profile(row.id)),
         prosody_profile: None,
-        status: VariantStatus::Attested,
+        status: VarietyStatus::Attested,
         implementation_status: match row.implementation_status {
-            ImplementationStatusSpec::Complete => VariantImplementationStatus::Complete,
-            ImplementationStatusSpec::StubDerivedFrom(source) => {
-                VariantImplementationStatus::StubDerivedFrom(VariantId(source.into()))
+            catalog::ImplementationStatusSpec::Complete => VarietyImplementationStatus::Complete,
+            catalog::ImplementationStatusSpec::StubDerivedFrom(source) => {
+                VarietyImplementationStatus::StubDerivedFrom(VarietyId(source.into()))
             }
-            ImplementationStatusSpec::PermissiveProfile => {
-                VariantImplementationStatus::PermissiveProfile
+            catalog::ImplementationStatusSpec::PermissiveProfile => {
+                VarietyImplementationStatus::PermissiveProfile
             }
         },
     }
 }
 
-fn orthographic_unit_pronunciations(variant_id: &str) -> Vec<OrthographicUnitPronunciation> {
+fn orthographic_unit_pronunciations(variety_id: &str) -> Vec<OrthographicUnitPronunciation> {
     let letters: &[(char, &[&str])] = &[
         ('A', &["EY1"]),
         ('B', &["B", "IY1"]),
@@ -279,20 +230,20 @@ fn orthographic_unit_pronunciations(variant_id: &str) -> Vec<OrthographicUnitPro
         .iter()
         .map(|(letter, symbols)| {
             orthographic_unit(
-                variant_id,
+                variety_id,
                 OrthographicUnitKind::LetterName,
                 *letter,
                 symbols,
             )
         })
         .chain(digits.iter().map(|(digit, symbols)| {
-            orthographic_unit(variant_id, OrthographicUnitKind::DigitName, *digit, symbols)
+            orthographic_unit(variety_id, OrthographicUnitKind::DigitName, *digit, symbols)
         }))
         .collect()
 }
 
 fn orthographic_unit(
-    variant_id: &str,
+    variety_id: &str,
     kind: OrthographicUnitKind,
     unit: char,
     symbols: &[&str],
@@ -302,7 +253,7 @@ fn orthographic_unit(
         unit: unit.to_string(),
         pronunciation: symbols
             .iter()
-            .map(|symbol| arpabet::phoneme_id(variant_id, symbol))
+            .map(|symbol| arpabet::phoneme_id(variety_id, symbol))
             .collect(),
         cmudict_pronunciation: symbols
             .iter()
@@ -311,7 +262,7 @@ fn orthographic_unit(
     }
 }
 
-fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
+fn weak_forms(variety_id: &str) -> Vec<WeakFormRule> {
     [
         weak_form(
             "english_weak_the_before_vowel",
@@ -319,7 +270,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["DH", "IY0"],
             WeakFormFollowingContext::BeforeVowelish,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_the_before_consonant",
@@ -327,7 +278,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["DH", "AH0"],
             WeakFormFollowingContext::BeforeConsonantish,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_and",
@@ -335,7 +286,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["AH0", "N", "D"],
             WeakFormFollowingContext::Any,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_a",
@@ -343,7 +294,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["AH0"],
             WeakFormFollowingContext::Any,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_an",
@@ -351,7 +302,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["AH0", "N"],
             WeakFormFollowingContext::Any,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_of",
@@ -359,7 +310,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["AH0", "V"],
             WeakFormFollowingContext::Any,
             WeakFormStyleContext::Any,
-            variant_id,
+            variety_id,
         ),
         weak_form(
             "english_weak_to_before_consonant",
@@ -367,7 +318,7 @@ fn weak_forms(variant_id: &str) -> Vec<WeakFormRule> {
             &["T", "AH0"],
             WeakFormFollowingContext::BeforeConsonantish,
             WeakFormStyleContext::CasualOnly,
-            variant_id,
+            variety_id,
         ),
     ]
     .into()
@@ -379,14 +330,14 @@ fn weak_form(
     symbols: &[&str],
     following: WeakFormFollowingContext,
     style: WeakFormStyleContext,
-    variant_id: &str,
+    variety_id: &str,
 ) -> WeakFormRule {
     WeakFormRule {
         id: id.into(),
         lexical_item: lexical_item.into(),
         pronunciation: symbols
             .iter()
-            .map(|symbol| arpabet::phoneme_id(variant_id, symbol))
+            .map(|symbol| arpabet::phoneme_id(variety_id, symbol))
             .collect(),
         cmudict_pronunciation: symbols
             .iter()
@@ -397,15 +348,15 @@ fn weak_form(
     }
 }
 
-fn phoneme_inventory(variant_id: &str) -> PhonemeInventory {
+fn phoneme_inventory(variety_id: &str) -> PhonemeInventory {
     let mut phonemes = ARPABET
         .iter()
         .map(|entry| {
-            let phoneme = arpabet::phoneme_for_entry(variant_id, entry);
+            let phoneme = arpabet::phoneme_for_entry(variety_id, entry);
             (phoneme.id.clone(), phoneme)
         })
         .collect::<HashMap<_, _>>();
-    for rule in allophone_rules(variant_id) {
+    for rule in allophone_rules(variety_id) {
         let Spec::Known(phoneme_id) = &rule.input.phoneme else {
             continue;
         };
@@ -466,7 +417,7 @@ fn phone_inventory() -> PhoneInventory {
     PhoneInventory { phones }
 }
 
-fn acoustic_profile(variant_id: &str) -> AcousticProfile {
+fn acoustic_profile(variety_id: &str) -> AcousticProfile {
     let mut cues = HashMap::new();
     for cue in acoustic_cues() {
         cues.insert(cue.id.clone(), cue);
@@ -477,7 +428,7 @@ fn acoustic_profile(variant_id: &str) -> AcousticProfile {
     for entry in ARPABET.iter().filter(|entry| entry.syllabic) {
         let model = vowel_model(entry);
         phone_models.insert(arpabet::phone_id_for_ipa(entry.phone_symbol), model.clone());
-        phoneme_models.insert(arpabet::phoneme_id(variant_id, entry.symbol), model);
+        phoneme_models.insert(arpabet::phoneme_id(variety_id, entry.symbol), model);
     }
     phone_models.insert(SCHWA, reduced_central_vowel_model("schwa"));
     phone_models.insert(
@@ -491,10 +442,10 @@ fn acoustic_profile(variant_id: &str) -> AcousticProfile {
     phone_models.insert(P, voiceless_bilabial_stop.clone());
     phone_models.insert(B, voiced_bilabial_stop.clone());
     phoneme_models.insert(
-        arpabet::phoneme_id(variant_id, "P"),
+        arpabet::phoneme_id(variety_id, "P"),
         voiceless_bilabial_stop,
     );
-    phoneme_models.insert(arpabet::phoneme_id(variant_id, "B"), voiced_bilabial_stop);
+    phoneme_models.insert(arpabet::phoneme_id(variety_id, "B"), voiced_bilabial_stop);
 
     AcousticProfile {
         cues,
@@ -915,13 +866,13 @@ fn cue(
     }
 }
 
-fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
+fn allophone_rules(variety_id: &str) -> Vec<AllophoneRule> {
     vec![
         AllophoneRule {
             id: "american_english_intervocalic_flapping".into(),
             name: "American English intervocalic flapping".into(),
             input: PhonemePattern {
-                phoneme: Spec::Known(arpabet::phoneme_id(variant_id, "T")),
+                phoneme: Spec::Known(arpabet::phoneme_id(variety_id, "T")),
                 features: Default::default(),
             },
             environment: Environment {
@@ -955,7 +906,7 @@ fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
             id: "alveolar_nasal_velar_assimilation".into(),
             name: "Alveolar nasal velar assimilation".into(),
             input: PhonemePattern {
-                phoneme: Spec::Known(arpabet::phoneme_id(variant_id, "N")),
+                phoneme: Spec::Known(arpabet::phoneme_id(variety_id, "N")),
                 features: Default::default(),
             },
             environment: Environment {
@@ -1167,8 +1118,8 @@ mod tests {
     use super::*;
     use crate::ids::PhonemeId;
 
-    fn has_cluster(variant: &LinguisticVariant, needle: &str) -> bool {
-        variant
+    fn has_cluster(variety: &LinguisticVariety, needle: &str) -> bool {
+        variety
             .phonotactics
             .as_ref()
             .unwrap()
@@ -1179,13 +1130,13 @@ mod tests {
 
     #[test]
     fn singing_adds_tl_without_changing_ga() {
-        assert!(!has_cluster(&variant("en-US-GA"), "t_l"));
-        assert!(has_cluster(&variant("en-US-singing"), "t_l"));
+        assert!(!has_cluster(&variety("en-US-GA"), "t_l"));
+        assert!(has_cluster(&variety("en-US-singing"), "t_l"));
     }
 
     #[test]
     fn ga_inventory_contains_canonical_phonemes_and_ipa_phones() {
-        let ga = variant("en-US-GA");
+        let ga = variety("en-US-GA");
         assert!(
             ga.phonemes
                 .phonemes
@@ -1207,7 +1158,7 @@ mod tests {
 
     #[test]
     fn acoustic_profile_distinguishes_high_front_and_back_rounded_vowels() {
-        let ga = variant("en-US-GA");
+        let ga = variety("en-US-GA");
         let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
         let high_front = profile
             .phone_models
@@ -1232,7 +1183,7 @@ mod tests {
 
     #[test]
     fn acoustic_profile_marks_bilabial_stop_cues_without_overclaiming_aspiration() {
-        let ga = variant("en-US-GA");
+        let ga = variety("en-US-GA");
         let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
         let p = profile.phone_models.get(&P).expect("p phone fingerprint");
         let b = profile.phone_models.get(&B).expect("b phone fingerprint");
@@ -1264,8 +1215,8 @@ mod tests {
     }
 
     #[test]
-    fn rules_are_variant_data() {
-        let ga = variant("en-US-GA");
+    fn rules_are_variety_data() {
+        let ga = variety("en-US-GA");
         let flapping = ga
             .allophone_rules
             .iter()
@@ -1284,7 +1235,7 @@ mod tests {
 
     #[test]
     fn phonemes_contain_allophones_with_environments() {
-        let ga = variant("en-US-GA");
+        let ga = variety("en-US-GA");
         let t = ga
             .phonemes
             .phonemes
@@ -1319,8 +1270,8 @@ mod tests {
     }
 
     #[test]
-    fn weak_forms_are_variant_data() {
-        let ga = variant("en-US-GA");
+    fn weak_forms_are_variety_data() {
+        let ga = variety("en-US-GA");
         let weak_the = ga
             .weak_forms
             .iter()

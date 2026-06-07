@@ -1286,7 +1286,7 @@ fn find_onnxruntime_dylib() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speech::{EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, ProsodyTrack, VariantId};
+    use speech::{EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, ProsodyTrack, VarietyId};
 
     fn config_from_json(json: &str) -> PiperVoiceConfig {
         PiperVoiceConfig::from_json_str(json).expect("config")
@@ -1297,13 +1297,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "hello world".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1329,13 +1329,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "hello world?".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1359,13 +1359,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "hello-world, okay.".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1394,13 +1394,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "IR".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1421,13 +1421,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "I R".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1451,13 +1451,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "a adjacent current phonological".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),
@@ -1487,13 +1487,13 @@ mod tests {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "discuss".into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
         let plan = UtterancePlan {
             id: speech::UtteranceId("test".into()),
-            variant: phonemicized.variant,
+            variety: phonemicized.variety,
             speaker: None,
             intended_text: Some(phonemicized.text),
             intended_morphemes: Vec::new(),

@@ -22,7 +22,7 @@ pub mod spec;
 pub mod syllabify;
 pub mod time;
 pub mod utterance;
-pub mod variant;
+pub mod variety;
 
 pub use acoustics::*;
 pub use data::*;
@@ -42,7 +42,7 @@ pub use spec::*;
 pub use syllabify::*;
 pub use time::*;
 pub use utterance::*;
-pub use variant::*;
+pub use variety::*;
 
 #[cfg(test)]
 mod tests {

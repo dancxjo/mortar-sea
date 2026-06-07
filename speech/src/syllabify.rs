@@ -7,12 +7,12 @@ use crate::phonology::PhoneToken;
 use crate::prosody::{Stress, Syllable};
 use crate::segment::{SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
-use crate::variant::LinguisticVariant;
+use crate::variety::LinguisticVariety;
 
-pub fn syllabify_phones(phones: &[PhoneToken], variant: &LinguisticVariant) -> Vec<Syllable> {
+pub fn syllabify_phones(phones: &[PhoneToken], variety: &LinguisticVariety) -> Vec<Syllable> {
     let mut syllables = Vec::new();
     for word in phone_words(phones) {
-        syllables.extend(syllabify_word(word, variant));
+        syllables.extend(syllabify_word(word, variety));
     }
     syllables
 }
@@ -39,7 +39,7 @@ fn phone_words(phones: &[PhoneToken]) -> Vec<&[PhoneToken]> {
     words
 }
 
-fn syllabify_word(phones: &[PhoneToken], variant: &LinguisticVariant) -> Vec<Syllable> {
+fn syllabify_word(phones: &[PhoneToken], variety: &LinguisticVariety) -> Vec<Syllable> {
     let phones = phones
         .iter()
         .filter(|phone| !is_boundary_phone(phone))
@@ -61,7 +61,7 @@ fn syllabify_word(phones: &[PhoneToken], variant: &LinguisticVariant) -> Vec<Syl
         let (onset, coda) = if syllable_index == 0 {
             (cluster, 0..0)
         } else {
-            split_maximum_onset(&phones, cluster, variant)
+            split_maximum_onset(&phones, cluster, variety)
         };
 
         if syllable_index > 0 {
@@ -103,12 +103,12 @@ fn syllabify_word(phones: &[PhoneToken], variant: &LinguisticVariant) -> Vec<Syl
         ));
     }
 
-    add_rhotic_coda_phones(&mut syllables, variant);
+    add_rhotic_coda_phones(&mut syllables, variety);
 
     syllables
 }
 
-fn add_rhotic_coda_phones(syllables: &mut [Syllable], variant: &LinguisticVariant) {
+fn add_rhotic_coda_phones(syllables: &mut [Syllable], variety: &LinguisticVariety) {
     for syllable in syllables {
         let Some(nucleus_index) = syllable.nucleus_index else {
             continue;
@@ -129,7 +129,7 @@ fn add_rhotic_coda_phones(syllables: &mut [Syllable], variant: &LinguisticVarian
             continue;
         }
 
-        let liaison = liaison_r_phone(nucleus, variant);
+        let liaison = liaison_r_phone(nucleus, variety);
         syllable.phones.insert(insert_at, liaison);
         syllable
             .phone_positions
@@ -145,9 +145,9 @@ fn is_liaison_r_phone(phone: &PhoneToken) -> bool {
     matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɹ")
 }
 
-fn liaison_r_phone(nucleus: &PhoneToken, variant: &LinguisticVariant) -> PhoneToken {
+fn liaison_r_phone(nucleus: &PhoneToken, variety: &LinguisticVariety) -> PhoneToken {
     let id = PhoneId::from("ipa.phone.ɹ");
-    let features = variant
+    let features = variety
         .phones
         .phones
         .get(&id)
@@ -170,14 +170,14 @@ fn liaison_r_phone(nucleus: &PhoneToken, variant: &LinguisticVariant) -> PhoneTo
 fn split_maximum_onset(
     phones: &[PhoneToken],
     cluster: Range<usize>,
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
 ) -> (Range<usize>, Range<usize>) {
     if cluster.is_empty() {
         return (cluster.clone(), cluster);
     }
 
     for split in cluster.start..=cluster.end {
-        if is_legal_onset(&phones[split..cluster.end], variant) {
+        if is_legal_onset(&phones[split..cluster.end], variety) {
             return (split..cluster.end, cluster.start..split);
         }
     }
@@ -185,7 +185,7 @@ fn split_maximum_onset(
     (cluster.end..cluster.end, cluster.start..cluster.end)
 }
 
-fn is_legal_onset(cluster: &[PhoneToken], variant: &LinguisticVariant) -> bool {
+fn is_legal_onset(cluster: &[PhoneToken], variety: &LinguisticVariety) -> bool {
     if cluster.is_empty() {
         return true;
     }
@@ -193,10 +193,10 @@ fn is_legal_onset(cluster: &[PhoneToken], variant: &LinguisticVariant) -> bool {
         return false;
     }
     if cluster.len() == 1 {
-        return !is_illegal_single_onset(&cluster[0], variant);
+        return !is_illegal_single_onset(&cluster[0], variety);
     }
 
-    variant.phonotactics.as_ref().is_some_and(|phonotactics| {
+    variety.phonotactics.as_ref().is_some_and(|phonotactics| {
         phonotactics.constraints.iter().any(|constraint| {
             constraint.environment.syllable_position == Spec::Known(SyllablePosition::Onset)
                 && constraint.id.contains(".legal_onset.")
@@ -205,8 +205,8 @@ fn is_legal_onset(cluster: &[PhoneToken], variant: &LinguisticVariant) -> bool {
     })
 }
 
-fn is_illegal_single_onset(phone: &PhoneToken, variant: &LinguisticVariant) -> bool {
-    variant.phonotactics.as_ref().is_some_and(|phonotactics| {
+fn is_illegal_single_onset(phone: &PhoneToken, variety: &LinguisticVariety) -> bool {
+    variety.phonotactics.as_ref().is_some_and(|phonotactics| {
         phonotactics.constraints.iter().any(|constraint| {
             constraint.environment.syllable_position == Spec::Known(SyllablePosition::Onset)
                 && constraint.id.contains(".illegal_onset.")
@@ -368,7 +368,7 @@ fn phone_ipa(phone: &PhoneToken) -> &str {
 pub fn syllabification_provenance() -> EvidenceProvenance {
     EvidenceProvenance {
         source: EvidenceSource::Rule,
-        method: "maximum onset syllabification from variant phonotactics".into(),
+        method: "maximum onset syllabification from variety phonotactics".into(),
         version: Some("0.1".into()),
     }
 }
@@ -376,8 +376,8 @@ pub fn syllabification_provenance() -> EvidenceProvenance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::english::variant;
-    use crate::ids::VariantId;
+    use crate::data::english::variety;
+    use crate::ids::VarietyId;
     use crate::phonemicize::{
         EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, phone_display_symbol,
     };
@@ -386,11 +386,11 @@ mod tests {
         let output = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: text.into(),
-                variant: VariantId("en-US".into()),
+                variety: VarietyId("en-US".into()),
                 style: None,
             })
             .expect("phonemicize");
-        syllabify_phones(&output.phones, &variant("en-US-GA"))
+        syllabify_phones(&output.phones, &variety("en-US-GA"))
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! UtterancePlan
-//!   -> variant-aware phones/phonemes
+//!   -> variety-aware phones/phonemes
 //!   -> speaker identity
 //!   -> style reference
 //!   -> StyleTTS2 backend

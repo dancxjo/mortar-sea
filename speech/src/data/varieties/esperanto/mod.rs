@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use crate::feature::FeatureSystem;
-use crate::ids::{LanguageId, PhoneId, PhonemeId, VariantId};
+use crate::ids::{LanguageId, PhoneId, PhonemeId, VarietyId};
 use crate::orthography::Orthography;
 use crate::phonetics::{Phone, PhoneInventory};
 use crate::phonology::{Phoneme, PhonemeInventory};
 use crate::rules::{PhonotacticConstraint, Phonotactics, RuleStatus, SyllableShape};
 use crate::segment::{Environment, SegmentMatcher, SegmentStatus, SymbolAlias};
 use crate::spec::Spec;
-use crate::variant::{LinguisticVariant, VariantImplementationStatus, VariantStatus};
+use crate::variety::{LinguisticVariety, VarietyImplementationStatus, VarietyStatus};
 
 const A: PhoneId = PhoneId::borrowed("ipa.phone.a");
 const E: PhoneId = PhoneId::borrowed("ipa.phone.e");
@@ -87,7 +87,7 @@ const PHONEMES: &[EsperantoSegment] = &[
 
 const ONSET_CLUSTERS: &[&[PhoneId]] = &[&[P, L], &[P, R]];
 
-pub fn variant() -> LinguisticVariant {
+pub fn variety() -> LinguisticVariety {
     let mut phonemes = HashMap::new();
     let mut phones = HashMap::new();
     for segment in PHONEMES {
@@ -122,8 +122,8 @@ pub fn variant() -> LinguisticVariant {
         phonemes.insert(phoneme.id.clone(), phoneme);
     }
 
-    LinguisticVariant {
-        id: VariantId("eo".into()),
+    LinguisticVariety {
+        id: VarietyId("eo".into()),
         language: LanguageId("eo".into()),
         name: "Esperanto (sample)".into(),
         feature_system: FeatureSystem::default(),
@@ -157,8 +157,8 @@ pub fn variant() -> LinguisticVariant {
         morphology: None,
         acoustic_profile: None,
         prosody_profile: None,
-        status: VariantStatus::Attested,
-        implementation_status: VariantImplementationStatus::Complete,
+        status: VarietyStatus::Attested,
+        implementation_status: VarietyImplementationStatus::Complete,
     }
 }
 
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn esperanto_sample_loads_expected_phonemes() {
-        let eo = variant();
+        let eo = variety();
         assert!(
             eo.phonemes
                 .phonemes

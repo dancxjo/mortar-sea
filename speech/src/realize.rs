@@ -1,5 +1,5 @@
-use crate::data::arpabet;
-use crate::data::cmudict::CmuStress;
+use crate::data::lexicons::cmudict::CmuStress;
+use crate::data::notation::arpabet;
 use crate::evidence::{EvidenceProvenance, EvidenceSource};
 use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, PhoneId, PhonemeId};
@@ -8,7 +8,7 @@ use crate::prosody::Stress;
 use crate::rules::{AllophoneRule, EpenthesisRule, RuleCondition};
 use crate::segment::SegmentMatcher;
 use crate::spec::Spec;
-use crate::variant::LinguisticVariant;
+use crate::variety::LinguisticVariety;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealizationOptions {
@@ -33,39 +33,39 @@ pub enum PhoneDecompositionPolicy {
 }
 
 pub fn realize_phonemes(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     options: &RealizationOptions,
 ) -> Vec<PhoneToken> {
     let mut phones = Vec::new();
     for index in 0..phonemes.len() {
-        phones.push(realize_phoneme_at(variant, phonemes, index, options));
-        phones.extend(epenthetic_phones_after(variant, phonemes, index));
+        phones.push(realize_phoneme_at(variety, phonemes, index, options));
+        phones.extend(epenthetic_phones_after(variety, phonemes, index));
     }
     phones
 }
 
 pub fn realize_phoneme_at(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     index: usize,
     options: &RealizationOptions,
 ) -> PhoneToken {
     let token = &phonemes[index];
-    let default_phone = default_phone_token(variant, token);
-    if let Some(rule) = variant
+    let default_phone = default_phone_token(variety, token);
+    if let Some(rule) = variety
         .allophone_rules
         .iter()
-        .find(|rule| rule_applies(rule, variant, phonemes, index, options))
+        .find(|rule| rule_applies(rule, variety, phonemes, index, options))
     {
-        phone_from_rule(variant, token, &default_phone, rule)
+        phone_from_rule(variety, token, &default_phone, rule)
     } else {
         default_phone
     }
 }
 
 pub fn epenthetic_phones_after(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     index: usize,
 ) -> Vec<PhoneToken> {
@@ -76,26 +76,26 @@ pub fn epenthetic_phones_after(
         return Vec::new();
     };
 
-    variant
+    variety
         .epenthesis_rules
         .iter()
-        .filter(|rule| epenthesis_rule_applies(rule, variant, before, after))
-        .map(|rule| phone_from_epenthesis_rule(variant, before, rule))
+        .filter(|rule| epenthesis_rule_applies(rule, variety, before, after))
+        .map(|rule| phone_from_epenthesis_rule(variety, before, rule))
         .collect()
 }
 
 pub fn phoneme_features<'a>(
-    variant: &'a LinguisticVariant,
+    variety: &'a LinguisticVariety,
     id: &PhonemeId,
 ) -> Option<&'a FeatureBundle> {
-    variant
+    variety
         .phonemes
         .phonemes
         .get(id)
         .map(|phoneme| &phoneme.features)
         .or_else(|| {
             let base_id = base_phoneme_id(id)?;
-            variant
+            variety
                 .phonemes
                 .phonemes
                 .get(&base_id)
@@ -124,9 +124,9 @@ pub fn token_stress(token: &PhonemeToken) -> Option<Stress> {
     }
 }
 
-pub fn token_is_vowel(variant: &LinguisticVariant, token: &PhonemeToken) -> bool {
+pub fn token_is_vowel(variety: &LinguisticVariety, token: &PhonemeToken) -> bool {
     token_feature_matches(
-        variant,
+        variety,
         token,
         &FeatureId("phonology.major".into()),
         &FeatureValue::Category("vowel".into()),
@@ -135,7 +135,7 @@ pub fn token_is_vowel(variant: &LinguisticVariant, token: &PhonemeToken) -> bool
 
 fn rule_applies(
     rule: &AllophoneRule,
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     index: usize,
     options: &RealizationOptions,
@@ -143,25 +143,25 @@ fn rule_applies(
     let Some(token) = phonemes.get(index) else {
         return false;
     };
-    input_matches(rule, variant, token)
-        && environment_matches(rule, variant, phonemes, index)
+    input_matches(rule, variety, token)
+        && environment_matches(rule, variety, phonemes, index)
         && rule
             .conditions
             .iter()
-            .all(|condition| condition_matches(condition, variant, phonemes, index, options))
+            .all(|condition| condition_matches(condition, variety, phonemes, index, options))
 }
 
-fn input_matches(rule: &AllophoneRule, variant: &LinguisticVariant, token: &PhonemeToken) -> bool {
+fn input_matches(rule: &AllophoneRule, variety: &LinguisticVariety, token: &PhonemeToken) -> bool {
     (match &rule.input.phoneme {
         Spec::Known(expected) => phoneme_token_matches_id(token, expected),
         Spec::Unspecified => true,
         _ => false,
-    }) && feature_bundle_matches(variant, token, &rule.input.features)
+    }) && feature_bundle_matches(variety, token, &rule.input.features)
 }
 
 fn environment_matches(
     rule: &AllophoneRule,
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     index: usize,
 ) -> bool {
@@ -170,14 +170,14 @@ fn environment_matches(
             rule.environment
                 .before
                 .iter()
-                .any(|matcher| segment_matches(variant, &phonemes[previous], matcher))
+                .any(|matcher| segment_matches(variety, &phonemes[previous], matcher))
         });
     let after_matches = rule.environment.after.is_empty()
         || phonemes.get(index + 1).is_some_and(|next| {
             rule.environment
                 .after
                 .iter()
-                .any(|matcher| segment_matches(variant, next, matcher))
+                .any(|matcher| segment_matches(variety, next, matcher))
         });
 
     before_matches && after_matches
@@ -185,7 +185,7 @@ fn environment_matches(
 
 fn condition_matches(
     condition: &RuleCondition,
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     phonemes: &[PhonemeToken],
     index: usize,
     options: &RealizationOptions,
@@ -193,18 +193,18 @@ fn condition_matches(
     match condition {
         RuleCondition::PreviousMatches(matcher) => index
             .checked_sub(1)
-            .is_some_and(|previous| segment_matches(variant, &phonemes[previous], matcher)),
+            .is_some_and(|previous| segment_matches(variety, &phonemes[previous], matcher)),
         RuleCondition::NextMatches(matcher) => phonemes
             .get(index + 1)
-            .is_some_and(|next| segment_matches(variant, next, matcher)),
+            .is_some_and(|next| segment_matches(variety, next, matcher)),
         RuleCondition::PreviousHasFeature(feature, value) => {
             index.checked_sub(1).is_some_and(|previous| {
-                token_feature_matches(variant, &phonemes[previous], feature, value)
+                token_feature_matches(variety, &phonemes[previous], feature, value)
             })
         }
         RuleCondition::NextHasFeature(feature, value) => phonemes
             .get(index + 1)
-            .is_some_and(|next| token_feature_matches(variant, next, feature, value)),
+            .is_some_and(|next| token_feature_matches(variety, next, feature, value)),
         RuleCondition::PreviousStress(stress) => index
             .checked_sub(1)
             .and_then(|previous| token_stress(&phonemes[previous]))
@@ -226,21 +226,21 @@ fn condition_matches(
 }
 
 fn segment_matches(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     token: &PhonemeToken,
     matcher: &SegmentMatcher,
 ) -> bool {
     match matcher {
         SegmentMatcher::Any => true,
         SegmentMatcher::Phoneme(expected) => phoneme_token_matches_id(token, expected),
-        SegmentMatcher::FeatureBundle(expected) => feature_bundle_matches(variant, token, expected),
+        SegmentMatcher::FeatureBundle(expected) => feature_bundle_matches(variety, token, expected),
         SegmentMatcher::Phone(_) | SegmentMatcher::Boundary(_) => false,
     }
 }
 
 fn epenthesis_rule_applies(
     rule: &EpenthesisRule,
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     before: &PhonemeToken,
     after: &PhonemeToken,
 ) -> bool {
@@ -248,12 +248,12 @@ fn epenthesis_rule_applies(
         || rule
             .before
             .iter()
-            .any(|matcher| segment_matches(variant, before, matcher)))
+            .any(|matcher| segment_matches(variety, before, matcher)))
         && (rule.after.is_empty()
             || rule
                 .after
                 .iter()
-                .any(|matcher| segment_matches(variant, after, matcher)))
+                .any(|matcher| segment_matches(variety, after, matcher)))
 }
 
 fn phoneme_token_matches_id(token: &PhonemeToken, expected: &PhonemeId) -> bool {
@@ -264,19 +264,19 @@ fn phoneme_token_matches_id(token: &PhonemeToken, expected: &PhonemeId) -> bool 
 }
 
 fn feature_bundle_matches(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     token: &PhonemeToken,
     expected: &FeatureBundle,
 ) -> bool {
     expected.values.iter().all(|(feature, value)| match value {
-        Spec::Known(value) => token_feature_matches(variant, token, feature, value),
+        Spec::Known(value) => token_feature_matches(variety, token, feature, value),
         Spec::Unspecified => true,
         _ => false,
     })
 }
 
 fn token_feature_matches(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     token: &PhonemeToken,
     feature: &FeatureId,
     expected: &FeatureValue,
@@ -293,13 +293,13 @@ fn token_feature_matches(
     let Spec::Known(id) = &token.phoneme else {
         return false;
     };
-    phoneme_features(variant, id)
+    phoneme_features(variety, id)
         .and_then(|features| features.values.get(feature))
         .is_some_and(|actual| actual == &Spec::Known(expected.clone()))
 }
 
 fn phone_from_rule(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     token: &PhonemeToken,
     default_phone: &PhoneToken,
     rule: &AllophoneRule,
@@ -307,7 +307,7 @@ fn phone_from_rule(
     let phone = rule.output.phone.clone();
     let features = match &phone {
         Spec::Known(_) if !rule.output.features.values.is_empty() => rule.output.features.clone(),
-        Spec::Known(id) => variant
+        Spec::Known(id) => variety
             .phones
             .phones
             .get(id)
@@ -324,19 +324,19 @@ fn phone_from_rule(
         confidence: token.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: format!("{} allophone rule {}", variant.id.0, rule.id),
+            method: format!("{} allophone rule {}", variety.id.0, rule.id),
             version: Some("0.1".into()),
         },
     }
 }
 
 fn phone_from_epenthesis_rule(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     previous: &PhonemeToken,
     rule: &EpenthesisRule,
 ) -> PhoneToken {
     let features = match &rule.output.phone {
-        Spec::Known(id) => variant
+        Spec::Known(id) => variety
             .phones
             .phones
             .get(id)
@@ -353,21 +353,21 @@ fn phone_from_epenthesis_rule(
         confidence: previous.confidence.min(rule.confidence),
         provenance: EvidenceProvenance {
             source: EvidenceSource::Rule,
-            method: format!("{} epenthesis rule {}", variant.id.0, rule.id),
+            method: format!("{} epenthesis rule {}", variety.id.0, rule.id),
             version: Some("0.1".into()),
         },
     }
 }
 
-fn default_phone_token(variant: &LinguisticVariant, token: &PhonemeToken) -> PhoneToken {
-    let phone = default_phone_id(variant, token);
+fn default_phone_token(variety: &LinguisticVariety, token: &PhonemeToken) -> PhoneToken {
+    let phone = default_phone_id(variety, token);
     let mut features = match &phone {
-        Spec::Known(id) => variant
+        Spec::Known(id) => variety
             .phones
             .phones
             .get(id)
             .map(|phone| phone.features.clone())
-            .or_else(|| phoneme_token_features(variant, token))
+            .or_else(|| phoneme_token_features(variety, token))
             .unwrap_or_default(),
         _ => FeatureBundle::default(),
     };
@@ -389,7 +389,7 @@ fn merge_features(target: &mut FeatureBundle, source: &FeatureBundle) {
     }
 }
 
-fn default_phone_id(variant: &LinguisticVariant, token: &PhonemeToken) -> Spec<PhoneId> {
+fn default_phone_id(variety: &LinguisticVariety, token: &PhonemeToken) -> Spec<PhoneId> {
     let Spec::Known(id) = &token.phoneme else {
         return match token.phoneme {
             Spec::Unknown => Spec::Unknown,
@@ -403,14 +403,14 @@ fn default_phone_id(variant: &LinguisticVariant, token: &PhonemeToken) -> Spec<P
         return Spec::Known(phone);
     }
 
-    variant
+    variety
         .phonemes
         .phonemes
         .get(id)
         .and_then(|phoneme| phoneme.default_phone.clone())
         .or_else(|| {
             let base_id = base_phoneme_id(id)?;
-            variant
+            variety
                 .phonemes
                 .phonemes
                 .get(&base_id)
@@ -447,7 +447,7 @@ fn token_cmu_base_and_stress(token: &PhonemeToken) -> Option<(String, Option<Cmu
 }
 
 fn phoneme_token_features(
-    variant: &LinguisticVariant,
+    variety: &LinguisticVariety,
     token: &PhonemeToken,
 ) -> Option<FeatureBundle> {
     if !token.features.values.is_empty() {
@@ -456,7 +456,7 @@ fn phoneme_token_features(
     let Spec::Known(id) = &token.phoneme else {
         return None;
     };
-    phoneme_features(variant, id)
+    phoneme_features(variety, id)
         .cloned()
         .or_else(|| arpabet::entry(phoneme_base_symbol(id)).map(arpabet::feature_bundle))
 }
@@ -508,15 +508,16 @@ fn cmu_stress_from_digit(digit: char) -> Option<CmuStress> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::cmudict::CmuPhoneme;
-    use crate::data::{arpabet, variant_by_code};
-    use crate::ids::VariantId;
-    use crate::variant::VariantImplementationStatus;
+    use crate::data::lexicons::cmudict::CmuPhoneme;
+    use crate::data::notation::arpabet;
+    use crate::data::variety_by_code;
+    use crate::ids::VarietyId;
+    use crate::variety::VarietyImplementationStatus;
 
-    fn phoneme(variant: &str, symbol: &str) -> PhonemeToken {
+    fn phoneme(variety: &str, symbol: &str) -> PhonemeToken {
         let cmu = CmuPhoneme::parse(symbol);
         PhonemeToken {
-            phoneme: Spec::Known(arpabet::phoneme_id(variant, symbol)),
+            phoneme: Spec::Known(arpabet::phoneme_id(variety, symbol)),
             span: None,
             features: arpabet::cmu_token_features(&cmu),
             realized_as: Vec::new(),
@@ -579,9 +580,9 @@ mod tests {
 
     #[test]
     fn flapping_applies_between_stressed_and_unstressed_vowels() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 phoneme("en-US-GA", "AA1"),
                 phoneme("en-US-GA", "T"),
@@ -595,9 +596,9 @@ mod tests {
 
     #[test]
     fn careful_style_blocks_flapping() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 phoneme("en-US-GA", "AA1"),
                 phoneme("en-US-GA", "T"),
@@ -614,9 +615,9 @@ mod tests {
 
     #[test]
     fn flapping_requires_stress_context() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 phoneme("en-US-GA", "AH0"),
                 phoneme("en-US-GA", "T"),
@@ -630,9 +631,9 @@ mod tests {
 
     #[test]
     fn nasal_assimilation_applies_before_velar_stops() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[phoneme("en-US-GA", "N"), phoneme("en-US-GA", "K")],
             &RealizationOptions::default(),
         );
@@ -642,9 +643,9 @@ mod tests {
 
     #[test]
     fn nasal_assimilation_does_not_apply_before_non_velar_stops() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[phoneme("en-US-GA", "N"), phoneme("en-US-GA", "D")],
             &RealizationOptions::default(),
         );
@@ -654,12 +655,12 @@ mod tests {
 
     #[test]
     fn removing_flapping_rule_disables_flapping() {
-        let mut variant = variant_by_code("en-US-GA").expect("GA");
-        variant
+        let mut variety = variety_by_code("en-US-GA").expect("GA");
+        variety
             .allophone_rules
             .retain(|rule| rule.id != "american_english_intervocalic_flapping");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 phoneme("en-US-GA", "AA1"),
                 phoneme("en-US-GA", "T"),
@@ -673,12 +674,12 @@ mod tests {
 
     #[test]
     fn removing_nasal_rule_disables_nasal_assimilation() {
-        let mut variant = variant_by_code("en-US-GA").expect("GA");
-        variant
+        let mut variety = variety_by_code("en-US-GA").expect("GA");
+        variety
             .allophone_rules
             .retain(|rule| rule.id != "alveolar_nasal_velar_assimilation");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[phoneme("en-US-GA", "N"), phoneme("en-US-GA", "K")],
             &RealizationOptions::default(),
         );
@@ -688,13 +689,13 @@ mod tests {
 
     #[test]
     fn derived_stub_keeps_rule_behavior_and_stub_status() {
-        let variant = variant_by_code("en-GB-RP").expect("RP");
+        let variety = variety_by_code("en-GB-RP").expect("RP");
         assert_eq!(
-            variant.implementation_status,
-            VariantImplementationStatus::StubDerivedFrom(VariantId("en-US-GA".into()))
+            variety.implementation_status,
+            VarietyImplementationStatus::StubDerivedFrom(VarietyId("en-US-GA".into()))
         );
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 phoneme("en-GB-RP", "AA1"),
                 phoneme("en-GB-RP", "T"),
@@ -708,9 +709,9 @@ mod tests {
 
     #[test]
     fn unknown_tokens_pass_through_without_panic() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[
                 unknown_phoneme(),
                 underspecified_phoneme(),
@@ -724,9 +725,9 @@ mod tests {
 
     #[test]
     fn changed_phone_provenance_names_the_rule() {
-        let variant = variant_by_code("en-US-GA").expect("GA");
+        let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(
-            &variant,
+            &variety,
             &[phoneme("en-US-GA", "N"), phoneme("en-US-GA", "K")],
             &RealizationOptions::default(),
         );

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acoustics::AcousticFrame;
 use crate::evidence::EvidenceProvenance;
-use crate::ids::{SpeakerId, UtteranceId, VariantId};
+use crate::ids::{SpeakerId, UtteranceId, VarietyId};
 use crate::morphology::MorphemeToken;
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
@@ -12,7 +12,7 @@ use crate::segment::SpeechBoundaryToken;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Utterance {
     pub id: UtteranceId,
-    pub variant: VariantId,
+    pub variety: VarietyId,
     pub speaker: Option<SpeakerId>,
     pub text: Option<String>,
     pub morphemes: Vec<MorphemeToken>,
@@ -30,7 +30,7 @@ pub struct Utterance {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UtterancePlan {
     pub id: UtteranceId,
-    pub variant: VariantId,
+    pub variety: VarietyId,
     pub speaker: Option<SpeakerId>,
     pub intended_text: Option<String>,
     pub intended_morphemes: Vec<MorphemeToken>,

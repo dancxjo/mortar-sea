@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::acoustics::AcousticProfile;
-use crate::data::cmudict::CmuPhoneme;
+use crate::data::lexicons::cmudict::CmuPhoneme;
 use crate::feature::FeatureSystem;
-use crate::ids::{LanguageId, PhonemeId, VariantId};
+use crate::ids::{LanguageId, PhonemeId, VarietyId};
 use crate::morphology::Morphology;
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
@@ -20,8 +20,8 @@ pub struct Language {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LinguisticVariant {
-    pub id: VariantId,
+pub struct LinguisticVariety {
+    pub id: VarietyId,
     pub language: LanguageId,
     pub name: String,
     pub feature_system: FeatureSystem,
@@ -39,13 +39,13 @@ pub struct LinguisticVariant {
     pub morphology: Option<Morphology>,
     pub acoustic_profile: Option<AcousticProfile>,
     pub prosody_profile: Option<ProsodyProfile>,
-    pub status: VariantStatus,
-    pub implementation_status: VariantImplementationStatus,
+    pub status: VarietyStatus,
+    pub implementation_status: VarietyImplementationStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VariantStatus {
+pub enum VarietyStatus {
     Attested,
     Reconstructed,
     Pedagogical,
@@ -56,9 +56,9 @@ pub enum VariantStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type", content = "data")]
-pub enum VariantImplementationStatus {
+pub enum VarietyImplementationStatus {
     Complete,
-    StubDerivedFrom(VariantId),
+    StubDerivedFrom(VarietyId),
     PermissiveProfile,
 }
 

@@ -1,4 +1,4 @@
-use crate::data::cmudict::{CmuPhoneme, CmuStress};
+use crate::data::lexicons::cmudict::{CmuPhoneme, CmuStress};
 use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::phonetics::Phone;
@@ -156,10 +156,10 @@ pub fn phone_id_for_ipa(ipa: &str) -> PhoneId {
     PhoneId::from(format!("ipa.phone.{ipa}"))
 }
 
-pub fn phoneme_id(variant: &str, symbol: &str) -> PhonemeId {
+pub fn phoneme_id(variety: &str, symbol: &str) -> PhonemeId {
     let (base, _) = split_stress(symbol);
     let canonical = entry(base).map(|entry| entry.ipa).unwrap_or(base);
-    PhonemeId(format!("{variant}.phoneme.{canonical}"))
+    PhonemeId(format!("{variety}.phoneme.{canonical}"))
 }
 
 pub fn phone_for_entry(entry: &ArpabetEntry) -> Phone {
@@ -175,10 +175,10 @@ pub fn phone_for_entry(entry: &ArpabetEntry) -> Phone {
     }
 }
 
-pub fn phoneme_for_entry(variant: &str, entry: &ArpabetEntry) -> Phoneme {
+pub fn phoneme_for_entry(variety: &str, entry: &ArpabetEntry) -> Phoneme {
     let phone = phone_id_for_ipa(entry.phone_symbol);
     Phoneme {
-        id: phoneme_id(variant, entry.symbol),
+        id: phoneme_id(variety, entry.symbol),
         notation: format!("/{}/", entry.ipa),
         features: feature_bundle(entry),
         default_phone: Some(phone.clone()),
