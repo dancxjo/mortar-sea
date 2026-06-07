@@ -68,7 +68,7 @@ window.addEventListener('DOMContentLoaded', () => {
   ]) {
     elements[id] = document.getElementById(id);
   }
-  for (const id of ['ruler', 'waveform', 'spectrogram', 'word-track', 'phoneme-track', 'phone-track']) {
+  for (const id of ['ruler', 'waveform', 'spectrogram', 'feature-track', 'word-track', 'phoneme-track', 'phone-track']) {
     canvases[id] = document.getElementById(id);
   }
 
@@ -361,7 +361,7 @@ function renderAlignment(payload) {
       return `${formatMs(segment.start_ms)}-${formatMs(segment.end_ms)} ${segment.text}`;
     }),
   ].join('\n');
-  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones`;
+  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.feature_tracks || []).length} features`;
   drawAll();
 }
 
@@ -523,6 +523,12 @@ function drawAll(options = {}) {
   drawRuler();
   drawWaveform();
   drawSpectrogram();
+  drawTrack(canvases['feature-track'], state.currentAlignment?.feature_tracks || [], {
+    kind: 'feature',
+    color: featureTrackColor,
+    text: '#f3f6f1',
+    empty: 'Features',
+  });
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
     kind: 'word',
     color: '#6fd2a4',
@@ -844,7 +850,8 @@ function drawTrack(canvas, segments, options) {
     const right = timeToX(segment.end_ms / 1000);
     const w = Math.max(1, right - x);
     if (right < 0 || x > width) continue;
-    ctx.fillStyle = selected ? '#f3f6f1' : options.color;
+    const fillColor = typeof options.color === 'function' ? options.color(segment) : options.color;
+    ctx.fillStyle = selected ? '#f3f6f1' : fillColor;
     ctx.globalAlpha = 0.92;
     ctx.fillRect(x, 8, w, height - 16);
     ctx.globalAlpha = 1;
@@ -863,6 +870,13 @@ function drawTrack(canvas, segments, options) {
       ctx.restore();
     }
   }
+}
+
+function featureTrackColor(segment) {
+  if (segment.kind === 'silence') return '#2c3337';
+  if (segment.kind === 'voiced') return '#5bc6ff';
+  if (segment.kind === 'unvoiced') return '#c3a4ff';
+  return '#66727a';
 }
 
 function drawSelection() {
@@ -974,15 +988,21 @@ function hitTestTimelineSegment(event) {
   const alignment = state.currentAlignment;
   if (!alignment) return null;
   const timeMs = xToTime(timelineX(event)) * 1000;
-  const segments = alignment[`${kind}s`] || [];
+  const segments = alignmentSegments(alignment, kind);
   const segment = segments.find((candidate) => {
     return timeMs >= candidate.start_ms && timeMs <= candidate.end_ms;
   });
   return segment ? { kind, segment } : null;
 }
 
+function alignmentSegments(alignment, kind) {
+  if (kind === 'feature') return alignment.feature_tracks || [];
+  return alignment[`${kind}s`] || [];
+}
+
 function trackKindForTarget(target) {
   if (!target || !target.id) return '';
+  if (target.id === 'feature-track') return 'feature';
   if (target.id === 'word-track') return 'word';
   if (target.id === 'phoneme-track') return 'phoneme';
   if (target.id === 'phone-track') return 'phone';
@@ -995,6 +1015,7 @@ function isSelectedSegment(kind, segment) {
 }
 
 function segmentKey(kind, segment) {
+  if (kind === 'feature') return String(segment.index);
   if (kind === 'word') return String(segment.index);
   return `${segment.word_index}:${segment.index}:${segment.token_id || segment.label || ''}`;
 }

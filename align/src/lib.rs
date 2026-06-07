@@ -129,9 +129,19 @@ struct AlignmentResponse {
     asr_transcript: String,
     asr_segments: Vec<AsrSentence>,
     phonemicization: PhonemicizeResponse,
+    feature_tracks: Vec<FeatureTrackSegment>,
     words: Vec<WordAlignment>,
     phonemes: Vec<SegmentAlignment>,
     phones: Vec<SegmentAlignment>,
+}
+
+#[derive(Debug, Serialize)]
+struct FeatureTrackSegment {
+    index: usize,
+    kind: String,
+    label: String,
+    start_ms: u64,
+    end_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,6 +471,7 @@ async fn align_audio(
     };
     let (words, phonemes, phones) = forced_alignment_tracks(&phonemicized.ir, &decoded)
         .unwrap_or_else(|| alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms));
+    let feature_tracks = alignment_feature_tracks(&decoded);
 
     Ok(Json(AlignmentResponse {
         audio_url: request.audio_url,
@@ -472,6 +483,7 @@ async fn align_audio(
             .join(" "),
         asr_segments,
         phonemicization: phonemicized,
+        feature_tracks,
         words,
         phonemes,
         phones,
@@ -555,6 +567,7 @@ enum AlignmentDirection {
 enum BoundaryLandmarkKind {
     SpeechStart,
     SpeechEnd,
+    Phone,
     Word,
     PauseStart,
     PauseEnd,
@@ -611,7 +624,7 @@ fn forced_alignment_tracks(
     Vec<SegmentAlignment>,
 )> {
     let context = AlignmentAcousticContext::for_output(output);
-    let units = alignable_units(output, &context);
+    let mut units = alignable_units(output, &context);
     if units
         .iter()
         .all(|unit| !matches!(unit, AlignableUnit::Phone { .. }))
@@ -627,6 +640,7 @@ fn forced_alignment_tracks(
     if frames.len() < units.len().min(3) {
         return None;
     }
+    insert_acoustic_pause_units(&mut units, &frames, &context);
     let spans = viterbi_unit_spans(output, &units, &frames, decoded.duration_ms, &context)?;
     let aligned_segments = aligned_segments_from_units(units, spans, output, &context);
     Some(alignment_tracks_from_segments(
@@ -691,6 +705,204 @@ fn alignable_units<'a>(
         }
     }
     units
+}
+
+fn insert_acoustic_pause_units<'a>(
+    units: &mut Vec<AlignableUnit<'a>>,
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+) {
+    if units.len() < 2 || frames.is_empty() {
+        return;
+    }
+    let pause_id = PhoneId::from("boundary.phrase_pause");
+    if context.phone_model(&pause_id).is_none() {
+        return;
+    }
+    let gaps = acoustic_silent_gaps(frames, ms_to_frames(160.0));
+    if gaps.is_empty() {
+        return;
+    }
+    let candidates = acoustic_pause_boundary_candidates(units);
+    if candidates.is_empty() {
+        return;
+    }
+    let Some((speech_start, speech_end)) = active_frame_range(frames) else {
+        return;
+    };
+    let speech_len = speech_end.saturating_sub(speech_start).max(1);
+    let mut insertions = Vec::new();
+    let mut used_boundaries = std::collections::HashSet::new();
+    for gap in gaps {
+        let gap_center = (gap.start + gap.end) / 2;
+        let Some(candidate) = candidates
+            .iter()
+            .filter(|candidate| !used_boundaries.contains(&candidate.unit_index))
+            .min_by_key(|candidate| {
+                let ideal = speech_start
+                    + speech_len.saturating_mul(candidate.unit_index) / units.len().max(1);
+                ideal.abs_diff(gap_center)
+            })
+        else {
+            continue;
+        };
+        let ideal =
+            speech_start + speech_len.saturating_mul(candidate.unit_index) / units.len().max(1);
+        let max_distance = (speech_len / candidates.len().max(1)).max(ms_to_frames(350.0));
+        if ideal.abs_diff(gap_center) > max_distance {
+            continue;
+        }
+        used_boundaries.insert(candidate.unit_index);
+        insertions.push((candidate.unit_index, candidate.after_word_index));
+    }
+
+    insertions.sort_by(|left, right| right.0.cmp(&left.0));
+    for (unit_index, after_word_index) in insertions {
+        units.insert(
+            unit_index,
+            AlignableUnit::Boundary {
+                after_word_index,
+                phone_id: pause_id.clone(),
+            },
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AcousticPauseBoundaryCandidate {
+    unit_index: usize,
+    after_word_index: usize,
+}
+
+fn acoustic_pause_boundary_candidates(
+    units: &[AlignableUnit<'_>],
+) -> Vec<AcousticPauseBoundaryCandidate> {
+    (1..units.len())
+        .filter_map(
+            |unit_index| match (&units[unit_index - 1], &units[unit_index]) {
+                (
+                    AlignableUnit::Phone {
+                        word_index: previous,
+                        ..
+                    },
+                    AlignableUnit::Phone {
+                        word_index: next, ..
+                    },
+                ) if previous != next => Some(AcousticPauseBoundaryCandidate {
+                    unit_index,
+                    after_word_index: *previous,
+                }),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+fn acoustic_silent_gaps(
+    frames: &[AcousticFrameFeatures],
+    min_frames: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let threshold = speech_activity_threshold(frames);
+    let mut gaps = Vec::new();
+    let mut start = None;
+    for (index, frame) in frames.iter().enumerate() {
+        if frame_is_alignment_silence(frame, threshold) {
+            start.get_or_insert(index);
+            continue;
+        }
+        if let Some(gap_start) = start.take() {
+            if index.saturating_sub(gap_start) >= min_frames {
+                gaps.push(gap_start..index);
+            }
+        }
+    }
+    if let Some(gap_start) = start {
+        if frames.len().saturating_sub(gap_start) >= min_frames {
+            gaps.push(gap_start..frames.len());
+        }
+    }
+    gaps
+}
+
+fn frame_is_alignment_silence(frame: &AcousticFrameFeatures, activity_threshold: f32) -> bool {
+    speech_activity(frame) < activity_threshold * 0.65
+        && frame.energy_norm < activity_threshold
+        && frame.voicing < 0.18
+        && silence_frame_score(frame) > 0.45
+}
+
+fn alignment_feature_tracks(decoded: &DecodedWav) -> Vec<FeatureTrackSegment> {
+    let samples = resample_linear(
+        &decoded.samples,
+        decoded.sample_rate_hz,
+        ALIGN_SAMPLE_RATE_HZ,
+    );
+    let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
+    feature_track_segments(&frames)
+}
+
+fn feature_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let activity_threshold = speech_activity_threshold(frames);
+    let mut segments = Vec::new();
+    let mut current_kind = frame_feature_kind(&frames[0], activity_threshold);
+    let mut start_ms = frames[0].start_ms;
+    for frame in frames.iter().skip(1) {
+        let kind = frame_feature_kind(frame, activity_threshold);
+        if kind == current_kind {
+            continue;
+        }
+        segments.push(feature_track_segment(
+            segments.len(),
+            current_kind,
+            start_ms,
+            frame.start_ms.max(start_ms.saturating_add(1)),
+        ));
+        current_kind = kind;
+        start_ms = frame.start_ms;
+    }
+    if let Some(last) = frames.last() {
+        segments.push(feature_track_segment(
+            segments.len(),
+            current_kind,
+            start_ms,
+            last.end_ms.max(start_ms.saturating_add(1)),
+        ));
+    }
+    segments
+}
+
+fn frame_feature_kind(frame: &AcousticFrameFeatures, activity_threshold: f32) -> &'static str {
+    if frame_is_alignment_silence(frame, activity_threshold) {
+        "silence"
+    } else if frame.voicing > 0.42 && frame.sonority > 0.16 {
+        "voiced"
+    } else {
+        "unvoiced"
+    }
+}
+
+fn feature_track_segment(
+    index: usize,
+    kind: &str,
+    start_ms: u64,
+    end_ms: u64,
+) -> FeatureTrackSegment {
+    FeatureTrackSegment {
+        index,
+        kind: kind.to_string(),
+        label: match kind {
+            "silence" => "silence",
+            "voiced" => "voice",
+            "unvoiced" => "unvoiced",
+            _ => kind,
+        }
+        .to_string(),
+        start_ms,
+        end_ms,
+    }
 }
 
 fn aligned_segments_from_units<'a>(
@@ -1087,12 +1299,15 @@ fn directional_viterbi_unit_spans(
                     directed_segment_end_boundary_index(original_unit_index, direction),
                     end,
                 );
+                let onset_score =
+                    unit_onset_boundary_score(unit, active, start, end, frame_count, direction);
                 let candidate = previous
                     + emission
                     + duration_score(len, expected_len)
                     + anchor
                     + segment_score
-                    + boundary_score;
+                    + boundary_score
+                    + onset_score;
                 if candidate > dp[unit_index][end] {
                     dp[unit_index][end] = candidate;
                     previous_len[unit_index][end] = len;
@@ -1218,9 +1433,10 @@ fn boundary_landmark_priors(
         }
         .min(active.len());
         let window = boundary_landmark_window(kind, active.len(), units.len());
-        let Some((target_frame, acoustic_score)) =
-            best_boundary_landmark(active, kind, ideal, window)
-        else {
+        let best = phone_boundary_after(units, boundary_index)
+            .and_then(|phone| best_phone_boundary_landmark(active, phone, kind, ideal, window))
+            .or_else(|| best_boundary_landmark(active, kind, ideal, window));
+        let Some((target_frame, acoustic_score)) = best else {
             continue;
         };
         if acoustic_score < boundary_landmark_threshold(kind) {
@@ -1266,7 +1482,20 @@ fn boundary_landmark_kind(
                 word_index: next, ..
             }),
         ) if previous != next => Some(BoundaryLandmarkKind::Word),
+        (Some(AlignableUnit::Phone { .. }), Some(AlignableUnit::Phone { .. })) => {
+            Some(BoundaryLandmarkKind::Phone)
+        }
         (Some(AlignableUnit::Phone { .. }), None) => Some(BoundaryLandmarkKind::SpeechEnd),
+        _ => None,
+    }
+}
+
+fn phone_boundary_after<'a>(
+    units: &'a [AlignableUnit<'a>],
+    boundary_index: usize,
+) -> Option<&'a PhoneToken> {
+    match units.get(boundary_index) {
+        Some(AlignableUnit::Phone { token, .. }) => Some(*token),
         _ => None,
     }
 }
@@ -1280,6 +1509,7 @@ fn boundary_landmark_window(
     match kind {
         BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => local.max(10),
         BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => local.max(12),
+        BoundaryLandmarkKind::Phone => local.max(8),
         BoundaryLandmarkKind::Word => local.max(12),
     }
 }
@@ -1335,6 +1565,11 @@ fn boundary_energy_score(
         BoundaryLandmarkKind::SpeechEnd | BoundaryLandmarkKind::PauseStart => {
             transition + 0.95 * (left_activity - right_activity).max(0.0) + 0.35 * right_silence
         }
+        BoundaryLandmarkKind::Phone => {
+            transition
+                + 0.30 * (right_activity - left_activity).max(0.0)
+                + 0.20 * left_activity.min(right_activity)
+        }
         BoundaryLandmarkKind::Word => {
             transition
                 + 0.25 * left_activity.min(right_activity)
@@ -1342,6 +1577,29 @@ fn boundary_energy_score(
                 + 0.15 * (left_silence - right_silence).abs()
         }
     }
+}
+
+fn best_phone_boundary_landmark(
+    frames: &[AcousticFrameFeatures],
+    phone: &PhoneToken,
+    kind: BoundaryLandmarkKind,
+    ideal: usize,
+    window: usize,
+) -> Option<(usize, f32)> {
+    if frames.is_empty() {
+        return None;
+    }
+    let start = ideal.saturating_sub(window);
+    let end = ideal.saturating_add(window).min(frames.len());
+    (start..=end)
+        .map(|boundary| {
+            let distance = boundary.abs_diff(ideal) as f32;
+            let boundary_score = boundary_energy_score(frames, boundary, kind);
+            let onset_score = phone_onset_boundary_score(phone, frames, boundary);
+            let score = boundary_score + 0.70 * onset_score - 0.035 * distance.min(window as f32);
+            (boundary, score)
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
 }
 
 fn speech_activity(frame: &AcousticFrameFeatures) -> f32 {
@@ -1352,6 +1610,7 @@ fn boundary_landmark_threshold(kind: BoundaryLandmarkKind) -> f32 {
     match kind {
         BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => 0.18,
         BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => 0.20,
+        BoundaryLandmarkKind::Phone => 0.18,
         BoundaryLandmarkKind::Word => 0.16,
     }
 }
@@ -1361,6 +1620,7 @@ fn boundary_landmark_strength(kind: BoundaryLandmarkKind, acoustic_score: f32) -
     let base = match kind {
         BoundaryLandmarkKind::SpeechStart | BoundaryLandmarkKind::SpeechEnd => 3.8,
         BoundaryLandmarkKind::PauseStart | BoundaryLandmarkKind::PauseEnd => 3.4,
+        BoundaryLandmarkKind::Phone => 1.9,
         BoundaryLandmarkKind::Word => 2.4,
     };
     base * (0.55 + 0.45 * confidence)
@@ -1404,6 +1664,69 @@ fn boundary_landmark_score(
             }
         })
         .sum()
+}
+
+fn unit_onset_boundary_score(
+    unit: &AlignableUnit<'_>,
+    frames: &[AcousticFrameFeatures],
+    directed_start: usize,
+    directed_end: usize,
+    frame_count: usize,
+    direction: AlignmentDirection,
+) -> f32 {
+    let AlignableUnit::Phone { token, .. } = unit else {
+        return 0.0;
+    };
+    let boundary = match direction {
+        AlignmentDirection::Forward => directed_start,
+        AlignmentDirection::Reverse => frame_count.saturating_sub(directed_end),
+    };
+    phone_onset_boundary_score(token, frames, boundary)
+}
+
+fn phone_onset_boundary_score(
+    phone: &PhoneToken,
+    frames: &[AcousticFrameFeatures],
+    boundary: usize,
+) -> f32 {
+    if frames.is_empty() || boundary > frames.len() {
+        return 0.0;
+    }
+    let left = boundary.checked_sub(1).and_then(|index| frames.get(index));
+    let right = frames.get(boundary);
+    let Some(right) = right else {
+        return 0.0;
+    };
+    let class = phone_class(phone);
+    let left_activity = left.map(speech_activity).unwrap_or(0.0);
+    let right_activity = speech_activity(right);
+    let activity_rise = (right_activity - left_activity).max(0.0);
+    let energy_rise =
+        (right.energy_norm - left.map(|frame| frame.energy_norm).unwrap_or(0.0)).max(0.0);
+    let high_rise = (right.high_ratio - left.map(|frame| frame.high_ratio).unwrap_or(0.0)).max(0.0);
+    let flux = right.spectral_flux.max(0.0);
+
+    let score = match class {
+        PhoneClass::Stop | PhoneClass::Affricate => {
+            1.05 * flux + 0.65 * activity_rise + 0.45 * high_rise + 0.30 * energy_rise
+        }
+        PhoneClass::Fricative => {
+            0.80 * flux + 0.55 * high_rise + 0.35 * activity_rise + 0.30 * right.high_ratio
+        }
+        PhoneClass::Vowel => {
+            0.55 * activity_rise + 0.35 * energy_rise + 0.35 * right.vowel_nucleus_likelihood
+        }
+        PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => {
+            0.55 * activity_rise + 0.30 * energy_rise + 0.25 * right.sonority + 0.20 * flux
+        }
+        PhoneClass::Other => 0.35 * activity_rise + 0.25 * flux,
+    };
+
+    if score < 0.18 {
+        0.0
+    } else {
+        (score * 2.4).min(3.2)
+    }
 }
 
 fn syllable_nucleus_unit_indices(
@@ -1808,6 +2131,16 @@ fn phone_frame_score(
     if let Some(model) = context.phone_token_model(phone) {
         score += acoustic_model_frame_score(model, frame, context);
     }
+    let silence_penalty = match class {
+        PhoneClass::Stop | PhoneClass::Affricate => 0.35,
+        PhoneClass::Other => 0.85,
+        PhoneClass::Vowel
+        | PhoneClass::Fricative
+        | PhoneClass::Nasal
+        | PhoneClass::Liquid
+        | PhoneClass::Glide => 1.45,
+    };
+    score -= silence_penalty * silence_frame_score(frame).max(0.0);
     score
 }
 
@@ -3641,6 +3974,65 @@ mod tests {
     }
 
     #[test]
+    fn feature_track_segments_mark_silence_voicing_and_unvoiced_regions() {
+        let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+        for frame in frames.iter_mut().take(10) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.sonority = 0.0;
+            frame.high_ratio = 0.0;
+        }
+        for frame in frames.iter_mut().take(20).skip(10) {
+            frame.energy_norm = 0.75;
+            frame.voicing = 0.72;
+            frame.sonority = 0.70;
+        }
+        for frame in frames.iter_mut().skip(20) {
+            frame.energy_norm = 0.70;
+            frame.voicing = 0.04;
+            frame.sonority = 0.08;
+            frame.high_ratio = 0.78;
+        }
+
+        let segments = feature_track_segments(&frames);
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["silence", "voiced", "unvoiced"]
+        );
+    }
+
+    #[test]
+    fn vowel_frame_score_prefers_voiced_energy_over_silence() {
+        let output = phonemicized("a");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let vowel = output
+            .phones
+            .iter()
+            .find(|phone| phone_class(phone) == PhoneClass::Vowel)
+            .expect("vowel phone");
+        let mut voiced = test_frame(0);
+        voiced.energy_norm = 0.78;
+        voiced.voicing = 0.82;
+        voiced.sonority = 0.76;
+        voiced.vowel_nucleus_likelihood = 0.86;
+        let mut silence = voiced;
+        silence.energy_norm = 0.0;
+        silence.voicing = 0.0;
+        silence.sonority = 0.0;
+        silence.vowel_nucleus_likelihood = 0.0;
+        silence.high_ratio = 0.0;
+
+        assert!(
+            phone_frame_score(vowel, &voiced, &context)
+                > phone_frame_score(vowel, &silence, &context) + 1.0
+        );
+    }
+
+    #[test]
     fn energy_landmarks_anchor_word_boundaries_to_flux() {
         let output = phonemicized("your love");
         let context = AlignmentAcousticContext::for_output(&output);
@@ -3694,6 +4086,119 @@ mod tests {
 
         assert_eq!(prior.target_frame, onset_frame);
         assert!(boundary_landmark_score(&priors, boundary_index, onset_frame) > 1.5);
+    }
+
+    #[test]
+    fn phone_onset_score_rewards_starting_current_phone_at_burst() {
+        let output = phonemicized("treasures");
+        let phone = output
+            .phones
+            .iter()
+            .find(|phone| !is_boundary_phone(phone))
+            .expect("first phone");
+        let mut frames = (0..40).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.18;
+            frame.voicing = 0.05;
+            frame.high_ratio = 0.10;
+            frame.sonority = 0.05;
+            frame.spectral_flux = 0.02;
+        }
+        frames[15].energy_norm = 0.82;
+        frames[15].high_ratio = 0.72;
+        frames[15].spectral_flux = 0.94;
+
+        let aligned = phone_onset_boundary_score(phone, &frames, 15);
+        let late = phone_onset_boundary_score(phone, &frames, 18);
+
+        assert!(aligned > late + 1.0);
+    }
+
+    #[test]
+    fn phone_landmarks_anchor_village_affricate_release() {
+        let output = phonemicized("village");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let units = alignable_units(&output, &context);
+        let boundary_index = units
+            .iter()
+            .enumerate()
+            .find_map(|(index, unit)| match unit {
+                AlignableUnit::Phone { token, .. }
+                    if phone_class(token) == PhoneClass::Affricate =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .expect("affricate boundary");
+        let mut frames = (0..60).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.34;
+            frame.voicing = 0.22;
+            frame.sonority = 0.20;
+            frame.high_ratio = 0.12;
+            frame.spectral_flux = 0.03;
+        }
+        let (speech_start, speech_end) = active_frame_range(&frames).expect("active range");
+        let ideal =
+            speech_start + speech_end.saturating_sub(speech_start) * boundary_index / units.len();
+        let release_frame = ideal.saturating_add(3);
+        frames[release_frame].energy_norm = 0.78;
+        frames[release_frame].high_ratio = 0.76;
+        frames[release_frame].spectral_flux = 0.95;
+
+        let priors = boundary_landmark_priors(&units, &frames, 0, frames.len());
+        let prior = priors
+            .iter()
+            .find(|prior| prior.boundary_index == boundary_index)
+            .expect("affricate phone prior");
+
+        assert_eq!(prior.target_frame, release_frame);
+        assert!(boundary_landmark_score(&priors, boundary_index, release_frame) > 1.0);
+    }
+
+    #[test]
+    fn reverse_phone_onset_score_uses_chronological_start_boundary() {
+        let output = phonemicized("treasures");
+        let phone = output
+            .phones
+            .iter()
+            .find(|phone| !is_boundary_phone(phone))
+            .expect("first phone");
+        let unit = AlignableUnit::Phone {
+            token: phone,
+            word_index: 0,
+        };
+        let mut frames = (0..40).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.18;
+            frame.voicing = 0.05;
+            frame.high_ratio = 0.10;
+            frame.sonority = 0.05;
+            frame.spectral_flux = 0.02;
+        }
+        frames[12].energy_norm = 0.82;
+        frames[12].high_ratio = 0.72;
+        frames[12].spectral_flux = 0.94;
+
+        let aligned = unit_onset_boundary_score(
+            &unit,
+            &frames,
+            20,
+            frames.len() - 12,
+            frames.len(),
+            AlignmentDirection::Reverse,
+        );
+        let shifted = unit_onset_boundary_score(
+            &unit,
+            &frames,
+            20,
+            frames.len() - 16,
+            frames.len(),
+            AlignmentDirection::Reverse,
+        );
+
+        assert!(aligned > shifted + 1.0);
     }
 
     #[test]
@@ -3831,6 +4336,66 @@ mod tests {
                     if phone_id.as_str() == "boundary.phrase_pause"
             )
         }));
+    }
+
+    #[test]
+    fn acoustic_pause_units_capture_long_internal_silence() {
+        let output = phonemicized("gold young");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let mut units = alignable_units(&output, &context);
+        let original_len = units.len();
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.70;
+            frame.voicing = 0.55;
+            frame.sonority = 0.58;
+            frame.high_ratio = 0.20;
+        }
+        for frame in frames.iter_mut().take(48).skip(24) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.sonority = 0.0;
+            frame.high_ratio = 0.0;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+
+        insert_acoustic_pause_units(&mut units, &frames, &context);
+
+        assert_eq!(units.len(), original_len + 1);
+        assert!(units.iter().any(|unit| {
+            matches!(
+                unit,
+                AlignableUnit::Boundary { after_word_index, phone_id }
+                    if *after_word_index == 0
+                        && phone_id.as_str() == "boundary.phrase_pause"
+            )
+        }));
+    }
+
+    #[test]
+    fn acoustic_pause_units_ignore_short_internal_silence() {
+        let output = phonemicized("gold young");
+        let context = AlignmentAcousticContext::for_output(&output);
+        let mut units = alignable_units(&output, &context);
+        let original_len = units.len();
+        let mut frames = (0..80).map(test_frame).collect::<Vec<_>>();
+        for frame in &mut frames {
+            frame.energy_norm = 0.70;
+            frame.voicing = 0.55;
+            frame.sonority = 0.58;
+            frame.high_ratio = 0.20;
+        }
+        for frame in frames.iter_mut().take(34).skip(28) {
+            frame.energy_norm = 0.0;
+            frame.voicing = 0.0;
+            frame.sonority = 0.0;
+            frame.high_ratio = 0.0;
+            frame.vowel_nucleus_likelihood = 0.0;
+        }
+
+        insert_acoustic_pause_units(&mut units, &frames, &context);
+
+        assert_eq!(units.len(), original_len);
     }
 
     #[test]
