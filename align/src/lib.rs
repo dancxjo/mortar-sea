@@ -545,6 +545,12 @@ enum PhoneClass {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlignmentDirection {
+    Forward,
+    Reverse,
+}
+
 struct AlignedPhone<'a> {
     token: &'a PhoneToken,
     word_index: usize,
@@ -934,39 +940,82 @@ fn viterbi_unit_spans(
         );
     }
 
+    let forward = directional_viterbi_unit_spans(
+        output,
+        units,
+        frames,
+        active_start,
+        active_end,
+        duration_ms,
+        context,
+        AlignmentDirection::Forward,
+    );
+    let reverse = directional_viterbi_unit_spans(
+        output,
+        units,
+        frames,
+        active_start,
+        active_end,
+        duration_ms,
+        context,
+        AlignmentDirection::Reverse,
+    );
+
+    match (forward, reverse) {
+        (Some(forward), Some(reverse)) => Some(reconcile_bidirectional_spans(
+            &forward,
+            &reverse,
+            duration_ms,
+        )),
+        (Some(forward), None) => Some(forward),
+        (None, Some(reverse)) => Some(reverse),
+        (None, None) => None,
+    }
+}
+
+fn directional_viterbi_unit_spans(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    active_start: usize,
+    active_end: usize,
+    duration_ms: u64,
+    context: &AlignmentAcousticContext,
+    direction: AlignmentDirection,
+) -> Option<Vec<PhoneSpan>> {
+    let active = &frames[active_start..active_end];
     let unit_count = units.len();
     let frame_count = active.len();
     let average_frames = ((frame_count + unit_count - 1) / unit_count).max(1);
-    let alignable_phones = units
+    let directed_units = directed_unit_indices(unit_count, direction);
+    let directed_frames = match direction {
+        AlignmentDirection::Forward => active.to_vec(),
+        AlignmentDirection::Reverse => active.iter().rev().copied().collect::<Vec<_>>(),
+    };
+    let nucleus_unit_indices = syllable_nucleus_unit_indices(output, units);
+    let directed_nucleus_unit_indices = directed_units
         .iter()
-        .filter_map(|unit| match unit {
-            AlignableUnit::Phone { token, word_index } => Some((*token, *word_index)),
-            AlignableUnit::Boundary { .. } => None,
-        })
+        .copied()
+        .filter(|unit_index| nucleus_unit_indices.contains(unit_index))
         .collect::<Vec<_>>();
-    let phone_unit_indices = units
-        .iter()
-        .enumerate()
-        .filter_map(|(index, unit)| matches!(unit, AlignableUnit::Phone { .. }).then_some(index))
-        .collect::<Vec<_>>();
-    let nucleus_phone_indices = syllable_nucleus_phone_indices(output, &alignable_phones);
-    let nucleus_targets = nucleus_target_frames(active, nucleus_phone_indices.len());
+    let nucleus_targets =
+        nucleus_target_frames(&directed_frames, directed_nucleus_unit_indices.len());
     let mut nucleus_target_by_unit = vec![None; unit_count];
-    for (phone_index, target_frame) in nucleus_phone_indices
+    for (unit_index, target_frame) in directed_nucleus_unit_indices
         .iter()
         .copied()
         .zip(nucleus_targets.iter().copied())
     {
-        if let Some(unit_index) = phone_unit_indices.get(phone_index).copied() {
-            nucleus_target_by_unit[unit_index] = Some(target_frame);
-        }
+        nucleus_target_by_unit[unit_index] = Some(target_frame);
     }
     let nucleus_target_prefix = nucleus_target_prefix(frame_count, &nucleus_targets);
     let mut prefix_scores = vec![vec![0.0_f32; frame_count + 1]; unit_count];
-    for (unit_index, unit) in units.iter().enumerate() {
-        for (frame_index, frame) in active.iter().enumerate() {
-            prefix_scores[unit_index][frame_index + 1] =
-                prefix_scores[unit_index][frame_index] + unit_frame_score(unit, frame, context);
+    for (directed_unit_index, original_unit_index) in directed_units.iter().copied().enumerate() {
+        let unit = &units[original_unit_index];
+        for (frame_index, frame) in directed_frames.iter().enumerate() {
+            let previous_score = prefix_scores[directed_unit_index][frame_index];
+            prefix_scores[directed_unit_index][frame_index + 1] =
+                previous_score + unit_frame_score(unit, frame, context);
         }
     }
 
@@ -976,7 +1025,8 @@ fn viterbi_unit_spans(
     dp[0][0] = 0.0;
 
     for unit_index in 1..=unit_count {
-        let unit = &units[unit_index - 1];
+        let original_unit_index = directed_units[unit_index - 1];
+        let unit = &units[original_unit_index];
         let class = unit_phone_class(unit);
         let (min_len, max_len, expected_len) = duration_limits(unit, average_frames, context);
         for end in 1..=frame_count {
@@ -992,17 +1042,17 @@ fn viterbi_unit_spans(
                 }
                 let emission =
                     prefix_scores[unit_index - 1][end] - prefix_scores[unit_index - 1][start];
+                let segment_frames = chronological_segment_frames(active, start, end, direction);
                 let anchor = nucleus_anchor_score(
-                    unit_index - 1,
+                    original_unit_index,
                     class,
                     start,
                     end,
-                    active,
+                    &directed_frames,
                     &nucleus_target_by_unit,
                     &nucleus_target_prefix,
                 );
-                let segment_score =
-                    unit_segment_score(unit, &active[start..end], context, expected_len);
+                let segment_score = unit_segment_score(unit, segment_frames, context, expected_len);
                 let candidate = previous
                     + emission
                     + duration_score(len, expected_len)
@@ -1029,24 +1079,155 @@ fn viterbi_unit_spans(
     ];
     let mut end = frame_count;
     for unit_index in (1..=unit_count).rev() {
+        let original_unit_index = directed_units[unit_index - 1];
         let len = previous_len[unit_index][end];
         if len == 0 {
             return None;
         }
         let start = end - len;
-        let start_frame = active_start + start;
+        let (original_start, original_end) =
+            directed_span_frame_range(start, end, frame_count, direction);
+        let start_frame = active_start + original_start;
+        let end_frame = active_start + original_end;
         let start_ms = frames[start_frame].start_ms.min(duration_ms);
-        let end_ms = if active_start + end < frames.len() {
-            frames[active_start + end].start_ms
+        let end_ms = if end_frame < frames.len() {
+            frames[end_frame].start_ms
         } else {
-            frames[active_start + end - 1].end_ms
+            frames[end_frame - 1].end_ms
         }
         .min(duration_ms)
         .max(start_ms.saturating_add(1));
-        spans[unit_index - 1] = PhoneSpan { start_ms, end_ms };
+        spans[original_unit_index] = PhoneSpan { start_ms, end_ms };
         end = start;
     }
     Some(spans)
+}
+
+fn directed_unit_indices(unit_count: usize, direction: AlignmentDirection) -> Vec<usize> {
+    match direction {
+        AlignmentDirection::Forward => (0..unit_count).collect(),
+        AlignmentDirection::Reverse => (0..unit_count).rev().collect(),
+    }
+}
+
+fn chronological_segment_frames(
+    frames: &[AcousticFrameFeatures],
+    directed_start: usize,
+    directed_end: usize,
+    direction: AlignmentDirection,
+) -> &[AcousticFrameFeatures] {
+    match direction {
+        AlignmentDirection::Forward => &frames[directed_start..directed_end],
+        AlignmentDirection::Reverse => {
+            let (start, end) =
+                directed_span_frame_range(directed_start, directed_end, frames.len(), direction);
+            &frames[start..end]
+        }
+    }
+}
+
+fn directed_span_frame_range(
+    directed_start: usize,
+    directed_end: usize,
+    frame_count: usize,
+    direction: AlignmentDirection,
+) -> (usize, usize) {
+    match direction {
+        AlignmentDirection::Forward => (directed_start, directed_end),
+        AlignmentDirection::Reverse => (
+            frame_count.saturating_sub(directed_end),
+            frame_count.saturating_sub(directed_start),
+        ),
+    }
+}
+
+fn syllable_nucleus_unit_indices(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+) -> Vec<usize> {
+    let alignable_phones = units
+        .iter()
+        .filter_map(|unit| match unit {
+            AlignableUnit::Phone { token, word_index } => Some((*token, *word_index)),
+            AlignableUnit::Boundary { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let phone_unit_indices = units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| matches!(unit, AlignableUnit::Phone { .. }).then_some(index))
+        .collect::<Vec<_>>();
+
+    syllable_nucleus_phone_indices(output, &alignable_phones)
+        .into_iter()
+        .filter_map(|phone_index| phone_unit_indices.get(phone_index).copied())
+        .collect()
+}
+
+fn reconcile_bidirectional_spans(
+    forward: &[PhoneSpan],
+    reverse: &[PhoneSpan],
+    duration_ms: u64,
+) -> Vec<PhoneSpan> {
+    if forward.len() != reverse.len() || forward.is_empty() {
+        return forward.to_vec();
+    }
+
+    let forward_boundaries = span_boundaries(forward);
+    let reverse_boundaries = span_boundaries(reverse);
+    let boundary_count = forward_boundaries.len();
+    let unit_count = forward.len();
+    let mut boundaries = forward_boundaries
+        .iter()
+        .zip(reverse_boundaries.iter())
+        .enumerate()
+        .map(|(index, (forward_time, reverse_time))| {
+            let reverse_weight = index as f32 / unit_count as f32;
+            ((*forward_time as f32 * (1.0 - reverse_weight))
+                + (*reverse_time as f32 * reverse_weight))
+                .round() as u64
+        })
+        .collect::<Vec<_>>();
+
+    normalize_boundaries(&mut boundaries, duration_ms);
+    debug_assert_eq!(boundaries.len(), boundary_count);
+    boundaries
+        .windows(2)
+        .map(|pair| PhoneSpan {
+            start_ms: pair[0],
+            end_ms: pair[1].max(pair[0].saturating_add(1)),
+        })
+        .collect()
+}
+
+fn span_boundaries(spans: &[PhoneSpan]) -> Vec<u64> {
+    let mut boundaries = Vec::with_capacity(spans.len() + 1);
+    if let Some(first) = spans.first() {
+        boundaries.push(first.start_ms);
+    }
+    boundaries.extend(spans.iter().map(|span| span.end_ms));
+    boundaries
+}
+
+fn normalize_boundaries(boundaries: &mut [u64], duration_ms: u64) {
+    if boundaries.is_empty() {
+        return;
+    }
+    for index in 1..boundaries.len() {
+        let minimum = boundaries[index - 1].saturating_add(1);
+        if boundaries[index] < minimum {
+            boundaries[index] = minimum;
+        }
+    }
+    if let Some(last) = boundaries.last_mut() {
+        *last = (*last).min(duration_ms);
+    }
+    for index in (0..boundaries.len().saturating_sub(1)).rev() {
+        let maximum = boundaries[index + 1].saturating_sub(1);
+        if boundaries[index] > maximum {
+            boundaries[index] = maximum;
+        }
+    }
 }
 
 fn syllable_nucleus_phone_indices(
@@ -3081,6 +3262,70 @@ mod tests {
             sampled
                 .windows(2)
                 .all(|pair| pair[0].start_ms < pair[1].start_ms)
+        );
+    }
+
+    #[test]
+    fn bidirectional_reconciliation_trusts_reverse_late() {
+        let forward = vec![
+            PhoneSpan {
+                start_ms: 0,
+                end_ms: 100,
+            },
+            PhoneSpan {
+                start_ms: 100,
+                end_ms: 205,
+            },
+            PhoneSpan {
+                start_ms: 205,
+                end_ms: 315,
+            },
+            PhoneSpan {
+                start_ms: 315,
+                end_ms: 430,
+            },
+        ];
+        let reverse = vec![
+            PhoneSpan {
+                start_ms: 0,
+                end_ms: 80,
+            },
+            PhoneSpan {
+                start_ms: 80,
+                end_ms: 170,
+            },
+            PhoneSpan {
+                start_ms: 170,
+                end_ms: 270,
+            },
+            PhoneSpan {
+                start_ms: 270,
+                end_ms: 400,
+            },
+        ];
+
+        let reconciled = reconcile_bidirectional_spans(&forward, &reverse, 400);
+
+        assert_eq!(reconciled.first().map(|span| span.start_ms), Some(0));
+        assert_eq!(reconciled.last().map(|span| span.end_ms), Some(400));
+        assert_eq!(reconciled[1].start_ms, 95);
+        assert_eq!(reconciled[3].start_ms, 281);
+        assert!(
+            reconciled
+                .windows(2)
+                .all(|pair| pair[0].end_ms == pair[1].start_ms)
+        );
+    }
+
+    #[test]
+    fn reverse_directed_span_maps_back_to_chronological_frames() {
+        assert_eq!(
+            directed_span_frame_range(2, 5, 10, AlignmentDirection::Reverse),
+            (5, 8)
+        );
+        assert_eq!(
+            directed_span_frame_range(2, 5, 10, AlignmentDirection::Forward),
+            (2, 5)
         );
     }
 
