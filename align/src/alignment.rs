@@ -1131,7 +1131,15 @@ fn phone_onset_boundary_score(
 
     let score = match class {
         PhoneClass::Stop | PhoneClass::Affricate => {
-            1.05 * flux + 0.65 * activity_rise + 0.45 * high_rise + 0.30 * energy_rise
+            let mut score =
+                1.05 * flux + 0.65 * activity_rise + 0.45 * high_rise + 0.30 * energy_rise;
+            if matches!(
+                phone_feature_category(phone, "phonology.voicing"),
+                Some("voiceless")
+            ) {
+                score -= 1.75 * voiceless_obstruent_vocalic_mismatch(right);
+            }
+            score
         }
         PhoneClass::Fricative => {
             0.80 * flux + 0.55 * high_rise + 0.35 * activity_rise + 0.30 * right.high_ratio
@@ -1290,6 +1298,7 @@ fn refine_acoustic_alignment_spans(
         spans,
         &word_phone_counts,
     );
+    normalize_unit_span_sequence(spans, duration_ms);
 }
 
 fn refine_weak_function_word_content_boundaries(
@@ -1343,13 +1352,11 @@ fn refine_weak_function_word_content_boundaries(
             next_phone,
             current_frame,
             ms_to_frames(120.0),
+            ms_to_frames(180.0),
         ) else {
             continue;
         };
         let anchor_ms = frame_boundary_ms(frames, anchor_frame, duration_ms);
-        if anchor_ms >= current_boundary {
-            continue;
-        }
 
         let Some(previous_word_start) = word_start_ms(units, spans, *previous_word) else {
             continue;
@@ -1358,13 +1365,23 @@ fn refine_weak_function_word_content_boundaries(
             continue;
         }
         let previous_span = spans[boundary_index - 1];
-        let next_span = spans[boundary_index];
+        let Some(next_word_end) = word_end_ms(units, spans, *next_word) else {
+            continue;
+        };
         if anchor_ms <= previous_span.start_ms.saturating_add(1)
-            || anchor_ms >= next_span.end_ms.saturating_sub(1)
+            || anchor_ms >= next_word_end.saturating_sub(1)
         {
             continue;
         }
 
+        compact_weak_word_before_content_anchor(
+            units,
+            spans,
+            boundary_index,
+            *previous_word,
+            previous_hint,
+            anchor_ms,
+        );
         spans[boundary_index - 1].end_ms = anchor_ms;
         spans[boundary_index].start_ms = anchor_ms;
     }
@@ -1381,26 +1398,92 @@ fn best_content_word_onset_boundary(
     frames: &[AcousticFrameFeatures],
     phone: &PhoneToken,
     current_frame: usize,
-    window: usize,
+    early_window: usize,
+    late_window: usize,
 ) -> Option<usize> {
     if frames.is_empty() {
         return None;
     }
-    let start = current_frame.saturating_sub(window);
-    let end = current_frame
-        .saturating_add(ms_to_frames(30.0))
-        .min(frames.len());
+    let start = current_frame.saturating_sub(early_window);
+    let end = current_frame.saturating_add(late_window).min(frames.len());
     (start..=end)
         .map(|boundary| {
             let distance = boundary.abs_diff(current_frame) as f32;
+            let window = if boundary < current_frame {
+                early_window
+            } else {
+                late_window
+            }
+            .max(1) as f32;
             let score = phone_onset_boundary_score(phone, frames, boundary)
                 + 0.45 * boundary_energy_score(frames, boundary, BoundaryLandmarkKind::Word)
-                - 0.010 * distance.min(window as f32);
+                - 0.012 * distance.min(window) * (12.0 / window).clamp(0.6, 1.4);
             (boundary, score)
         })
         .filter(|(_, score)| *score > 0.85)
         .max_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(boundary, _)| boundary)
+}
+
+fn compact_weak_word_before_content_anchor(
+    units: &[AlignableUnit<'_>],
+    spans: &mut [PhoneSpan],
+    content_boundary_index: usize,
+    weak_word_index: usize,
+    hint: WeakWordDurationHint,
+    anchor_ms: u64,
+) {
+    if content_boundary_index == 0 || content_boundary_index > units.len() {
+        return;
+    }
+    let weak_end = content_boundary_index;
+    let mut weak_start = content_boundary_index - 1;
+    while weak_start > 0 && unit_word_index(&units[weak_start - 1]) == Some(weak_word_index) {
+        weak_start -= 1;
+    }
+    if weak_start == 0 {
+        return;
+    }
+    let Some(AlignableUnit::Phone {
+        token: previous_phone,
+        ..
+    }) = units.get(weak_start - 1)
+    else {
+        return;
+    };
+    if !strong_vowel_can_feed_weak_word_compaction(previous_phone) {
+        return;
+    }
+
+    let weak_unit_count = weak_end.saturating_sub(weak_start);
+    if weak_unit_count == 0 {
+        return;
+    }
+    let current_start = spans[weak_start].start_ms;
+    let current_end = spans[weak_end - 1].end_ms;
+    let current_duration = current_end.saturating_sub(current_start);
+    let min_duration = (weak_unit_count as u64).saturating_mul(ALIGN_HOP_MS);
+    let target_duration = current_duration
+        .clamp(min_duration, hint.expected_ms.max(min_duration))
+        .min(hint.max_ms.max(min_duration));
+    let new_start = anchor_ms.saturating_sub(target_duration);
+    if new_start <= current_start.saturating_add(ALIGN_HOP_MS / 2) {
+        return;
+    }
+    if new_start <= spans[weak_start - 1].start_ms.saturating_add(1) {
+        return;
+    }
+
+    spans[weak_start - 1].end_ms = new_start;
+    let weak_spans = distribute_spans(new_start, anchor_ms, weak_unit_count);
+    for (unit_index, (start_ms, end_ms)) in (weak_start..weak_end).zip(weak_spans) {
+        spans[unit_index] = PhoneSpan { start_ms, end_ms };
+    }
+}
+
+fn strong_vowel_can_feed_weak_word_compaction(phone: &PhoneToken) -> bool {
+    phone_class(phone) == PhoneClass::Vowel
+        && !phone_feature_bool(phone, "phonology.reduced_vowel").unwrap_or(false)
 }
 
 fn word_start_ms(
@@ -1415,6 +1498,25 @@ fn word_start_ms(
             (unit_word_index(unit) == Some(word_index)).then_some(span.start_ms)
         })
         .min()
+}
+
+fn word_end_ms(units: &[AlignableUnit<'_>], spans: &[PhoneSpan], word_index: usize) -> Option<u64> {
+    units
+        .iter()
+        .zip(spans.iter())
+        .filter_map(|(unit, span)| {
+            (unit_word_index(unit) == Some(word_index)).then_some(span.end_ms)
+        })
+        .max()
+}
+
+fn normalize_unit_span_sequence(spans: &mut [PhoneSpan], duration_ms: u64) {
+    let mut boundaries = span_boundaries(spans);
+    normalize_boundaries(&mut boundaries, duration_ms);
+    for (span, pair) in spans.iter_mut().zip(boundaries.windows(2)) {
+        span.start_ms = pair[0];
+        span.end_ms = pair[1].max(pair[0].saturating_add(1));
+    }
 }
 
 fn frame_boundary_for_ms(frames: &[AcousticFrameFeatures], ms: u64) -> usize {
@@ -1754,7 +1856,11 @@ fn weak_alignment_word_duration_hint(
             expected_ms: 55,
             max_ms: 100,
         }),
-        "am" | "are" | "is" | "was" | "were" => Some(WeakWordDurationHint {
+        "am" => Some(WeakWordDurationHint {
+            expected_ms: 130,
+            max_ms: 230,
+        }),
+        "are" | "is" | "was" | "were" => Some(WeakWordDurationHint {
             expected_ms: 85,
             max_ms: 140,
         }),

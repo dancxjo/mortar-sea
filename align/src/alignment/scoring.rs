@@ -91,6 +91,10 @@ pub(super) fn phone_feature_compatibility_score(
         PhoneClass::Stop | PhoneClass::Other => 0.0,
     };
 
+    if class == PhoneClass::Stop && matches!(voicing, Some("voiceless")) {
+        score -= 0.85 * voiceless_obstruent_vocalic_mismatch(frame);
+    }
+
     if matches!(voicing, Some("voiced"))
         && !reduced_vowel
         && !matches!(class, PhoneClass::Stop | PhoneClass::Affricate)
@@ -899,6 +903,17 @@ pub(super) fn sonorant_voicing_evidence(class: PhoneClass, frame: &AcousticFrame
         _ => 0.0,
     }
     .clamp(0.0, 1.0)
+}
+
+pub(super) fn voiceless_obstruent_vocalic_mismatch(frame: &AcousticFrameFeatures) -> f32 {
+    let vocalic =
+        (0.44 * frame.voicing + 0.30 * frame.sonority + 0.26 * frame.vowel_nucleus_likelihood)
+            .clamp(0.0, 1.0);
+    let voiceless_evidence = (1.0 - frame.voicing)
+        .max(frame.high_ratio)
+        .max(silence_frame_score(frame).max(0.0))
+        .clamp(0.0, 1.0);
+    (vocalic - voiceless_evidence).max(0.0)
 }
 
 pub(super) fn ms_to_frames(ms: f32) -> usize {

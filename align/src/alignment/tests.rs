@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::ALIGN_FRAME_MS;
 use speech::{EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, VarietyId};
@@ -82,6 +81,27 @@ fn weak_to_duration_limits_are_tight_per_phone() {
 }
 
 #[test]
+fn am_duration_limit_allows_clear_final_nasal() {
+    let output = phonemicized("Who am I to disagree?");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_units(&output, &context);
+    let counts = word_phone_counts(&units, output.graphemes.len());
+    let am_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "am")
+        .expect("am word");
+    let am_limits = units
+        .iter()
+        .filter(|unit| unit_word_index(unit) == Some(am_index))
+        .map(|unit| duration_limits(unit, &output, &counts, 10, &context))
+        .collect::<Vec<_>>();
+
+    assert_eq!(am_limits.len(), 2);
+    assert!(am_limits.iter().all(|(_, max_len, _)| *max_len >= 11));
+}
+
+#[test]
 fn weak_function_word_boundary_snaps_to_following_content_onset() {
     let output = phonemicized("Who am I to disagree?");
     let context = AlignmentAcousticContext::for_output(&output);
@@ -150,6 +170,109 @@ fn weak_function_word_boundary_snaps_to_following_content_onset() {
 }
 
 #[test]
+fn weak_function_word_after_diphthong_compacts_before_late_content_onset() {
+    let output = phonemicized("Who am I to disagree?");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_units(&output, &context);
+    let i_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "i")
+        .expect("I word");
+    let to_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "to")
+        .expect("to word");
+    let disagree_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "disagree")
+        .expect("disagree word");
+    let i_unit = units
+        .iter()
+        .position(|unit| unit_word_index(unit) == Some(i_index))
+        .expect("I unit");
+    let to_start = units
+        .iter()
+        .position(|unit| unit_word_index(unit) == Some(to_index))
+        .expect("to start");
+    let content_boundary = units
+        .iter()
+        .position(|unit| unit_word_index(unit) == Some(disagree_index))
+        .expect("disagree start");
+    let mut spans = (0..units.len())
+        .map(|index| PhoneSpan {
+            start_ms: index as u64 * 40,
+            end_ms: index as u64 * 40 + 40,
+        })
+        .collect::<Vec<_>>();
+    spans[i_unit] = PhoneSpan {
+        start_ms: 820,
+        end_ms: 1040,
+    };
+    spans[to_start] = PhoneSpan {
+        start_ms: 1040,
+        end_ms: 1060,
+    };
+    spans[to_start + 1] = PhoneSpan {
+        start_ms: 1060,
+        end_ms: 1080,
+    };
+    spans[content_boundary] = PhoneSpan {
+        start_ms: 1080,
+        end_ms: 1120,
+    };
+    for (offset, span) in spans.iter_mut().enumerate().skip(content_boundary + 1) {
+        span.start_ms = 1120 + (offset - content_boundary - 1) as u64 * 80;
+        span.end_ms = span.start_ms + 80;
+    }
+
+    let mut frames = (0..180).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_norm = 0.20;
+        frame.voicing = 0.12;
+        frame.high_ratio = 0.14;
+        frame.sonority = 0.10;
+        frame.vowel_nucleus_likelihood = 0.08;
+        frame.spectral_flux = 0.03;
+    }
+    for frame in frames.iter_mut().take(116).skip(82) {
+        frame.energy_norm = 0.74;
+        frame.voicing = 0.84;
+        frame.high_ratio = 0.12;
+        frame.sonority = 0.78;
+        frame.vowel_nucleus_likelihood = 0.88;
+        frame.spectral_flux = 0.08;
+    }
+    let anchor_frame = 117;
+    frames[anchor_frame - 1].energy_norm = 0.18;
+    frames[anchor_frame - 1].voicing = 0.10;
+    frames[anchor_frame - 1].sonority = 0.10;
+    frames[anchor_frame].energy_norm = 0.82;
+    frames[anchor_frame].voicing = 0.28;
+    frames[anchor_frame].high_ratio = 0.72;
+    frames[anchor_frame].sonority = 0.34;
+    frames[anchor_frame].spectral_flux = 0.96;
+
+    refine_acoustic_alignment_spans(
+        &output,
+        &units,
+        &frames,
+        frames.last().map(|frame| frame.end_ms).unwrap_or(0),
+        &mut spans,
+    );
+
+    assert!(spans[i_unit].end_ms > 1040);
+    assert_eq!(
+        spans[content_boundary].start_ms,
+        anchor_frame as u64 * ALIGN_HOP_MS
+    );
+    assert_eq!(spans[to_start].start_ms, spans[i_unit].end_ms);
+    assert_eq!(spans[to_start + 1].end_ms, spans[content_boundary].start_ms);
+}
+
+#[test]
 fn vowel_onset_score_accepts_voiced_transition_before_steady_vowel() {
     let output = phonemicized("am");
     let vowel = output
@@ -185,6 +308,42 @@ fn vowel_onset_score_accepts_voiced_transition_before_steady_vowel() {
     let steady = phone_onset_boundary_score(vowel, &frames, 14);
 
     assert!(transition > steady);
+}
+
+#[test]
+fn voiceless_stop_onset_rejects_voiced_diphthong_tail() {
+    let output = phonemicized("to");
+    let stop = output
+        .phones
+        .iter()
+        .find(|phone| known_phone_id(phone) == Some("ipa.phone.t"))
+        .expect("t phone");
+    let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_norm = 0.20;
+        frame.voicing = 0.12;
+        frame.high_ratio = 0.12;
+        frame.sonority = 0.10;
+        frame.vowel_nucleus_likelihood = 0.08;
+        frame.spectral_flux = 0.04;
+    }
+    frames[10].energy_norm = 0.76;
+    frames[10].voicing = 0.84;
+    frames[10].high_ratio = 0.14;
+    frames[10].sonority = 0.78;
+    frames[10].vowel_nucleus_likelihood = 0.88;
+    frames[10].spectral_flux = 0.92;
+    frames[18].energy_norm = 0.70;
+    frames[18].voicing = 0.12;
+    frames[18].high_ratio = 0.76;
+    frames[18].sonority = 0.18;
+    frames[18].vowel_nucleus_likelihood = 0.10;
+    frames[18].spectral_flux = 0.92;
+
+    let diphthong_tail = phone_onset_boundary_score(stop, &frames, 10);
+    let stop_release = phone_onset_boundary_score(stop, &frames, 18);
+
+    assert!(stop_release > diphthong_tail + 1.0);
 }
 
 #[test]
