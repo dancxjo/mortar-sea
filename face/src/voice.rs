@@ -512,6 +512,7 @@ async fn run_voice(state: AppState) {
     let mut pending_speech = None::<PendingVoiceSpeech>;
     let mut active_generation_id = None::<Uuid>;
     let mut active_experience_ids = Vec::<Uuid>::new();
+    let mut answered_user_turns = 0usize;
     let mut last_experience_signature = None::<String>;
     sync_recent_experiences_from_state(
         &state,
@@ -608,7 +609,10 @@ async fn run_voice(state: AppState) {
                                 },
                             );
                         }
-                        if active_generation_id.is_none() && pending_speech.is_none() && voice_conversation_needs_response(&conversation) {
+                        if active_generation_id.is_none()
+                            && pending_speech.is_none()
+                            && voice_conversation_needs_response(&conversation, answered_user_turns)
+                        {
                             let (generation_id, experience_ids) = start_dialogue_voice_generation(
                                 &state,
                                 &generation_tx,
@@ -619,6 +623,7 @@ async fn run_voice(state: AppState) {
                             );
                             active_generation_id = Some(generation_id);
                             active_experience_ids = experience_ids;
+                            answered_user_turns = voice_user_turn_count(&conversation);
                         }
                         continue;
                     }
@@ -661,7 +666,10 @@ async fn run_voice(state: AppState) {
                             );
                         }
 
-                        if active_generation_id.is_none() && pending_speech.is_none() {
+                        if active_generation_id.is_none()
+                            && pending_speech.is_none()
+                            && voice_conversation_needs_response(&conversation, answered_user_turns)
+                        {
                             let (generation_id, experience_ids) = start_dialogue_voice_generation(
                                 &state,
                                 &generation_tx,
@@ -672,6 +680,7 @@ async fn run_voice(state: AppState) {
                             );
                             active_generation_id = Some(generation_id);
                             active_experience_ids = experience_ids;
+                            answered_user_turns = voice_user_turn_count(&conversation);
                         }
                     }
                     _ => {}
@@ -759,6 +768,7 @@ async fn run_voice(state: AppState) {
                     &mut recent_thoughts,
                     &mut conversation,
                     &mut recent_speech_feedback,
+                    &mut answered_user_turns,
                     &mut last_experience_signature,
                 ).await;
             }
@@ -996,6 +1006,7 @@ async fn handle_dialogue_voice_mouth_event(
     recent_thoughts: &mut VecDeque<VoiceObservation>,
     conversation: &mut VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &mut VecDeque<VoiceSpeechFeedback>,
+    answered_user_turns: &mut usize,
     last_experience_signature: &mut Option<String>,
 ) {
     match event {
@@ -1095,6 +1106,7 @@ async fn handle_dialogue_voice_mouth_event(
                 recent_thoughts,
                 conversation,
                 recent_speech_feedback,
+                answered_user_turns,
                 last_experience_signature,
             )
             .await;
@@ -1149,6 +1161,7 @@ async fn handle_dialogue_voice_mouth_event(
                 recent_thoughts,
                 conversation,
                 recent_speech_feedback,
+                answered_user_turns,
                 last_experience_signature,
             )
             .await;
@@ -1168,13 +1181,14 @@ async fn maybe_start_dialogue_voice_after_mouth(
     recent_thoughts: &VecDeque<VoiceObservation>,
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+    answered_user_turns: &mut usize,
     last_experience_signature: &mut Option<String>,
 ) {
     sync_recent_experiences_from_state(state, recent_experiences, last_experience_signature);
     sync_recent_finalized_asr_from_state(state, recent_finalized_asr);
     if active_generation_id.is_some()
         || pending_speech.is_some()
-        || !voice_conversation_needs_response(conversation)
+        || !voice_conversation_needs_response(conversation, *answered_user_turns)
     {
         return;
     }
@@ -1190,6 +1204,7 @@ async fn maybe_start_dialogue_voice_after_mouth(
     );
     *active_generation_id = Some(generation_id);
     *active_experience_ids = experience_ids;
+    *answered_user_turns = voice_user_turn_count(conversation);
 }
 
 fn pending_matches(
@@ -1997,10 +2012,21 @@ fn remember_voice_conversation_turn(
     push_limited(turns, turn, RECENT_VOICE_CONVERSATION_LIMIT);
 }
 
-fn voice_conversation_needs_response(turns: &VecDeque<VoiceConversationTurn>) -> bool {
+fn voice_conversation_needs_response(
+    turns: &VecDeque<VoiceConversationTurn>,
+    answered_user_turns: usize,
+) -> bool {
     turns
         .back()
         .is_some_and(|turn| turn.role == VoiceConversationRole::User)
+        && voice_user_turn_count(turns) > answered_user_turns
+}
+
+fn voice_user_turn_count(turns: &VecDeque<VoiceConversationTurn>) -> usize {
+    turns
+        .iter()
+        .filter(|turn| turn.role == VoiceConversationRole::User)
+        .count()
 }
 
 fn voice_turn_or_silence(text: String) -> String {
@@ -3386,6 +3412,52 @@ mod tests {
             .unwrap_or_default();
         assert!(user_text.contains("First user sentence."));
         assert!(user_text.contains("Second user sentence."));
+    }
+
+    #[test]
+    fn dialogue_voice_needs_response_only_for_new_user_turns() {
+        let mut conversation = VecDeque::new();
+
+        assert!(!voice_conversation_needs_response(&conversation, 0));
+
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "Can you hear me?".to_string(),
+            },
+        );
+        assert!(voice_conversation_needs_response(&conversation, 0));
+
+        let answered_user_turns = voice_user_turn_count(&conversation);
+        assert!(!voice_conversation_needs_response(
+            &conversation,
+            answered_user_turns
+        ));
+
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::Assistant,
+                text: "I can hear you.".to_string(),
+            },
+        );
+        assert!(!voice_conversation_needs_response(
+            &conversation,
+            answered_user_turns
+        ));
+
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "You seem stuck in a loop.".to_string(),
+            },
+        );
+        assert!(voice_conversation_needs_response(
+            &conversation,
+            answered_user_turns
+        ));
     }
 
     #[test]

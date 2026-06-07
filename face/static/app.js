@@ -64,6 +64,8 @@ window.faceApp = function faceApp() {
     voiceAudio: null,
     voiceAudioUrl: null,
     voiceCurrentDraft: null,
+    voiceLastPlaybackUtteranceId: null,
+    voiceSpeechLifecycleSeen: {},
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
     voicePlaybackResumeAfterGesture: null,
@@ -257,13 +259,15 @@ window.faceApp = function faceApp() {
           return;
         }
         if (message.type === 'voice_speech_started') {
-          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          if (!this.voiceSpeechEventMatches(message)) return;
+          if (this.rememberVoiceSpeechLifecycleEvent(message.type, message.utterance_id)) return;
           this.voiceStatus = 'speaking';
           this.voicePlaybackEvents.started += 1;
           return;
         }
         if (message.type === 'voice_speech_finished') {
-          if (message.generation_id !== this.activeVoiceGenerationId) return;
+          if (!this.voiceSpeechEventMatches(message)) return;
+          if (this.rememberVoiceSpeechLifecycleEvent(message.type, message.utterance_id)) return;
           this.voiceStatus = 'thinking';
           this.voicePlaybackEvents.finished += 1;
           this.rememberConversationTurn({
@@ -276,7 +280,8 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'voice_speech_interrupted') {
           const matchesCurrentDraft = this.voiceDraftMatches(this.voiceCurrentDraft, message);
-          if (message.generation_id !== this.activeVoiceGenerationId && !matchesCurrentDraft) return;
+          if (!this.voiceSpeechEventMatches(message) && !matchesCurrentDraft) return;
+          if (this.rememberVoiceSpeechLifecycleEvent(message.type, message.utterance_id)) return;
           this.activeVoiceGenerationId = message.generation_id;
           this.voiceStatus = 'thinking';
           this.voicePlaybackEvents.interrupted += 1;
@@ -533,6 +538,7 @@ window.faceApp = function faceApp() {
         this.clearVoicePlaybackGestureResume();
         this.voiceUtteranceStartedAt = performance.now();
         this.voiceMouthOpen = true;
+        this.voiceLastPlaybackUtteranceId = draft.utterance_id;
         this.voiceStatus = 'speaking';
         const reportedSeconds = durationMs ? (durationMs / 1000).toFixed(2) : '?';
         this.voicePlaybackDetail = `Playing ${reportedSeconds}s through HTML audio`;
@@ -580,6 +586,27 @@ window.faceApp = function faceApp() {
         && message
         && draft.utterance_id === message.utterance_id
         && draft.generation_id === message.generation_id;
+    },
+
+    voiceSpeechEventMatches(message) {
+      if (!message) return false;
+      if (message.generation_id === this.activeVoiceGenerationId) return true;
+      if (this.voiceDraftMatches(this.voiceCurrentDraft, message)) return true;
+      return Boolean(message.utterance_id && message.utterance_id === this.voiceLastPlaybackUtteranceId);
+    },
+
+    rememberVoiceSpeechLifecycleEvent(type, utteranceId) {
+      if (!utteranceId) return false;
+      const key = `${type}:${utteranceId}`;
+      if (this.voiceSpeechLifecycleSeen[key]) return true;
+      this.voiceSpeechLifecycleSeen[key] = true;
+      const keys = Object.keys(this.voiceSpeechLifecycleSeen);
+      if (keys.length > 80) {
+        keys.slice(0, keys.length - 80).forEach((staleKey) => {
+          delete this.voiceSpeechLifecycleSeen[staleKey];
+        });
+      }
+      return false;
     },
 
     base64ToArrayBuffer(data) {
