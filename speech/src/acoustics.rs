@@ -66,15 +66,68 @@ pub enum CueTarget {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AcousticProfile {
+    #[serde(default)]
     pub cues: HashMap<AcousticCueId, AcousticCueDef>,
+    #[serde(default)]
     pub phone_models: HashMap<PhoneId, AcousticTargetModel>,
+    #[serde(default)]
     pub phoneme_models: HashMap<PhonemeId, AcousticTargetModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AcousticTargetModel {
+    #[serde(default)]
     pub expected_features: FeatureBundle,
+    #[serde(default)]
     pub weighted_cues: Vec<WeightedCue>,
+    #[serde(default)]
+    pub landmarks: Vec<AcousticLandmark>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcousticLandmark {
+    pub id: String,
+    pub kind: AcousticLandmarkKind,
+    pub anchor: LandmarkAnchor,
+    pub window: RelativeTimeWindow,
+    #[serde(default)]
+    pub expected_features: FeatureBundle,
+    #[serde(default)]
+    pub weighted_cues: Vec<WeightedCue>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcousticLandmarkKind {
+    Closure,
+    ReleaseBurst,
+    Aspiration,
+    VoicingOnset,
+    VowelTarget,
+    FormantTransition,
+    PeriodicVoicing,
+    AperiodicNoise,
+    Boundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandmarkAnchor {
+    SegmentStart,
+    SegmentCenter,
+    SegmentEnd,
+    Release,
+    VoicingOnset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RelativeTimeWindow {
+    pub start_s: f32,
+    pub end_s: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

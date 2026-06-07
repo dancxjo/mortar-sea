@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 
+use crate::acoustics::{
+    AcousticCueDef, AcousticLandmark, AcousticLandmarkKind, AcousticProfile, AcousticTargetModel,
+    CueTarget, LandmarkAnchor, RelativeTimeWindow, WeightedCue,
+};
 use crate::data::arpabet::{self, ARPABET};
 use crate::feature::{FeatureBundle, FeatureSystem, FeatureValue};
-use crate::ids::{FeatureId, LanguageId, PhoneId, PhonemeId, VariantId};
+use crate::ids::{AcousticCueId, FeatureId, LanguageId, PhoneId, PhonemeId, VariantId};
 use crate::orthography::Orthography;
 use crate::phonetics::PhoneInventory;
 use crate::phonology::PhonemeInventory;
@@ -213,7 +217,7 @@ pub fn variant(id: &str) -> LinguisticVariant {
             ..Default::default()
         }),
         morphology: None,
-        acoustic_profile: None,
+        acoustic_profile: Some(acoustic_profile(row.id)),
         prosody_profile: None,
         status: VariantStatus::Attested,
         implementation_status: match row.implementation_status {
@@ -431,6 +435,366 @@ fn phone_inventory() -> PhoneInventory {
         phones.insert(phone.id.clone(), phone);
     }
     PhoneInventory { phones }
+}
+
+fn acoustic_profile(variant_id: &str) -> AcousticProfile {
+    let mut cues = HashMap::new();
+    for cue in acoustic_cues() {
+        cues.insert(cue.id.clone(), cue);
+    }
+
+    let high_front = high_front_vowel_model();
+    let high_back_rounded = high_back_rounded_vowel_model();
+    let voiceless_bilabial_stop = voiceless_bilabial_stop_model();
+    let voiced_bilabial_stop = voiced_bilabial_stop_model();
+
+    let phone_models = HashMap::from([
+        (arpabet::phone_id_for_ipa("iː"), high_front.clone()),
+        (arpabet::phone_id_for_ipa("uː"), high_back_rounded.clone()),
+        (P, voiceless_bilabial_stop.clone()),
+        (B, voiced_bilabial_stop.clone()),
+    ]);
+
+    let phoneme_models = HashMap::from([
+        (arpabet::phoneme_id(variant_id, "IY"), high_front),
+        (arpabet::phoneme_id(variant_id, "UW"), high_back_rounded),
+        (
+            arpabet::phoneme_id(variant_id, "P"),
+            voiceless_bilabial_stop,
+        ),
+        (arpabet::phoneme_id(variant_id, "B"), voiced_bilabial_stop),
+    ]);
+
+    AcousticProfile {
+        cues,
+        phone_models,
+        phoneme_models,
+    }
+}
+
+fn acoustic_cues() -> Vec<AcousticCueDef> {
+    vec![
+        cue(
+            "acoustic.cue.f1_region",
+            "first formant region",
+            "acoustic.f1_region",
+            vec![CueTarget::Feature(FeatureId(
+                "phonology.vowel_height".into(),
+            ))],
+            Some("Low F1 is a common correlate of high vowels.".into()),
+        ),
+        cue(
+            "acoustic.cue.f2_region",
+            "second formant region",
+            "acoustic.f2_region",
+            vec![CueTarget::Feature(FeatureId(
+                "phonology.vowel_backness".into(),
+            ))],
+            Some("High F2 tends to mark front vowels; low F2 tends to mark back/rounded vowels.".into()),
+        ),
+        cue(
+            "acoustic.cue.rounding_resonance",
+            "rounding resonance",
+            "acoustic.rounding_resonance",
+            vec![CueTarget::Feature(FeatureId("phonology.roundedness".into()))],
+            Some("Lip rounding usually lowers upper formant energy and reinforces the [u] vs [i] split.".into()),
+        ),
+        cue(
+            "acoustic.cue.stop_closure",
+            "stop closure",
+            "acoustic.stop_closure",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("A low-energy closure interval is a core stop landmark.".into()),
+        ),
+        cue(
+            "acoustic.cue.release_burst",
+            "release burst",
+            "acoustic.release_burst",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Transient burst energy near release helps distinguish stops from continuants.".into()),
+        ),
+        cue(
+            "acoustic.cue.voice_onset_time",
+            "voice onset time",
+            "acoustic.vot_class",
+            vec![CueTarget::Phone(P), CueTarget::Phone(B)],
+            Some("VOT separates many English voiced and voiceless stops, but varies with context.".into()),
+        ),
+        cue(
+            "acoustic.cue.closure_voicing",
+            "closure voicing",
+            "acoustic.voicing_during_closure",
+            vec![CueTarget::Phone(B), CueTarget::Phone(P)],
+            Some("Periodic low-frequency energy during closure is evidence for a voiced stop.".into()),
+        ),
+        cue(
+            "acoustic.cue.aspiration_noise",
+            "aspiration noise",
+            "acoustic.aspiration_present",
+            vec![CueTarget::Phone(P)],
+            Some("Post-release aperiodic breath noise is expected for many English voiceless stops in stressed onsets, but not everywhere.".into()),
+        ),
+    ]
+}
+
+fn high_front_vowel_model() -> AcousticTargetModel {
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "f1_region",
+                Spec::Known(FeatureValue::Category("low".into())),
+            ),
+            (
+                "f2_region",
+                Spec::Known(FeatureValue::Category("high".into())),
+            ),
+            (
+                "rounding_resonance",
+                Spec::Known(FeatureValue::Category("absent".into())),
+            ),
+            ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.f1_region", 0.8),
+            ("acoustic.cue.f2_region", 1.0),
+            ("acoustic.cue.rounding_resonance", 0.4),
+        ]),
+        landmarks: vec![vowel_target_landmark()],
+        notes: Some(
+            "Telltale [i]-like evidence: low F1, high F2, and no rounding resonance.".into(),
+        ),
+    }
+}
+
+fn high_back_rounded_vowel_model() -> AcousticTargetModel {
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "f1_region",
+                Spec::Known(FeatureValue::Category("low".into())),
+            ),
+            (
+                "f2_region",
+                Spec::Known(FeatureValue::Category("low".into())),
+            ),
+            (
+                "rounding_resonance",
+                Spec::Known(FeatureValue::Category("present".into())),
+            ),
+            ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.f1_region", 0.8),
+            ("acoustic.cue.f2_region", 1.0),
+            ("acoustic.cue.rounding_resonance", 0.7),
+        ]),
+        landmarks: vec![vowel_target_landmark()],
+        notes: Some(
+            "Telltale [u]-like evidence: low F1, low F2, and rounded-lip spectral effects.".into(),
+        ),
+    }
+}
+
+fn voiceless_bilabial_stop_model() -> AcousticTargetModel {
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "stop_closure",
+                Spec::Known(FeatureValue::Bool(true)),
+            ),
+            (
+                "release_burst",
+                Spec::Known(FeatureValue::Bool(true)),
+            ),
+            (
+                "voicing_during_closure",
+                Spec::Known(FeatureValue::Bool(false)),
+            ),
+            (
+                "vot_class",
+                Spec::Variable(vec![
+                    FeatureValue::Category("short_lag".into()),
+                    FeatureValue::Category("long_lag".into()),
+                ]),
+            ),
+            (
+                "aspiration_present",
+                Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)]),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.stop_closure", 1.0),
+            ("acoustic.cue.release_burst", 0.9),
+            ("acoustic.cue.voice_onset_time", 0.9),
+            ("acoustic.cue.aspiration_noise", 0.6),
+            ("acoustic.cue.closure_voicing", 0.5),
+        ]),
+        landmarks: vec![
+            closure_landmark(false),
+            release_burst_landmark(),
+            aspiration_landmark(),
+        ],
+        notes: Some("English [p] is a voiceless bilabial stop; aspiration is context-sensitive rather than guaranteed.".into()),
+    }
+}
+
+fn voiced_bilabial_stop_model() -> AcousticTargetModel {
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "stop_closure",
+                Spec::Known(FeatureValue::Bool(true)),
+            ),
+            (
+                "release_burst",
+                Spec::Known(FeatureValue::Bool(true)),
+            ),
+            (
+                "voicing_during_closure",
+                Spec::Variable(vec![FeatureValue::Bool(true), FeatureValue::Bool(false)]),
+            ),
+            (
+                "vot_class",
+                Spec::Variable(vec![
+                    FeatureValue::Category("prevoiced".into()),
+                    FeatureValue::Category("short_lag".into()),
+                ]),
+            ),
+            (
+                "aspiration_present",
+                Spec::Known(FeatureValue::Bool(false)),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.stop_closure", 1.0),
+            ("acoustic.cue.release_burst", 0.8),
+            ("acoustic.cue.closure_voicing", 0.9),
+            ("acoustic.cue.voice_onset_time", 0.8),
+            ("acoustic.cue.aspiration_noise", 0.3),
+        ]),
+        landmarks: vec![closure_landmark(true), release_burst_landmark()],
+        notes: Some("English [b] is a voiced bilabial stop; closure voicing can be weak or absent in some positions, so VOT stays variable.".into()),
+    }
+}
+
+fn vowel_target_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "steady_vowel_target".into(),
+        kind: AcousticLandmarkKind::VowelTarget,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.04,
+            end_s: 0.04,
+        },
+        expected_features: FeatureBundle::default(),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.f1_region", 0.8),
+            ("acoustic.cue.f2_region", 1.0),
+        ]),
+        notes: Some(
+            "Sample formants near the steady middle of the vowel when the segment is long enough."
+                .into(),
+        ),
+    }
+}
+
+fn closure_landmark(voiced: bool) -> AcousticLandmark {
+    AcousticLandmark {
+        id: "stop_closure".into(),
+        kind: AcousticLandmarkKind::Closure,
+        anchor: LandmarkAnchor::Release,
+        window: RelativeTimeWindow {
+            start_s: -0.08,
+            end_s: 0.0,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "voicing_during_closure",
+            Spec::Known(FeatureValue::Bool(voiced)),
+        )]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.stop_closure", 1.0),
+            ("acoustic.cue.closure_voicing", 0.8),
+        ]),
+        notes: None,
+    }
+}
+
+fn release_burst_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "release_burst".into(),
+        kind: AcousticLandmarkKind::ReleaseBurst,
+        anchor: LandmarkAnchor::Release,
+        window: RelativeTimeWindow {
+            start_s: -0.005,
+            end_s: 0.02,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "release_burst",
+            Spec::Known(FeatureValue::Bool(true)),
+        )]),
+        weighted_cues: weighted_cues(&[("acoustic.cue.release_burst", 1.0)]),
+        notes: Some("Burst timing is a useful alignment point for oral stops.".into()),
+    }
+}
+
+fn aspiration_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "post_release_aspiration".into(),
+        kind: AcousticLandmarkKind::Aspiration,
+        anchor: LandmarkAnchor::Release,
+        window: RelativeTimeWindow {
+            start_s: 0.01,
+            end_s: 0.09,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "aspiration_present",
+            Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)]),
+        )]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.aspiration_noise", 1.0),
+            ("acoustic.cue.voice_onset_time", 0.7),
+        ]),
+        notes: Some(
+            "Search after release; English aspiration is conditioned by stress and position."
+                .into(),
+        ),
+    }
+}
+
+fn acoustic_feature_bundle(values: &[(&str, Spec<FeatureValue>)]) -> FeatureBundle {
+    let mut bundle = FeatureBundle::default();
+    for (name, value) in values {
+        bundle
+            .values
+            .insert(FeatureId(format!("acoustic.{name}")), value.clone());
+    }
+    bundle
+}
+
+fn weighted_cues(values: &[(&str, f32)]) -> Vec<WeightedCue> {
+    values
+        .iter()
+        .map(|(cue, weight)| WeightedCue {
+            cue: AcousticCueId((*cue).into()),
+            weight: *weight,
+        })
+        .collect()
+}
+
+fn cue(
+    id: &str,
+    name: &str,
+    feature: &str,
+    targets: Vec<CueTarget>,
+    notes: Option<String>,
+) -> AcousticCueDef {
+    AcousticCueDef {
+        id: AcousticCueId(id.into()),
+        name: name.into(),
+        feature: FeatureId(feature.into()),
+        targets,
+        notes,
+    }
 }
 
 fn allophone_rules(variant_id: &str) -> Vec<AllophoneRule> {
@@ -712,6 +1076,64 @@ mod tests {
     }
 
     #[test]
+    fn acoustic_profile_distinguishes_high_front_and_back_rounded_vowels() {
+        let ga = variant("en-US-GA");
+        let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
+        let high_front = profile
+            .phone_models
+            .get(&arpabet::phone_id_for_ipa("iː"))
+            .expect("IY phone fingerprint");
+        let high_back = profile
+            .phone_models
+            .get(&arpabet::phone_id_for_ipa("uː"))
+            .expect("UW phone fingerprint");
+
+        assert_acoustic_category(high_front, "f2_region", "high");
+        assert_acoustic_category(high_front, "rounding_resonance", "absent");
+        assert_acoustic_category(high_back, "f2_region", "low");
+        assert_acoustic_category(high_back, "rounding_resonance", "present");
+        assert!(
+            high_front
+                .landmarks
+                .iter()
+                .any(|landmark| landmark.kind == AcousticLandmarkKind::VowelTarget)
+        );
+    }
+
+    #[test]
+    fn acoustic_profile_marks_bilabial_stop_cues_without_overclaiming_aspiration() {
+        let ga = variant("en-US-GA");
+        let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
+        let p = profile.phone_models.get(&P).expect("p phone fingerprint");
+        let b = profile.phone_models.get(&B).expect("b phone fingerprint");
+
+        assert_acoustic_bool(p, "stop_closure", true);
+        assert_acoustic_bool(p, "release_burst", true);
+        assert_acoustic_bool(b, "stop_closure", true);
+        assert!(
+            p.landmarks
+                .iter()
+                .any(|landmark| landmark.kind == AcousticLandmarkKind::Aspiration)
+        );
+        assert_eq!(
+            acoustic_value(p, "aspiration_present"),
+            Some(&Spec::Variable(vec![
+                FeatureValue::Bool(false),
+                FeatureValue::Bool(true)
+            ]))
+        );
+        assert_eq!(
+            acoustic_value(b, "aspiration_present"),
+            Some(&Spec::Known(FeatureValue::Bool(false)))
+        );
+        assert!(
+            profile
+                .phoneme_models
+                .contains_key(&arpabet::phoneme_id("en-US-GA", "P"))
+        );
+    }
+
+    #[test]
     fn rules_are_variant_data() {
         let ga = variant("en-US-GA");
         let flapping = ga
@@ -751,5 +1173,29 @@ mod tests {
             weak_the.following,
             WeakFormFollowingContext::BeforeConsonantish
         );
+    }
+
+    fn assert_acoustic_category(model: &AcousticTargetModel, name: &str, expected: &str) {
+        assert_eq!(
+            acoustic_value(model, name),
+            Some(&Spec::Known(FeatureValue::Category(expected.into())))
+        );
+    }
+
+    fn assert_acoustic_bool(model: &AcousticTargetModel, name: &str, expected: bool) {
+        assert_eq!(
+            acoustic_value(model, name),
+            Some(&Spec::Known(FeatureValue::Bool(expected)))
+        );
+    }
+
+    fn acoustic_value<'a>(
+        model: &'a AcousticTargetModel,
+        name: &str,
+    ) -> Option<&'a Spec<FeatureValue>> {
+        model
+            .expected_features
+            .values
+            .get(&FeatureId(format!("acoustic.{name}")))
     }
 }
