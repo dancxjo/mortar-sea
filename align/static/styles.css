@@ -169,6 +169,31 @@ h2 {
   width: 118px;
 }
 
+.voice-field {
+  width: 250px;
+}
+
+.inline-select {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.inline-select button {
+  min-height: 34px;
+  padding-inline: 9px;
+  background: #14191c;
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+#voice-detail {
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 label {
   color: var(--muted);
   font-size: 12px;
@@ -352,6 +377,7 @@ pre {
 
   .text-field,
   .compact-field,
+  .voice-field,
   .button-stack {
     width: 100%;
     min-width: 0;

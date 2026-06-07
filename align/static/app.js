@@ -10,6 +10,7 @@ const state = {
   currentAudioUrl: '',
   currentPhonemicization: null,
   currentAlignment: null,
+  styletts2VoiceDir: 'voices/styletts2',
   audioBuffer: null,
   duration: 1,
   zoom: 1,
@@ -29,6 +30,9 @@ window.addEventListener('DOMContentLoaded', () => {
     'variant',
     'text',
     'backend',
+    'styletts2-voice',
+    'refresh-voices',
+    'voice-detail',
     'phonemicize',
     'synthesize',
     'align',
@@ -60,6 +64,8 @@ window.addEventListener('DOMContentLoaded', () => {
   elements.phonemicize.addEventListener('click', phonemicize);
   elements.synthesize.addEventListener('click', synthesize);
   elements.align.addEventListener('click', alignAudio);
+  elements.backend.addEventListener('change', syncVoiceSelector);
+  elements['refresh-voices'].addEventListener('click', loadStyleTts2Voices);
   elements['wav-file'].addEventListener('change', uploadSelectedFile);
   elements.record.addEventListener('click', startRecording);
   elements['stop-recording'].addEventListener('click', stopRecording);
@@ -78,6 +84,8 @@ window.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('resize', drawAll);
 
   fitTimeline();
+  loadStyleTts2Voices();
+  syncVoiceSelector();
   drawAll();
 });
 
@@ -97,12 +105,50 @@ async function synthesize() {
     text: elements.text.value,
     variant: elements.variant.value || 'en-US',
     backend: elements.backend.value,
+    styletts2_voice: elements['styletts2-voice'].value || null,
   }, async (payload) => {
     renderPhonemicization(payload.phonemicization);
     await setAudio(payload.audio_url, `${payload.duration_ms} ms, ${payload.samples} samples`);
     setStatus(`Synthesized with ${elements.backend.value}`);
     await alignAudio();
   });
+}
+
+async function loadStyleTts2Voices() {
+  try {
+    const selected = elements['styletts2-voice'].value;
+    const response = await fetch('/api/styletts2/voices');
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || response.statusText);
+    state.styletts2VoiceDir = payload.directory || 'voices/styletts2';
+    elements['styletts2-voice'].replaceChildren(
+      optionElement('', 'default reference'),
+      ...(payload.voices || []).map((voice) => optionElement(voice.id, voice.label)),
+    );
+    if ([...elements['styletts2-voice'].options].some((option) => option.value === selected)) {
+      elements['styletts2-voice'].value = selected;
+    }
+    elements['voice-detail'].textContent = (payload.voices || []).length
+      ? `${payload.voices.length} WAV voice${payload.voices.length === 1 ? '' : 's'} in ${state.styletts2VoiceDir}`
+      : `Drop WAVs in ${state.styletts2VoiceDir}`;
+  } catch (error) {
+    elements['voice-detail'].textContent = error.message || String(error);
+  } finally {
+    syncVoiceSelector();
+  }
+}
+
+function optionElement(value, label) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = label;
+  return option;
+}
+
+function syncVoiceSelector() {
+  const enabled = elements.backend.value === 'styletts2';
+  elements['styletts2-voice'].disabled = !enabled;
+  elements['refresh-voices'].disabled = false;
 }
 
 async function alignAudio() {

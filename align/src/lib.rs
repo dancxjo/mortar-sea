@@ -33,6 +33,7 @@ const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
 #[derive(Clone)]
 struct AppState {
     audio_dir: PathBuf,
+    styletts2_voice_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +50,8 @@ struct SynthesizeRequestBody {
     variant: String,
     #[serde(default = "default_backend")]
     backend: AlignBackend,
+    #[serde(default)]
+    styletts2_voice: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +62,7 @@ struct AlignRequestBody {
     audio_url: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AlignBackend {
     Mock,
@@ -98,6 +101,18 @@ struct SynthesizeResponse {
 struct UploadResponse {
     audio_url: String,
     bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct StyleTts2VoicesResponse {
+    directory: String,
+    voices: Vec<StyleTts2Voice>,
+}
+
+#[derive(Debug, Serialize)]
+struct StyleTts2Voice {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +219,8 @@ impl IntoResponse for AppError {
         let message = self.0.to_string();
         let status = if message.contains("empty")
             || message.contains("unsupported")
+            || message.contains("invalid")
+            || message.contains("not found")
             || message.contains("WAV")
             || message.contains("audio")
             || message.contains("file field")
@@ -220,9 +237,13 @@ impl IntoResponse for AppError {
 pub async fn run() -> anyhow::Result<()> {
     let addr = align_addr()?;
     let audio_dir = audio_dir();
+    let styletts2_voice_dir = styletts2_voice_dir();
     fs::create_dir_all(&audio_dir)
         .await
         .with_context(|| format!("failed to create {}", audio_dir.display()))?;
+    fs::create_dir_all(&styletts2_voice_dir)
+        .await
+        .with_context(|| format!("failed to create {}", styletts2_voice_dir.display()))?;
 
     let listener = TcpListener::bind(addr)
         .await
@@ -230,9 +251,11 @@ pub async fn run() -> anyhow::Result<()> {
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     let state = AppState {
         audio_dir: audio_dir.clone(),
+        styletts2_voice_dir: styletts2_voice_dir.clone(),
     };
     let app = Router::new()
         .route("/", get(index))
+        .route("/api/styletts2/voices", get(styletts2_voices))
         .route("/api/phonemicize", post(phonemicize))
         .route("/api/synthesize", post(synthesize))
         .route("/api/audio/upload", post(upload_audio))
@@ -264,6 +287,13 @@ fn audio_dir() -> PathBuf {
         .join("audio")
 }
 
+fn styletts2_voice_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("voices")
+        .join("styletts2")
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
@@ -281,11 +311,19 @@ async fn synthesize(
     let phonemicized = phonemicize_text(request.text, request.variant)?;
     let filename = format!("synth-{}-{}.wav", request.backend.as_str(), Uuid::new_v4());
     let output_path = state.audio_dir.join(&filename);
+    let options = SpeechSynthesisOptions {
+        voice_wav: selected_styletts2_voice_path(
+            request.backend,
+            &state.styletts2_voice_dir,
+            request.styletts2_voice.as_deref(),
+        )?,
+        ..SpeechSynthesisOptions::default()
+    };
     let artifact = synthesize_phonemicized_to_wav(
         &phonemicized.ir,
         request.backend.into_speak_backend(),
         &output_path,
-        &SpeechSynthesisOptions::default(),
+        &options,
     )?;
 
     Ok(Json(SynthesizeResponse {
@@ -295,6 +333,71 @@ async fn synthesize(
         duration_ms: artifact.duration_ms(),
         phonemicization: phonemicized,
     }))
+}
+
+async fn styletts2_voices(
+    State(state): State<AppState>,
+) -> Result<Json<StyleTts2VoicesResponse>, AppError> {
+    Ok(Json(StyleTts2VoicesResponse {
+        directory: state.styletts2_voice_dir.display().to_string(),
+        voices: list_styletts2_voices(&state.styletts2_voice_dir).await?,
+    }))
+}
+
+async fn list_styletts2_voices(dir: &Path) -> Result<Vec<StyleTts2Voice>, AppError> {
+    let mut entries = fs::read_dir(dir)
+        .await
+        .with_context(|| format!("failed to read {}", dir.display()))?;
+    let mut voices = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !is_wav_filename(&name) {
+            continue;
+        }
+        let label = Path::new(&name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(&name)
+            .replace(['_', '-'], " ");
+        voices.push(StyleTts2Voice { id: name, label });
+    }
+    voices.sort_by(|left, right| left.label.cmp(&right.label).then(left.id.cmp(&right.id)));
+    Ok(voices)
+}
+
+fn selected_styletts2_voice_path(
+    backend: AlignBackend,
+    voice_dir: &Path,
+    voice_id: Option<&str>,
+) -> Result<Option<PathBuf>, AppError> {
+    if backend != AlignBackend::Styletts2 {
+        return Ok(None);
+    }
+    let Some(voice_id) = voice_id
+        .map(str::trim)
+        .filter(|voice_id| !voice_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    if voice_id.contains('/') || voice_id.contains('\\') || voice_id.contains("..") {
+        return Err(AppError::bad_request("invalid StyleTTS2 voice filename"));
+    }
+    if !is_wav_filename(voice_id) {
+        return Err(AppError::bad_request("StyleTTS2 voice must be a WAV file"));
+    }
+    let path = voice_dir.join(voice_id);
+    if !path.is_file() {
+        return Err(AppError::bad_request(format!(
+            "StyleTTS2 voice `{voice_id}` was not found"
+        )));
+    }
+    Ok(Some(path))
 }
 
 async fn upload_audio(
@@ -310,7 +413,7 @@ async fn upload_audio(
         let bytes = field.bytes().await?;
         validate_wav(&bytes)?;
         let filename = original_name
-            .filter(|name| name.ends_with(".wav"))
+            .filter(|name| is_wav_filename(name))
             .map(|name| format!("upload-{}-{name}", Uuid::new_v4()))
             .unwrap_or_else(|| format!("upload-{}.wav", Uuid::new_v4()));
         let output_path = state.audio_dir.join(&filename);
@@ -974,6 +1077,10 @@ fn safe_filename(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn is_wav_filename(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".wav")
 }
 
 impl AlignBackend {

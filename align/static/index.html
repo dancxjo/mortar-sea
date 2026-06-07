@@ -39,6 +39,16 @@
             <option value="styletts2">styletts2</option>
           </select>
         </div>
+        <div class="field voice-field">
+          <label for="styletts2-voice">StyleTTS2 voice</label>
+          <div class="inline-select">
+            <select id="styletts2-voice" aria-label="StyleTTS2 voice">
+              <option value="">default reference</option>
+            </select>
+            <button type="button" id="refresh-voices" title="Refresh voices">Refresh</button>
+          </div>
+          <span id="voice-detail">Drop WAVs in voices/styletts2</span>
+        </div>
         <div class="button-stack">
           <button type="button" id="phonemicize">Phonemicize</button>
           <button type="button" id="synthesize">Synthesize</button>
