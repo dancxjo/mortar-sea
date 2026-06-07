@@ -152,13 +152,17 @@ enum ClusterScope {
 
 pub fn variety(id: &str) -> LinguisticVariety {
     let row = catalog::get(id);
+    let phonemes = phoneme_inventory(row.id);
+    let phones = phone_inventory();
+    let acoustic_profile = acoustic_profile(&phonemes, &phones);
+
     LinguisticVariety {
         id: VarietyId(row.id.into()),
         language: LanguageId("en".into()),
         name: row.name.into(),
         feature_system: FeatureSystem::default(),
-        phonemes: phoneme_inventory(row.id),
-        phones: phone_inventory(),
+        phonemes,
+        phones,
         allophone_rules: allophone_rules(row.id),
         epenthesis_rules: epenthesis_rules(),
         weak_forms: weak_forms(row.id),
@@ -169,7 +173,7 @@ pub fn variety(id: &str) -> LinguisticVariety {
             ..Default::default()
         }),
         morphology: None,
-        acoustic_profile: Some(acoustic_profile(row.id)),
+        acoustic_profile: Some(acoustic_profile),
         prosody_profile: None,
         status: VarietyStatus::Attested,
         implementation_status: match row.implementation_status {
@@ -352,7 +356,8 @@ fn phoneme_inventory(variety_id: &str) -> PhonemeInventory {
     let mut phonemes = ARPABET
         .iter()
         .map(|entry| {
-            let phoneme = arpabet::phoneme_for_entry(variety_id, entry);
+            let mut phoneme = arpabet::phoneme_for_entry(variety_id, entry);
+            enrich_english_inventory_features(&mut phoneme.features, entry);
             (phoneme.id.clone(), phoneme)
         })
         .collect::<HashMap<_, _>>();
@@ -383,13 +388,17 @@ fn phoneme_inventory(variety_id: &str) -> PhonemeInventory {
 fn phone_inventory() -> PhoneInventory {
     let mut phones = HashMap::new();
     for entry in ARPABET {
-        let phone = arpabet::phone_for_entry(entry);
+        let mut phone = arpabet::phone_for_entry(entry);
+        enrich_english_inventory_features(&mut phone.features, entry);
         phones.insert(phone.id.clone(), phone);
     }
     for (phone_ref, base, ipa) in [(SCHWA, "AH", "ə"), (R_COLORED_SCHWA, "ER", "ɚ")] {
         let mut features = arpabet::entry(base)
             .map(arpabet::feature_bundle)
             .unwrap_or_default();
+        if let Some(entry) = arpabet::entry(base) {
+            enrich_english_inventory_features(&mut features, entry);
+        }
         features.values.insert(
             FeatureId("phonology.reduced_vowel".into()),
             Spec::Known(FeatureValue::Bool(true)),
@@ -405,10 +414,17 @@ fn phone_inventory() -> PhoneInventory {
     }
     for phone_ref in [TAP, SYLLABLE_BREAK] {
         let ipa = phone_symbol(&phone_ref).into();
+        let features = if phone_ref == TAP {
+            tap_feature_bundle()
+        } else if phone_ref == SYLLABLE_BREAK {
+            syllable_break_feature_bundle()
+        } else {
+            Default::default()
+        };
         let phone = crate::phonetics::Phone {
             id: phone_ref,
             ipa,
-            features: Default::default(),
+            features,
             aliases: Vec::new(),
             status: crate::segment::SegmentStatus::Allophonic,
         };
@@ -417,7 +433,65 @@ fn phone_inventory() -> PhoneInventory {
     PhoneInventory { phones }
 }
 
-fn acoustic_profile(variety_id: &str) -> AcousticProfile {
+fn enrich_english_inventory_features(features: &mut FeatureBundle, entry: &arpabet::ArpabetEntry) {
+    if entry.syllabic {
+        let trajectory = formant_trajectory_for_alias(entry.symbol);
+        put_phonology_category(features, "formant_trajectory", trajectory);
+        put_phonology_bool(features, "diphthong", trajectory != "stable");
+        put_phonology_bool(features, "rhoticity", entry.vowel_height == Some("rhotic"));
+    } else {
+        if matches!(entry.manner, Some("fricative" | "affricate")) {
+            put_phonology_category(
+                features,
+                "frication_spectral_shape",
+                frication_spectral_shape_for_entry(entry),
+            );
+        }
+        if matches!(entry.manner, Some("liquid" | "glide")) {
+            put_phonology_category(
+                features,
+                "approximant_trajectory",
+                approximant_trajectory_for_entry(entry),
+            );
+            put_phonology_bool(features, "rhoticity", entry.symbol == "R");
+            put_phonology_bool(features, "lateral_resonance", entry.symbol == "L");
+        }
+    }
+}
+
+fn tap_feature_bundle() -> FeatureBundle {
+    let mut features = FeatureBundle::default();
+    put_phonology_category(&mut features, "major", "consonant");
+    put_phonology_bool(&mut features, "syllabic", false);
+    put_phonology_category(&mut features, "place", "alveolar");
+    put_phonology_category(&mut features, "manner", "tap");
+    put_phonology_category(&mut features, "voicing", "voiced");
+    features
+}
+
+fn syllable_break_feature_bundle() -> FeatureBundle {
+    let mut features = FeatureBundle::default();
+    put_phonology_category(&mut features, "major", "boundary");
+    put_phonology_category(&mut features, "boundary_kind", "syllable");
+    put_phonology_bool(&mut features, "syllabic", false);
+    features
+}
+
+fn put_phonology_category(features: &mut FeatureBundle, name: &str, value: &str) {
+    features.values.insert(
+        FeatureId(format!("phonology.{name}")),
+        Spec::Known(FeatureValue::Category(value.into())),
+    );
+}
+
+fn put_phonology_bool(features: &mut FeatureBundle, name: &str, value: bool) {
+    features.values.insert(
+        FeatureId(format!("phonology.{name}")),
+        Spec::Known(FeatureValue::Bool(value)),
+    );
+}
+
+fn acoustic_profile(phonemes: &PhonemeInventory, phones: &PhoneInventory) -> AcousticProfile {
     let mut cues = HashMap::new();
     for cue in acoustic_cues() {
         cues.insert(cue.id.clone(), cue);
@@ -425,27 +499,40 @@ fn acoustic_profile(variety_id: &str) -> AcousticProfile {
 
     let mut phone_models = HashMap::new();
     let mut phoneme_models = HashMap::new();
-    for entry in ARPABET.iter().filter(|entry| entry.syllabic) {
-        let model = vowel_model(entry);
-        phone_models.insert(arpabet::phone_id_for_ipa(entry.phone_symbol), model.clone());
-        phoneme_models.insert(arpabet::phoneme_id(variety_id, entry.symbol), model);
+    for phoneme in phonemes.phonemes.values() {
+        if let Some(model) = acoustic_model_from_features(&phoneme.features, &phoneme.notation) {
+            phoneme_models.insert(phoneme.id.clone(), model);
+        }
+        for phone_id in phoneme
+            .default_phone
+            .iter()
+            .chain(phoneme.possible_phones.iter())
+        {
+            if phone_models.contains_key(phone_id) {
+                continue;
+            }
+            let model = phones
+                .phones
+                .get(phone_id)
+                .and_then(|phone| {
+                    acoustic_model_from_features(&phone.features, &format!("[{}]", phone.ipa))
+                })
+                .or_else(|| acoustic_model_from_features(&phoneme.features, &phoneme.notation));
+            if let Some(model) = model {
+                phone_models.insert(phone_id.clone(), model);
+            }
+        }
     }
-    phone_models.insert(SCHWA, reduced_central_vowel_model("schwa", false));
-    phone_models.insert(
-        R_COLORED_SCHWA,
-        reduced_central_vowel_model("r-colored schwa", true),
-    );
-
-    let voiceless_bilabial_stop = voiceless_bilabial_stop_model();
-    let voiced_bilabial_stop = voiced_bilabial_stop_model();
-
-    phone_models.insert(P, voiceless_bilabial_stop.clone());
-    phone_models.insert(B, voiced_bilabial_stop.clone());
-    phoneme_models.insert(
-        arpabet::phoneme_id(variety_id, "P"),
-        voiceless_bilabial_stop,
-    );
-    phoneme_models.insert(arpabet::phoneme_id(variety_id, "B"), voiced_bilabial_stop);
+    for (phone_id, phone) in &phones.phones {
+        if phone_models.contains_key(phone_id) {
+            continue;
+        }
+        if let Some(model) =
+            acoustic_model_from_features(&phone.features, &format!("[{}]", phone.ipa))
+        {
+            phone_models.insert(phone_id.clone(), model);
+        }
+    }
 
     AcousticProfile {
         cues,
@@ -530,6 +617,103 @@ fn acoustic_cues() -> Vec<AcousticCueDef> {
             Some("Reduced vowels tend toward central formants and can have weaker sonority peaks.".into()),
         ),
         cue(
+            "acoustic.cue.consonant_place_transition",
+            "consonant place transition",
+            "acoustic.consonant_place",
+            vec![CueTarget::Feature(FeatureId("phonology.place".into()))],
+            Some("Neighboring vowel transitions help locate place of articulation for consonants.".into()),
+        ),
+        cue(
+            "acoustic.cue.stop_burst_spectral_shape",
+            "stop burst spectral shape",
+            "acoustic.stop_burst_spectral_shape",
+            vec![
+                CueTarget::Feature(FeatureId("phonology.place".into())),
+                CueTarget::Feature(FeatureId("phonology.manner".into())),
+            ],
+            Some("The spectral balance of a stop burst carries useful place information.".into()),
+        ),
+        cue(
+            "acoustic.cue.place_formant_locus",
+            "place formant locus",
+            "acoustic.place_formant_locus",
+            vec![CueTarget::Feature(FeatureId("phonology.place".into()))],
+            Some("Transitions into and out of neighboring vowels provide a coarse place target.".into()),
+        ),
+        cue(
+            "acoustic.cue.frication_noise",
+            "frication noise",
+            "acoustic.frication_noise",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Sustained aperiodic noise is a core cue for fricatives and the fricative portion of affricates.".into()),
+        ),
+        cue(
+            "acoustic.cue.frication_spectral_shape",
+            "frication spectral shape",
+            "acoustic.frication_spectral_shape",
+            vec![
+                CueTarget::Feature(FeatureId("phonology.place".into())),
+                CueTarget::Feature(FeatureId("phonology.manner".into())),
+            ],
+            Some("Sibilants, labiodentals, dentals, and glottals differ in the spectral shape of their noise.".into()),
+        ),
+        cue(
+            "acoustic.cue.affricate_release",
+            "affricate release",
+            "acoustic.affricate_release",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Affricates combine a stop-like closure and release with following frication.".into()),
+        ),
+        cue(
+            "acoustic.cue.nasal_murmur",
+            "nasal murmur",
+            "acoustic.nasal_murmur",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Nasals have low-frequency voicing energy shaped by nasal resonances.".into()),
+        ),
+        cue(
+            "acoustic.cue.nasal_antiresonance",
+            "nasal antiresonance",
+            "acoustic.nasal_antiresonance",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Nasal coupling introduces spectral zeros that help distinguish nasal consonants from oral sonorants.".into()),
+        ),
+        cue(
+            "acoustic.cue.nasal_place",
+            "nasal place",
+            "acoustic.nasal_place",
+            vec![CueTarget::Feature(FeatureId("phonology.place".into()))],
+            Some("Nasal place is weak but can be inferred from murmur spectrum and adjacent vowel transitions.".into()),
+        ),
+        cue(
+            "acoustic.cue.approximant_formants",
+            "approximant formants",
+            "acoustic.approximant_formants",
+            vec![CueTarget::Feature(FeatureId("phonology.manner".into()))],
+            Some("Liquids and glides are tracked by smooth voiced formant structure and transitions.".into()),
+        ),
+        cue(
+            "acoustic.cue.tap_closure",
+            "tap closure",
+            "acoustic.tap_closure",
+            vec![CueTarget::Phone(TAP)],
+            Some("A tap is expected to have a very brief closure rather than a full stop closure interval.".into()),
+        ),
+        cue(
+            "acoustic.cue.segment_boundary",
+            "segment boundary",
+            "acoustic.segment_boundary",
+            vec![CueTarget::Boundary],
+            Some("Boundary phones align to timing discontinuities rather than speech energy targets.".into()),
+        ),
+        cue(
+            "acoustic.cue.boundary_gap",
+            "boundary gap",
+            "acoustic.boundary_gap",
+            vec![CueTarget::Boundary],
+            Some("A boundary may coincide with a gap, discontinuity, or only a symbolic alignment point.".into()),
+        ),
+        cue(
             "acoustic.cue.stop_closure",
             "stop closure",
             "acoustic.stop_closure",
@@ -547,43 +731,70 @@ fn acoustic_cues() -> Vec<AcousticCueDef> {
             "acoustic.cue.voice_onset_time",
             "voice onset time",
             "acoustic.vot_class",
-            vec![CueTarget::Phone(P), CueTarget::Phone(B)],
+            vec![
+                CueTarget::Feature(FeatureId("phonology.manner".into())),
+                CueTarget::Feature(FeatureId("phonology.voicing".into())),
+            ],
             Some("VOT separates many English voiced and voiceless stops, but varies with context.".into()),
         ),
         cue(
             "acoustic.cue.closure_voicing",
             "closure voicing",
             "acoustic.voicing_during_closure",
-            vec![CueTarget::Phone(B), CueTarget::Phone(P)],
+            vec![CueTarget::Feature(FeatureId("phonology.voicing".into()))],
             Some("Periodic low-frequency energy during closure is evidence for a voiced stop.".into()),
         ),
         cue(
             "acoustic.cue.aspiration_noise",
             "aspiration noise",
             "acoustic.aspiration_present",
-            vec![CueTarget::Phone(P)],
+            vec![
+                CueTarget::Feature(FeatureId("phonology.manner".into())),
+                CueTarget::Feature(FeatureId("phonology.voicing".into())),
+            ],
             Some("Post-release aperiodic breath noise is expected for many English voiceless stops in stressed onsets, but not everywhere.".into()),
         ),
     ]
 }
 
-fn vowel_model(entry: &arpabet::ArpabetEntry) -> AcousticTargetModel {
-    let trajectory = formant_trajectory(entry.symbol);
-    let rhotic = entry.vowel_height == Some("rhotic");
+fn acoustic_model_from_features(
+    features: &FeatureBundle,
+    label: &str,
+) -> Option<AcousticTargetModel> {
+    match phonology_category(features, "major") {
+        Some("vowel") => Some(vowel_model(features, label)),
+        Some("consonant") => Some(consonant_model(features, label)),
+        Some("boundary") => Some(boundary_model(features, label)),
+        _ => None,
+    }
+}
+
+fn vowel_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel {
+    let height = phonology_category(features, "vowel_height");
+    let backness = phonology_category(features, "vowel_backness");
+    let roundedness = phonology_category(features, "roundedness");
+    let trajectory = phonology_category(features, "formant_trajectory").unwrap_or("stable");
+    let rhotic = phonology_bool(features, "rhoticity").unwrap_or_else(|| height == Some("rhotic"));
+    let reduced = phonology_bool(features, "reduced_vowel").unwrap_or(false);
     let mut expected_features = acoustic_feature_bundle(&[
         (
             "f1_region",
-            Spec::Known(FeatureValue::Category(f1_region(entry.vowel_height).into())),
+            Spec::Known(FeatureValue::Category(f1_region(height).into())),
         ),
         (
             "f2_region",
-            Spec::Known(FeatureValue::Category(
-                f2_region(entry.vowel_backness).into(),
-            )),
+            Spec::Known(FeatureValue::Category(f2_region(backness).into())),
         ),
-        ("rounding_resonance", rounding_resonance(entry.roundedness)),
+        ("rounding_resonance", rounding_resonance(roundedness)),
         ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
-        ("sonority_peak", Spec::Known(FeatureValue::Bool(true))),
+        (
+            "sonority_peak",
+            if reduced {
+                Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)])
+            } else {
+                Spec::Known(FeatureValue::Bool(true))
+            },
+        ),
         ("vowel_nucleus", Spec::Known(FeatureValue::Bool(true))),
         (
             "formant_trajectory",
@@ -591,6 +802,13 @@ fn vowel_model(entry: &arpabet::ArpabetEntry) -> AcousticTargetModel {
         ),
         ("rhoticity", Spec::Known(FeatureValue::Bool(rhotic))),
     ]);
+    if reduced {
+        put_acoustic_feature(
+            &mut expected_features,
+            "vowel_reduction",
+            Spec::Known(FeatureValue::Bool(true)),
+        );
+    }
     if rhotic {
         put_acoustic_feature(
             &mut expected_features,
@@ -607,6 +825,9 @@ fn vowel_model(entry: &arpabet::ArpabetEntry) -> AcousticTargetModel {
         ("acoustic.cue.sonority_peak", 0.9),
         ("acoustic.cue.vowel_nucleus", 1.0),
     ]);
+    if reduced {
+        weighted_cues.push(weighted_cue("acoustic.cue.vowel_reduction", 0.8));
+    }
     if trajectory != "stable" {
         weighted_cues.push(weighted_cue("acoustic.cue.formant_trajectory", 0.9));
     }
@@ -627,70 +848,8 @@ fn vowel_model(entry: &arpabet::ArpabetEntry) -> AcousticTargetModel {
         weighted_cues,
         landmarks,
         notes: Some(format!(
-            "Vowel nucleus evidence for ARPABET {}: {:?} height, {:?} backness, {:?} rounding, {trajectory} trajectory.",
-            entry.symbol, entry.vowel_height, entry.vowel_backness, entry.roundedness
-        )),
-    }
-}
-
-fn reduced_central_vowel_model(label: &str, r_colored: bool) -> AcousticTargetModel {
-    let mut expected_features = acoustic_feature_bundle(&[
-        (
-            "f1_region",
-            Spec::Known(FeatureValue::Category("mid".into())),
-        ),
-        (
-            "f2_region",
-            Spec::Known(FeatureValue::Category("mid".into())),
-        ),
-        (
-            "rounding_resonance",
-            Spec::Known(FeatureValue::Category("absent".into())),
-        ),
-        ("periodic_voicing", Spec::Known(FeatureValue::Bool(true))),
-        (
-            "sonority_peak",
-            Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)]),
-        ),
-        ("vowel_nucleus", Spec::Known(FeatureValue::Bool(true))),
-        (
-            "formant_trajectory",
-            Spec::Known(FeatureValue::Category("stable".into())),
-        ),
-        ("vowel_reduction", Spec::Known(FeatureValue::Bool(true))),
-        ("rhoticity", Spec::Known(FeatureValue::Bool(r_colored))),
-    ]);
-    if r_colored {
-        put_acoustic_feature(
-            &mut expected_features,
-            "f3_region",
-            Spec::Known(FeatureValue::Category("low".into())),
-        );
-    }
-
-    let mut weighted_cues = weighted_cues(&[
-        ("acoustic.cue.f1_region", 0.7),
-        ("acoustic.cue.f2_region", 0.8),
-        ("acoustic.cue.periodic_voicing", 0.8),
-        ("acoustic.cue.sonority_peak", 0.7),
-        ("acoustic.cue.vowel_nucleus", 0.9),
-        ("acoustic.cue.vowel_reduction", 0.8),
-    ]);
-    if r_colored {
-        weighted_cues.push(weighted_cue("acoustic.cue.f3_region", 0.9));
-    }
-
-    let mut landmarks = vec![vowel_target_landmark(), syllable_nucleus_landmark()];
-    if r_colored {
-        landmarks.push(rhotic_target_landmark());
-    }
-
-    AcousticTargetModel {
-        expected_features,
-        weighted_cues,
-        landmarks,
-        notes: Some(format!(
-            "Reduced central vowel model for {label}; sonority can be weak in unstressed syllables."
+            "Vowel nucleus evidence for {label}: {:?} height, {:?} backness, {:?} rounding, {trajectory} trajectory.",
+            height, backness, roundedness
         )),
     }
 }
@@ -721,7 +880,7 @@ fn rounding_resonance(roundedness: Option<&str>) -> Spec<FeatureValue> {
     }
 }
 
-fn formant_trajectory(symbol: &str) -> &'static str {
+fn formant_trajectory_for_alias(symbol: &str) -> &'static str {
     match symbol {
         "AW" => "low_central_to_high_back",
         "AY" => "low_front_to_high_front",
@@ -732,85 +891,361 @@ fn formant_trajectory(symbol: &str) -> &'static str {
     }
 }
 
-fn voiceless_bilabial_stop_model() -> AcousticTargetModel {
+fn consonant_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel {
+    let manner = phonology_category(features, "manner").unwrap_or("consonant");
+    let place = phonology_category(features, "place").unwrap_or("unspecified");
+    let voicing = phonology_category(features, "voicing").unwrap_or("unspecified");
+    let frication_spectral_shape = phonology_category(features, "frication_spectral_shape")
+        .unwrap_or_else(|| frication_spectral_shape_for_place(place));
+    let approximant_trajectory =
+        phonology_category(features, "approximant_trajectory").unwrap_or("smooth_approximant");
+    let rhotic = phonology_bool(features, "rhoticity").unwrap_or(false);
+    let lateral = phonology_bool(features, "lateral_resonance").unwrap_or(false);
+    let mut expected_features = acoustic_feature_bundle(&[
+        ("consonant", Spec::Known(FeatureValue::Bool(true))),
+        (
+            "consonant_manner",
+            Spec::Known(FeatureValue::Category(manner.into())),
+        ),
+        (
+            "consonant_place",
+            Spec::Known(FeatureValue::Category(place.into())),
+        ),
+        (
+            "consonant_voicing",
+            Spec::Known(FeatureValue::Category(voicing.into())),
+        ),
+        (
+            "periodic_voicing",
+            consonant_periodic_voicing(manner, voicing),
+        ),
+    ]);
+    let mut weighted_cues = weighted_cues(&[
+        ("acoustic.cue.consonant_place_transition", 0.5),
+        ("acoustic.cue.periodic_voicing", 0.5),
+    ]);
+    let mut landmarks = Vec::new();
+
+    match manner {
+        "stop" => add_stop_acoustics(
+            &mut expected_features,
+            &mut weighted_cues,
+            &mut landmarks,
+            voicing,
+        ),
+        "fricative" => add_fricative_acoustics(
+            &mut expected_features,
+            &mut weighted_cues,
+            &mut landmarks,
+            frication_spectral_shape,
+        ),
+        "affricate" => add_affricate_acoustics(
+            &mut expected_features,
+            &mut weighted_cues,
+            &mut landmarks,
+            voicing,
+            frication_spectral_shape,
+        ),
+        "nasal" => add_nasal_acoustics(&mut expected_features, &mut weighted_cues, &mut landmarks),
+        "liquid" | "glide" => add_approximant_acoustics(
+            &mut expected_features,
+            &mut weighted_cues,
+            &mut landmarks,
+            manner,
+            approximant_trajectory,
+            rhotic,
+            lateral,
+            label,
+        ),
+        "tap" => add_tap_acoustics(&mut expected_features, &mut weighted_cues, &mut landmarks),
+        _ => {}
+    }
+
     AcousticTargetModel {
-        expected_features: acoustic_feature_bundle(&[
-            (
-                "stop_closure",
-                Spec::Known(FeatureValue::Bool(true)),
-            ),
-            (
-                "release_burst",
-                Spec::Known(FeatureValue::Bool(true)),
-            ),
-            (
-                "voicing_during_closure",
-                Spec::Known(FeatureValue::Bool(false)),
-            ),
-            (
-                "vot_class",
-                Spec::Variable(vec![
-                    FeatureValue::Category("short_lag".into()),
-                    FeatureValue::Category("long_lag".into()),
-                ]),
-            ),
-            (
-                "aspiration_present",
-                Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)]),
-            ),
-        ]),
-        weighted_cues: weighted_cues(&[
-            ("acoustic.cue.stop_closure", 1.0),
-            ("acoustic.cue.release_burst", 0.9),
-            ("acoustic.cue.voice_onset_time", 0.9),
-            ("acoustic.cue.aspiration_noise", 0.6),
-            ("acoustic.cue.closure_voicing", 0.5),
-        ]),
-        landmarks: vec![
-            closure_landmark(false),
-            release_burst_landmark(),
-            aspiration_landmark(),
-        ],
-        notes: Some("English [p] is a voiceless bilabial stop; aspiration is context-sensitive rather than guaranteed.".into()),
+        expected_features,
+        weighted_cues,
+        landmarks,
+        notes: Some(format!(
+            "Consonant evidence for {label}: {place} {manner}, {voicing}."
+        )),
     }
 }
 
-fn voiced_bilabial_stop_model() -> AcousticTargetModel {
-    AcousticTargetModel {
-        expected_features: acoustic_feature_bundle(&[
-            (
-                "stop_closure",
-                Spec::Known(FeatureValue::Bool(true)),
-            ),
-            (
-                "release_burst",
-                Spec::Known(FeatureValue::Bool(true)),
-            ),
-            (
-                "voicing_during_closure",
-                Spec::Variable(vec![FeatureValue::Bool(true), FeatureValue::Bool(false)]),
-            ),
-            (
-                "vot_class",
-                Spec::Variable(vec![
-                    FeatureValue::Category("prevoiced".into()),
-                    FeatureValue::Category("short_lag".into()),
-                ]),
-            ),
-            (
-                "aspiration_present",
-                Spec::Known(FeatureValue::Bool(false)),
-            ),
-        ]),
-        weighted_cues: weighted_cues(&[
-            ("acoustic.cue.stop_closure", 1.0),
-            ("acoustic.cue.release_burst", 0.8),
-            ("acoustic.cue.closure_voicing", 0.9),
-            ("acoustic.cue.voice_onset_time", 0.8),
-            ("acoustic.cue.aspiration_noise", 0.3),
-        ]),
-        landmarks: vec![closure_landmark(true), release_burst_landmark()],
-        notes: Some("English [b] is a voiced bilabial stop; closure voicing can be weak or absent in some positions, so VOT stays variable.".into()),
+fn consonant_periodic_voicing(manner: &str, voicing: &str) -> Spec<FeatureValue> {
+    match (manner, voicing) {
+        ("nasal" | "liquid" | "glide", "voiced") => Spec::Known(FeatureValue::Bool(true)),
+        ("stop" | "fricative" | "affricate", "voiced") => {
+            Spec::Variable(vec![FeatureValue::Bool(true), FeatureValue::Bool(false)])
+        }
+        (_, "voiceless") => Spec::Known(FeatureValue::Bool(false)),
+        _ => Spec::Unspecified,
+    }
+}
+
+fn add_stop_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+    voicing: &str,
+) {
+    let voiced = voicing == "voiced";
+    let closure_voicing = if voiced {
+        Spec::Variable(vec![FeatureValue::Bool(true), FeatureValue::Bool(false)])
+    } else {
+        Spec::Known(FeatureValue::Bool(false))
+    };
+    put_acoustic_feature(
+        features,
+        "stop_closure",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "release_burst",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(features, "voicing_during_closure", closure_voicing.clone());
+    put_acoustic_feature(features, "vot_class", stop_vot_class(voiced));
+    put_acoustic_feature(
+        features,
+        "aspiration_present",
+        if voiced {
+            Spec::Known(FeatureValue::Bool(false))
+        } else {
+            Spec::Variable(vec![FeatureValue::Bool(false), FeatureValue::Bool(true)])
+        },
+    );
+
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.stop_closure", 1.0),
+        ("acoustic.cue.release_burst", 0.9),
+        ("acoustic.cue.voice_onset_time", 0.9),
+        (
+            "acoustic.cue.closure_voicing",
+            if voiced { 0.8 } else { 0.5 },
+        ),
+    ]));
+    if !voiced {
+        cues.push(weighted_cue("acoustic.cue.aspiration_noise", 0.6));
+    }
+
+    landmarks.push(closure_landmark(closure_voicing));
+    landmarks.push(release_burst_landmark());
+    if !voiced {
+        landmarks.push(aspiration_landmark());
+    }
+}
+
+fn stop_vot_class(voiced: bool) -> Spec<FeatureValue> {
+    if voiced {
+        Spec::Variable(vec![
+            FeatureValue::Category("prevoiced".into()),
+            FeatureValue::Category("short_lag".into()),
+        ])
+    } else {
+        Spec::Variable(vec![
+            FeatureValue::Category("short_lag".into()),
+            FeatureValue::Category("long_lag".into()),
+        ])
+    }
+}
+
+fn add_fricative_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+    spectral_shape: &str,
+) {
+    put_acoustic_feature(
+        features,
+        "frication_noise",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "frication_spectral_shape",
+        Spec::Known(FeatureValue::Category(spectral_shape.into())),
+    );
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.frication_noise", 1.0),
+        ("acoustic.cue.frication_spectral_shape", 0.9),
+    ]));
+    landmarks.push(frication_landmark("frication_noise", spectral_shape));
+}
+
+fn add_affricate_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+    voicing: &str,
+    spectral_shape: &str,
+) {
+    let voiced = voicing == "voiced";
+    let closure_voicing = if voiced {
+        Spec::Variable(vec![FeatureValue::Bool(true), FeatureValue::Bool(false)])
+    } else {
+        Spec::Known(FeatureValue::Bool(false))
+    };
+    put_acoustic_feature(
+        features,
+        "stop_closure",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "release_burst",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(features, "voicing_during_closure", closure_voicing.clone());
+    put_acoustic_feature(features, "vot_class", stop_vot_class(voiced));
+    put_acoustic_feature(
+        features,
+        "aspiration_present",
+        Spec::Known(FeatureValue::Bool(false)),
+    );
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.stop_closure", 1.0),
+        ("acoustic.cue.release_burst", 0.8),
+        ("acoustic.cue.voice_onset_time", 0.5),
+        (
+            "acoustic.cue.closure_voicing",
+            if voiced { 0.7 } else { 0.4 },
+        ),
+    ]));
+    landmarks.push(closure_landmark(closure_voicing));
+    landmarks.push(release_burst_landmark());
+
+    add_fricative_acoustics(features, cues, landmarks, spectral_shape);
+    put_acoustic_feature(
+        features,
+        "affricate_release",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    cues.push(weighted_cue("acoustic.cue.affricate_release", 1.0));
+    landmarks.push(affricate_release_landmark());
+}
+
+fn add_nasal_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+) {
+    put_acoustic_feature(
+        features,
+        "nasal_murmur",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "nasal_antiresonance",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.nasal_murmur", 1.0),
+        ("acoustic.cue.nasal_antiresonance", 0.8),
+        ("acoustic.cue.periodic_voicing", 0.9),
+    ]));
+    landmarks.push(nasal_murmur_landmark());
+}
+
+fn add_approximant_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+    manner: &str,
+    trajectory: &str,
+    rhotic: bool,
+    lateral: bool,
+    label: &str,
+) {
+    put_acoustic_feature(
+        features,
+        "approximant_formants",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "formant_trajectory",
+        Spec::Known(FeatureValue::Category(trajectory.into())),
+    );
+    if rhotic {
+        put_acoustic_feature(
+            features,
+            "f3_region",
+            Spec::Known(FeatureValue::Category("low".into())),
+        );
+    }
+    if lateral {
+        put_acoustic_feature(
+            features,
+            "lateral_resonance",
+            Spec::Known(FeatureValue::Bool(true)),
+        );
+    }
+
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.approximant_formants", 1.0),
+        ("acoustic.cue.formant_trajectory", 0.8),
+        ("acoustic.cue.periodic_voicing", 0.9),
+    ]));
+    if rhotic {
+        cues.push(weighted_cue("acoustic.cue.f3_region", 0.8));
+    }
+    landmarks.push(approximant_landmark(manner, trajectory, label));
+}
+
+fn add_tap_acoustics(
+    features: &mut FeatureBundle,
+    cues: &mut Vec<WeightedCue>,
+    landmarks: &mut Vec<AcousticLandmark>,
+) {
+    put_acoustic_feature(
+        features,
+        "tap_closure",
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    put_acoustic_feature(
+        features,
+        "aspiration_present",
+        Spec::Known(FeatureValue::Bool(false)),
+    );
+    cues.extend(weighted_cues(&[
+        ("acoustic.cue.tap_closure", 1.0),
+        ("acoustic.cue.periodic_voicing", 0.8),
+        ("acoustic.cue.consonant_place_transition", 0.6),
+    ]));
+    landmarks.push(tap_closure_landmark());
+}
+
+fn frication_spectral_shape_for_entry(entry: &arpabet::ArpabetEntry) -> &'static str {
+    match (entry.place, entry.symbol) {
+        (Some("alveolar"), "S" | "Z") => "high_sibilant",
+        (Some("postalveolar"), _) => "lower_sibilant",
+        (Some("labiodental"), _) => "diffuse_labiodental",
+        (Some("dental"), _) => "diffuse_dental",
+        (Some("glottal"), _) => "diffuse_glottal",
+        _ => "diffuse",
+    }
+}
+
+fn frication_spectral_shape_for_place(place: &str) -> &'static str {
+    match place {
+        "alveolar" => "high_sibilant",
+        "postalveolar" => "lower_sibilant",
+        "labiodental" => "diffuse_labiodental",
+        "dental" => "diffuse_dental",
+        "glottal" => "diffuse_glottal",
+        _ => "diffuse",
+    }
+}
+
+fn approximant_trajectory_for_entry(entry: &arpabet::ArpabetEntry) -> &'static str {
+    match entry.symbol {
+        "W" => "velar_labial_glide",
+        "Y" => "palatal_glide",
+        "L" => "lateral_approximant",
+        "R" => "rhotic_approximant",
+        _ => "smooth_approximant",
     }
 }
 
@@ -897,7 +1332,7 @@ fn rhotic_target_landmark() -> AcousticLandmark {
     }
 }
 
-fn closure_landmark(voiced: bool) -> AcousticLandmark {
+fn closure_landmark(voicing_during_closure: Spec<FeatureValue>) -> AcousticLandmark {
     AcousticLandmark {
         id: "stop_closure".into(),
         kind: AcousticLandmarkKind::Closure,
@@ -908,13 +1343,136 @@ fn closure_landmark(voiced: bool) -> AcousticLandmark {
         },
         expected_features: acoustic_feature_bundle(&[(
             "voicing_during_closure",
-            Spec::Known(FeatureValue::Bool(voiced)),
+            voicing_during_closure,
         )]),
         weighted_cues: weighted_cues(&[
             ("acoustic.cue.stop_closure", 1.0),
             ("acoustic.cue.closure_voicing", 0.8),
         ]),
         notes: None,
+    }
+}
+
+fn frication_landmark(id: &str, spectral_shape: &str) -> AcousticLandmark {
+    AcousticLandmark {
+        id: id.into(),
+        kind: AcousticLandmarkKind::AperiodicNoise,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.04,
+            end_s: 0.04,
+        },
+        expected_features: acoustic_feature_bundle(&[
+            ("frication_noise", Spec::Known(FeatureValue::Bool(true))),
+            (
+                "frication_spectral_shape",
+                Spec::Known(FeatureValue::Category(spectral_shape.into())),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.frication_noise", 1.0),
+            ("acoustic.cue.frication_spectral_shape", 0.9),
+        ]),
+        notes: Some("Track sustained aperiodic noise through the constriction interval.".into()),
+    }
+}
+
+fn affricate_release_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "affricate_release".into(),
+        kind: AcousticLandmarkKind::ReleaseBurst,
+        anchor: LandmarkAnchor::Release,
+        window: RelativeTimeWindow {
+            start_s: -0.005,
+            end_s: 0.05,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "affricate_release",
+            Spec::Known(FeatureValue::Bool(true)),
+        )]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.release_burst", 0.8),
+            ("acoustic.cue.affricate_release", 1.0),
+            ("acoustic.cue.frication_noise", 0.8),
+        ]),
+        notes: Some("Affricate release should include a stop burst followed by frication.".into()),
+    }
+}
+
+fn nasal_murmur_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "nasal_murmur".into(),
+        kind: AcousticLandmarkKind::PeriodicVoicing,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.05,
+            end_s: 0.05,
+        },
+        expected_features: acoustic_feature_bundle(&[
+            ("nasal_murmur", Spec::Known(FeatureValue::Bool(true))),
+            ("nasal_antiresonance", Spec::Known(FeatureValue::Bool(true))),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.nasal_murmur", 1.0),
+            ("acoustic.cue.nasal_antiresonance", 0.8),
+            ("acoustic.cue.periodic_voicing", 0.8),
+        ]),
+        notes: Some(
+            "Use nasal murmur and antiresonance cues for nasal consonant alignment.".into(),
+        ),
+    }
+}
+
+fn approximant_landmark(manner: &str, trajectory: &str, label: &str) -> AcousticLandmark {
+    AcousticLandmark {
+        id: format!("{manner}_approximant_transition"),
+        kind: AcousticLandmarkKind::FormantTransition,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.06,
+            end_s: 0.06,
+        },
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "approximant_formants",
+                Spec::Known(FeatureValue::Bool(true)),
+            ),
+            (
+                "formant_trajectory",
+                Spec::Known(FeatureValue::Category(trajectory.into())),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.approximant_formants", 1.0),
+            ("acoustic.cue.formant_trajectory", 0.8),
+            ("acoustic.cue.periodic_voicing", 0.8),
+        ]),
+        notes: Some(format!(
+            "Track smooth voiced formant movement for English {manner} {label}."
+        )),
+    }
+}
+
+fn tap_closure_landmark() -> AcousticLandmark {
+    AcousticLandmark {
+        id: "brief_tap_closure".into(),
+        kind: AcousticLandmarkKind::Closure,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.015,
+            end_s: 0.015,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "tap_closure",
+            Spec::Known(FeatureValue::Bool(true)),
+        )]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.tap_closure", 1.0),
+            ("acoustic.cue.periodic_voicing", 0.6),
+        ]),
+        notes: Some(
+            "A tap closure should be brief and voiced compared with a full oral stop.".into(),
+        ),
     }
 }
 
@@ -972,6 +1530,20 @@ fn put_acoustic_feature(bundle: &mut FeatureBundle, name: &str, value: Spec<Feat
     bundle
         .values
         .insert(FeatureId(format!("acoustic.{name}")), value);
+}
+
+fn phonology_category<'a>(features: &'a FeatureBundle, name: &str) -> Option<&'a str> {
+    match features.values.get(&FeatureId(format!("phonology.{name}"))) {
+        Some(Spec::Known(FeatureValue::Category(value))) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn phonology_bool(features: &FeatureBundle, name: &str) -> Option<bool> {
+    match features.values.get(&FeatureId(format!("phonology.{name}"))) {
+        Some(Spec::Known(FeatureValue::Bool(value))) => Some(*value),
+        _ => None,
+    }
 }
 
 fn weighted_cues(values: &[(&str, f32)]) -> Vec<WeightedCue> {
@@ -1320,43 +1892,36 @@ mod tests {
     }
 
     #[test]
-    fn acoustic_profile_covers_every_arpabet_vowel() {
+    fn acoustic_profile_covers_modelable_inventory_segments() {
         let ga = variety("en-US-GA");
         let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
 
-        for entry in ARPABET.iter().filter(|entry| entry.syllabic) {
+        for phoneme in ga.phonemes.phonemes.values() {
             assert!(
-                profile
-                    .phone_models
-                    .contains_key(&arpabet::phone_id_for_ipa(entry.phone_symbol)),
-                "missing phone acoustic model for {}",
-                entry.symbol
-            );
-            assert!(
-                profile
-                    .phoneme_models
-                    .contains_key(&arpabet::phoneme_id("en-US-GA", entry.symbol)),
-                "missing phoneme acoustic model for {}",
-                entry.symbol
+                profile.phoneme_models.contains_key(&phoneme.id),
+                "missing acoustic model for phoneme object {:?}",
+                phoneme.id
             );
         }
 
-        assert!(profile.phone_models.contains_key(&SCHWA));
-        assert!(profile.phone_models.contains_key(&R_COLORED_SCHWA));
+        for (phone_id, phone) in &ga.phones.phones {
+            if acoustic_model_from_features(&phone.features, &phone.ipa).is_none() {
+                continue;
+            }
+            assert!(
+                profile.phone_models.contains_key(phone_id),
+                "missing acoustic model for phone object {:?}",
+                phone_id
+            );
+        }
     }
 
     #[test]
     fn diphthongs_and_r_colored_vowels_carry_extra_vowel_cues() {
         let ga = variety("en-US-GA");
         let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
-        let ay = profile
-            .phoneme_models
-            .get(&arpabet::phoneme_id("en-US-GA", "AY"))
-            .expect("AY acoustic model");
-        let er = profile
-            .phoneme_models
-            .get(&arpabet::phoneme_id("en-US-GA", "ER"))
-            .expect("ER acoustic model");
+        let ay = phoneme_model_by_alias(&ga, profile, "AY");
+        let er = phoneme_model_by_alias(&ga, profile, "ER");
         let r_colored_schwa = profile
             .phone_models
             .get(&R_COLORED_SCHWA)
@@ -1372,6 +1937,37 @@ mod tests {
         assert_acoustic_category(er, "f3_region", "low");
         assert_acoustic_bool(r_colored_schwa, "vowel_reduction", true);
         assert_acoustic_category(r_colored_schwa, "f3_region", "low");
+    }
+
+    #[test]
+    fn consonant_inventory_segments_carry_manner_specific_acoustic_cues() {
+        let ga = variety("en-US-GA");
+        let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
+        let t = phoneme_model_by_alias(&ga, profile, "T");
+        let s = phoneme_model_by_alias(&ga, profile, "S");
+        let ch = phoneme_model_by_alias(&ga, profile, "CH");
+        let m = phoneme_model_by_alias(&ga, profile, "M");
+        let l = phoneme_model_by_alias(&ga, profile, "L");
+        let tap = profile.phone_models.get(&TAP).expect("tap acoustic model");
+
+        assert_acoustic_bool(t, "stop_closure", true);
+        assert_acoustic_bool(t, "release_burst", true);
+        assert_eq!(
+            acoustic_value(t, "aspiration_present"),
+            Some(&Spec::Variable(vec![
+                FeatureValue::Bool(false),
+                FeatureValue::Bool(true)
+            ]))
+        );
+        assert_acoustic_bool(s, "frication_noise", true);
+        assert_acoustic_category(s, "frication_spectral_shape", "high_sibilant");
+        assert_acoustic_bool(ch, "affricate_release", true);
+        assert_acoustic_bool(ch, "frication_noise", true);
+        assert_acoustic_bool(m, "nasal_murmur", true);
+        assert_acoustic_bool(m, "nasal_antiresonance", true);
+        assert_acoustic_bool(l, "approximant_formants", true);
+        assert_acoustic_bool(l, "lateral_resonance", true);
+        assert_acoustic_bool(tap, "tap_closure", true);
     }
 
     #[test]
@@ -1400,10 +1996,10 @@ mod tests {
             acoustic_value(b, "aspiration_present"),
             Some(&Spec::Known(FeatureValue::Bool(false)))
         );
-        assert!(
-            profile
-                .phoneme_models
-                .contains_key(&arpabet::phoneme_id("en-US-GA", "P"))
+        assert_acoustic_bool(
+            phoneme_model_by_alias(&ga, profile, "P"),
+            "stop_closure",
+            true,
         );
     }
 
@@ -1507,5 +2103,27 @@ mod tests {
             .expected_features
             .values
             .get(&FeatureId(format!("acoustic.{name}")))
+    }
+
+    fn phoneme_model_by_alias<'a>(
+        variety: &'a LinguisticVariety,
+        profile: &'a AcousticProfile,
+        alias: &str,
+    ) -> &'a AcousticTargetModel {
+        let phoneme = variety
+            .phonemes
+            .phonemes
+            .values()
+            .find(|phoneme| {
+                phoneme
+                    .aliases
+                    .iter()
+                    .any(|candidate| candidate.system == "arpabet" && candidate.symbol == alias)
+            })
+            .expect("phoneme alias");
+        profile
+            .phoneme_models
+            .get(&phoneme.id)
+            .expect("phoneme acoustic model")
     }
 }
