@@ -66,6 +66,8 @@ window.faceApp = function faceApp() {
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
     voicePlaybackResumeAfterGesture: null,
+    conversationTurns: [],
+    conversationSeen: {},
     llmJobs: [],
     selectedLlmJobId: null,
     mime: 'image/jpeg',
@@ -263,6 +265,12 @@ window.faceApp = function faceApp() {
           if (message.generation_id !== this.activeVoiceGenerationId) return;
           this.voiceStatus = 'thinking';
           this.voicePlaybackEvents.finished += 1;
+          this.rememberConversationTurn({
+            key: `voice:${message.utterance_id}`,
+            role: 'voice',
+            observedAt: message.observed_at,
+            text: message.text || '',
+          });
           return;
         }
         if (message.type === 'voice_speech_interrupted') {
@@ -296,6 +304,14 @@ window.faceApp = function faceApp() {
         }
         if (message.type === 'asr_transcript') {
           this.asr.lastTranscript = message.text || '';
+          if (message.is_final) {
+            this.rememberConversationTurn({
+              key: this.asrConversationKey(message),
+              role: 'interlocutor',
+              observedAt: message.observed_at,
+              text: message.text || '',
+            });
+          }
           return;
         }
         if (message.type === 'prompt') {
@@ -335,6 +351,57 @@ window.faceApp = function faceApp() {
         if (!stream) return;
         stream.scrollTop = stream.scrollHeight;
       });
+    },
+
+    scrollConversation() {
+      this.$nextTick(() => {
+        const stream = this.$refs.conversationStream;
+        if (!stream) return;
+        stream.scrollTop = stream.scrollHeight;
+      });
+    },
+
+    asrConversationKey(message) {
+      return [
+        'asr',
+        message.sequence_start ?? '',
+        message.sequence_end ?? '',
+        message.sentence_index ?? '',
+        message.sentence_count ?? '',
+        message.text || '',
+      ].join(':');
+    },
+
+    rememberConversationTurn(turn) {
+      const text = (turn.text || '').trim();
+      if (!text) return;
+      const key = turn.key || `${turn.role}:${turn.observedAt || ''}:${text}`;
+      if (this.conversationSeen[key]) return;
+      this.conversationSeen[key] = true;
+      this.conversationTurns.push({
+        key,
+        role: turn.role,
+        observedAt: turn.observedAt || new Date().toISOString(),
+        text,
+      });
+      if (this.conversationTurns.length > 80) {
+        const dropped = this.conversationTurns.splice(0, this.conversationTurns.length - 80);
+        dropped.forEach((item) => {
+          delete this.conversationSeen[item.key];
+        });
+      }
+      this.scrollConversation();
+    },
+
+    conversationTurnLabel(turn) {
+      if (turn.role === 'voice') return 'Voice';
+      return 'Heard';
+    },
+
+    conversationSummary() {
+      const count = this.conversationTurns.length;
+      if (count === 1) return '1 turn';
+      return `${count} turns`;
     },
 
     prepareVoiceDraft(draft) {

@@ -39,6 +39,24 @@
               <p class="voice-playback-detail" x-show="voicePlaybackDetail" x-text="voicePlaybackDetail"></p>
               <p class="voice-playback-error" x-show="voiceLastError" x-text="voiceLastError"></p>
               <p class="voice-playback-events" x-text="voicePlaybackEventSummary()"></p>
+              <section class="conversation-log" aria-live="polite">
+                <header>
+                  <span>Conversation</span>
+                  <span x-text="conversationSummary()"></span>
+                </header>
+                <div class="conversation-turns" x-ref="conversationStream">
+                  <template x-for="turn in conversationTurns" x-bind:key="turn.key">
+                    <article class="conversation-turn" x-bind:data-role="turn.role">
+                      <div>
+                        <strong x-text="conversationTurnLabel(turn)"></strong>
+                        <time x-text="formatTimestamp(turn.observedAt)"></time>
+                      </div>
+                      <p x-text="turn.text"></p>
+                    </article>
+                  </template>
+                  <p class="conversation-empty" x-show="conversationTurns.length === 0">No turns yet</p>
+                </div>
+              </section>
               <div class="voice-audio-clips" x-show="voiceAudioClips.length">
                 <template x-for="clip in voiceAudioClips" x-bind:key="clip.utteranceId">
                   <a

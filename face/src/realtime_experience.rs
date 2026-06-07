@@ -18,10 +18,10 @@ use crate::messages::{
 };
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
-const RECENT_SENSATION_PROMPT_LIMIT: usize = 12;
-const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 12;
-const MAX_PROMPT_IMPRESSION_TEXT_CHARS: usize = 700;
-const MAX_PROMPT_PAYLOAD_STRING_CHARS: usize = 180;
+const RECENT_SENSATION_PROMPT_LIMIT: usize = 8;
+const RECENT_VISION_IMPRESSION_PROMPT_LIMIT: usize = 8;
+const MAX_PROMPT_IMPRESSION_TEXT_CHARS: usize = 420;
+const MAX_PROMPT_PAYLOAD_STRING_CHARS: usize = 96;
 const CONTEXT_FRAME_MAX_TOKENS: usize = 220;
 const REALTIME_EXPERIENCE_MAX_TOKENS: usize = 1024;
 const MAX_CONTEXT_FRAME_TEXT_CHARS: usize = 140;
@@ -77,6 +77,13 @@ pub(crate) fn spawn_trace(state: AppState) {
     tokio::spawn(async move {
         let prompt =
             build_prompt_from_records_opportunistically(&state, &records, &impressions).await;
+        if prompt.trim().is_empty() {
+            active.store(false, Ordering::Release);
+            if pending.swap(false, Ordering::AcqRel) {
+                spawn_trace(state);
+            }
+            return;
+        }
         let _ = events.send(RealTimeExperienceEvent::Prompt {
             generation_id,
             observed_at: chrono::Utc::now(),
@@ -125,7 +132,7 @@ async fn stream_generation(
                 messages: vec![
                     ChatMessage::new(
                         "system",
-                        "You are the real-time Experience generator. Write first-person lived experience from the system's perspective. Return only plain text, not JSON.",
+                        "You are the real-time Experience generator. Write first-person lived experience from the system's perspective. Use only external grounding evidence from vision, ASR/hearing, location, memory, motion, and other non-Voice faculties. Do not treat Voice, Commentator, Mouth feedback, prior Experiences, or internal thoughts as evidence about the world. Return only plain text, not JSON.",
                     ),
                     ChatMessage::new("user", prompt),
                 ],
@@ -186,18 +193,30 @@ fn parse_experience_records(
     let Some(what) = generated_experience_text(generated) else {
         return Vec::new();
     };
+    let grounding_impressions = impressions
+        .iter()
+        .filter(|impression| is_experience_grounding_impression(impression))
+        .cloned()
+        .collect::<Vec<_>>();
+    if grounding_impressions.is_empty() {
+        return Vec::new();
+    }
     let observed_at = chrono::Utc::now();
-    let impression_ids = recent_experience_impression_ids(impressions);
+    let impression_ids = recent_experience_impression_ids(&grounding_impressions);
     let occurred_at = impression_ids
         .iter()
         .filter_map(|id| {
-            impressions
+            grounding_impressions
                 .iter()
                 .find(|impression| impression.id == *id)
                 .map(|impression| impression.occurred_at)
         })
         .max()
-        .or_else(|| impressions.last().map(|impression| impression.occurred_at))
+        .or_else(|| {
+            grounding_impressions
+                .last()
+                .map(|impression| impression.occurred_at)
+        })
         .unwrap_or(observed_at);
 
     vec![ExperienceRecord {
@@ -269,6 +288,9 @@ fn build_prompt_from_records(
     impressions: &[VisionImpressionRecord],
 ) -> String {
     let frame = build_timeline_frame_from_records(records, impressions);
+    if frame.entries().is_empty() {
+        return String::new();
+    }
     let context_frame = compact_context_frame(ContextFrame::from_timeline(
         &frame,
         frame.entries(),
@@ -283,6 +305,9 @@ async fn build_prompt_from_records_opportunistically(
     impressions: &[VisionImpressionRecord],
 ) -> String {
     let frame = build_timeline_frame_from_records(records, impressions);
+    if frame.entries().is_empty() {
+        return String::new();
+    }
     let fallback_context = compact_context_frame(ContextFrame::from_timeline(
         &frame,
         frame.entries(),
@@ -326,6 +351,7 @@ fn build_timeline_frame_from_records(
         let impression = impressions
             .iter()
             .rev()
+            .filter(|impression| is_experience_grounding_impression(impression))
             .find(|impression| impression.sensation_id == sensation.id)
             .map(|impression| Impression {
                 id: impression.id,
@@ -844,12 +870,14 @@ fn select_records_for_experience_prompt<'a>(
     let referenced_impression_ids = impressions
         .iter()
         .rev()
+        .filter(|impression| is_experience_grounding_impression(impression))
         .take(RECENT_VISION_IMPRESSION_PROMPT_LIMIT)
         .map(|impression| impression.sensation_id)
         .collect::<HashSet<_>>();
 
     let mut referenced_records = records
         .iter()
+        .filter(|record| is_experience_grounding_sensation(record))
         .filter(|record| referenced_impression_ids.contains(&record.id))
         .collect::<Vec<_>>();
     referenced_records.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
@@ -864,6 +892,9 @@ fn select_records_for_experience_prompt<'a>(
 
     if selected.len() < RECENT_SENSATION_PROMPT_LIMIT {
         for record in records.iter().rev() {
+            if !is_experience_grounding_sensation(record) {
+                continue;
+            }
             if selected_ids.contains(&record.id) {
                 continue;
             }
@@ -877,6 +908,34 @@ fn select_records_for_experience_prompt<'a>(
 
     selected.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
     selected
+}
+
+fn is_experience_grounding_sensation(record: &SensationRecord) -> bool {
+    matches!(
+        record.kind.as_str(),
+        "vision.frame"
+            | "vision.face_crop"
+            | "location.fix"
+            | "audio.utterance"
+            | "audio.voice_clip"
+            | "memory.voice_match"
+            | "memory.face_match"
+    ) || record.kind.starts_with("motion.")
+}
+
+fn is_experience_grounding_impression(impression: &VisionImpressionRecord) -> bool {
+    matches!(
+        impression.kind.as_str(),
+        "vision"
+            | "vision.frame"
+            | "vision.face_crop"
+            | "location.gps"
+            | "location.fix"
+            | "audio.utterance"
+            | "audio.voice_clip"
+            | "memory.voice_match"
+            | "memory.face_match"
+    ) || impression.kind.starts_with("motion.")
 }
 
 fn prompt_limited_text(text: &str, max_chars: usize) -> String {
@@ -1216,6 +1275,63 @@ mod tests {
         }
     }
 
+    fn self_generated_record(
+        id: Uuid,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+        kind: &str,
+        faculty: &str,
+        text: &str,
+    ) -> SensationRecord {
+        SensationRecord {
+            id,
+            kind: kind.to_string(),
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "mortar-sea".to_string(),
+                sensor_id: faculty.to_ascii_lowercase(),
+                faculty: faculty.to_ascii_lowercase(),
+            },
+            sequence: 0,
+            media: crate::messages::MediaRecord {
+                mime: "text/plain".to_string(),
+                width: 0,
+                height: 0,
+                encoding: "utf-8".to_string(),
+            },
+            provenance: psyche::Provenance::direct().with_faculty(faculty),
+            data_sha256: format!("self-{id}"),
+            data_bytes: text.len(),
+            detail: json!({ "text": text }),
+        }
+    }
+
+    fn self_generated_impression(
+        sensation_id: Uuid,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+        kind: &str,
+        faculty: &str,
+        text: &str,
+    ) -> VisionImpressionRecord {
+        VisionImpressionRecord {
+            id: Uuid::new_v4(),
+            sensation_id,
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "mortar-sea".to_string(),
+                sensor_id: faculty.to_ascii_lowercase(),
+                faculty: faculty.to_ascii_lowercase(),
+            },
+            sequence: 0,
+            text: text.to_string(),
+            kind: kind.to_string(),
+            faculty: faculty.to_string(),
+            confidence: 0.62,
+            payload: json!({ "source": "self-generated" }),
+        }
+    }
+
     fn face_record(id: Uuid, occurred_at: chrono::DateTime<chrono::Utc>) -> SensationRecord {
         SensationRecord {
             id,
@@ -1321,6 +1437,103 @@ mod tests {
             RECENT_SENSATION_PROMPT_LIMIT
         );
         assert!(!prompt.contains("sequence 100"));
+    }
+
+    #[test]
+    fn prompt_selection_excludes_self_generated_voice_and_commentator_records() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let commentator_id = Uuid::new_v4();
+        let voice_id = Uuid::new_v4();
+        let records = vec![
+            sensation_record(vision_id, 1, t0),
+            self_generated_record(
+                commentator_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "commentator.internal_thought",
+                "Commentator",
+                "I feel the data stream continuing.",
+            ),
+            self_generated_record(
+                voice_id,
+                t0 + ChronoDuration::milliseconds(2),
+                "voice.speech_queued",
+                "Voice",
+                "I feel myself about to say: I am here.",
+            ),
+        ];
+        let impressions = vec![
+            vision_impression(vision_id, t0, "I see a man with a dog near shelving."),
+            self_generated_impression(
+                commentator_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "commentator.internal_thought",
+                "Commentator",
+                "I think: I feel the data stream continuing.",
+            ),
+            self_generated_impression(
+                voice_id,
+                t0 + ChronoDuration::milliseconds(2),
+                "voice.speech_queued",
+                "Voice",
+                "I feel myself about to say: I am here.",
+            ),
+        ];
+
+        let selected = select_records_for_experience_prompt(&records, &impressions);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, vision_id);
+
+        let prompt = build_prompt_from_records(&records, &impressions);
+        assert!(prompt.contains("I see a man with a dog near shelving."));
+        assert!(!prompt.contains("data stream continuing"));
+        assert!(!prompt.contains("about to say"));
+        assert!(!prompt.contains("commentator.internal_thought"));
+        assert!(!prompt.contains("voice.speech_queued"));
+    }
+
+    #[test]
+    fn prompt_is_empty_when_only_self_generated_records_are_available() {
+        let t0 = chrono::Utc::now();
+        let commentator_id = Uuid::new_v4();
+        let records = vec![self_generated_record(
+            commentator_id,
+            t0,
+            "commentator.internal_thought",
+            "Commentator",
+            "I am here with the present moment.",
+        )];
+        let impressions = vec![self_generated_impression(
+            commentator_id,
+            t0,
+            "commentator.internal_thought",
+            "Commentator",
+            "I think: I am here with the present moment.",
+        )];
+
+        assert!(build_prompt_from_records(&records, &impressions).is_empty());
+    }
+
+    #[test]
+    fn generated_experiences_are_attributed_only_to_grounding_impressions() {
+        let t0 = chrono::Utc::now();
+        let vision = vision_impression(Uuid::new_v4(), t0, "I see a man with a dog.");
+        let self_generated = self_generated_impression(
+            Uuid::new_v4(),
+            t0 + ChronoDuration::milliseconds(1),
+            "commentator.internal_thought",
+            "Commentator",
+            "I think: I feel the steady hum.",
+        );
+
+        let records = parse_experience_records(
+            "A man and dog seem to be present.",
+            &[vision.clone(), self_generated.clone()],
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].impression_ids, vec![vision.id]);
+        assert!(!records[0].impression_ids.contains(&self_generated.id));
     }
 
     #[test]
