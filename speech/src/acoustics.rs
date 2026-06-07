@@ -83,6 +83,8 @@ pub struct AcousticTargetModel {
     #[serde(default)]
     pub landmarks: Vec<AcousticLandmark>,
     #[serde(default)]
+    pub range_targets: Vec<AcousticRangeTarget>,
+    #[serde(default)]
     pub notes: Option<String>,
 }
 
@@ -97,7 +99,38 @@ pub struct AcousticLandmark {
     #[serde(default)]
     pub weighted_cues: Vec<WeightedCue>,
     #[serde(default)]
+    pub range_targets: Vec<AcousticRangeTarget>,
+    #[serde(default)]
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcousticRangeTarget {
+    pub measurement: AcousticMeasurement,
+    pub range: NumericRange,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NumericRange {
+    pub min: f32,
+    pub max: f32,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcousticMeasurement {
+    Formant { index: u8 },
+    VoiceOnsetTime,
+    ClosureDuration,
+    FricationDuration,
+    SpectralCentroid,
+    NasalMurmurBand,
+    NasalAntiresonance,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
