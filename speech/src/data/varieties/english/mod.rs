@@ -919,9 +919,14 @@ fn consonant_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel
             "periodic_voicing",
             consonant_periodic_voicing(manner, voicing),
         ),
+        (
+            "place_formant_locus",
+            Spec::Known(FeatureValue::Category(place_formant_locus(place).into())),
+        ),
     ]);
     let mut weighted_cues = weighted_cues(&[
         ("acoustic.cue.consonant_place_transition", 0.5),
+        ("acoustic.cue.place_formant_locus", 0.5),
         ("acoustic.cue.periodic_voicing", 0.5),
     ]);
     let mut landmarks = Vec::new();
@@ -931,6 +936,7 @@ fn consonant_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel
             &mut expected_features,
             &mut weighted_cues,
             &mut landmarks,
+            place,
             voicing,
         ),
         "fricative" => add_fricative_acoustics(
@@ -943,10 +949,16 @@ fn consonant_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel
             &mut expected_features,
             &mut weighted_cues,
             &mut landmarks,
+            place,
             voicing,
             frication_spectral_shape,
         ),
-        "nasal" => add_nasal_acoustics(&mut expected_features, &mut weighted_cues, &mut landmarks),
+        "nasal" => add_nasal_acoustics(
+            &mut expected_features,
+            &mut weighted_cues,
+            &mut landmarks,
+            place,
+        ),
         "liquid" | "glide" => add_approximant_acoustics(
             &mut expected_features,
             &mut weighted_cues,
@@ -982,10 +994,70 @@ fn consonant_periodic_voicing(manner: &str, voicing: &str) -> Spec<FeatureValue>
     }
 }
 
+fn boundary_model(features: &FeatureBundle, label: &str) -> AcousticTargetModel {
+    let boundary_kind = phonology_category(features, "boundary_kind").unwrap_or("segment");
+    AcousticTargetModel {
+        expected_features: acoustic_feature_bundle(&[
+            (
+                "segment_boundary",
+                Spec::Known(FeatureValue::Category(boundary_kind.into())),
+            ),
+            (
+                "boundary_gap",
+                Spec::Variable(vec![
+                    FeatureValue::Category("none".into()),
+                    FeatureValue::Category("brief".into()),
+                    FeatureValue::Category("pause".into()),
+                ]),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.segment_boundary", 1.0),
+            ("acoustic.cue.boundary_gap", 0.5),
+        ]),
+        landmarks: vec![boundary_landmark(boundary_kind)],
+        notes: Some(format!(
+            "Boundary evidence for {label}: symbolic {boundary_kind} alignment point."
+        )),
+    }
+}
+
+fn place_formant_locus(place: &str) -> &'static str {
+    match place {
+        "bilabial" | "labiodental" => "labial_low_f2",
+        "dental" | "alveolar" => "coronal_fronted",
+        "postalveolar" | "palatal" => "postalveolar_palatal",
+        "velar" => "velar_pinched",
+        "glottal" => "glottal_source",
+        _ => "unspecified",
+    }
+}
+
+fn stop_burst_spectral_shape(place: &str) -> &'static str {
+    match place {
+        "bilabial" => "diffuse_falling",
+        "alveolar" | "dental" => "diffuse_rising",
+        "postalveolar" | "palatal" => "mid_high_compact",
+        "velar" => "compact",
+        "glottal" => "weak_or_absent",
+        _ => "unspecified",
+    }
+}
+
+fn nasal_place_cue(place: &str) -> &'static str {
+    match place {
+        "bilabial" => "labial_murmur",
+        "alveolar" | "dental" => "coronal_murmur",
+        "velar" => "velar_murmur",
+        _ => "unspecified",
+    }
+}
+
 fn add_stop_acoustics(
     features: &mut FeatureBundle,
     cues: &mut Vec<WeightedCue>,
     landmarks: &mut Vec<AcousticLandmark>,
+    place: &str,
     voicing: &str,
 ) {
     let voiced = voicing == "voiced";
@@ -1008,6 +1080,13 @@ fn add_stop_acoustics(
     put_acoustic_feature(features, "vot_class", stop_vot_class(voiced));
     put_acoustic_feature(
         features,
+        "stop_burst_spectral_shape",
+        Spec::Known(FeatureValue::Category(
+            stop_burst_spectral_shape(place).into(),
+        )),
+    );
+    put_acoustic_feature(
+        features,
         "aspiration_present",
         if voiced {
             Spec::Known(FeatureValue::Bool(false))
@@ -1019,6 +1098,7 @@ fn add_stop_acoustics(
     cues.extend(weighted_cues(&[
         ("acoustic.cue.stop_closure", 1.0),
         ("acoustic.cue.release_burst", 0.9),
+        ("acoustic.cue.stop_burst_spectral_shape", 0.8),
         ("acoustic.cue.voice_onset_time", 0.9),
         (
             "acoustic.cue.closure_voicing",
@@ -1030,7 +1110,7 @@ fn add_stop_acoustics(
     }
 
     landmarks.push(closure_landmark(closure_voicing));
-    landmarks.push(release_burst_landmark());
+    landmarks.push(release_burst_landmark(stop_burst_spectral_shape(place)));
     if !voiced {
         landmarks.push(aspiration_landmark());
     }
@@ -1077,6 +1157,7 @@ fn add_affricate_acoustics(
     features: &mut FeatureBundle,
     cues: &mut Vec<WeightedCue>,
     landmarks: &mut Vec<AcousticLandmark>,
+    place: &str,
     voicing: &str,
     spectral_shape: &str,
 ) {
@@ -1100,12 +1181,20 @@ fn add_affricate_acoustics(
     put_acoustic_feature(features, "vot_class", stop_vot_class(voiced));
     put_acoustic_feature(
         features,
+        "stop_burst_spectral_shape",
+        Spec::Known(FeatureValue::Category(
+            stop_burst_spectral_shape(place).into(),
+        )),
+    );
+    put_acoustic_feature(
+        features,
         "aspiration_present",
         Spec::Known(FeatureValue::Bool(false)),
     );
     cues.extend(weighted_cues(&[
         ("acoustic.cue.stop_closure", 1.0),
         ("acoustic.cue.release_burst", 0.8),
+        ("acoustic.cue.stop_burst_spectral_shape", 0.7),
         ("acoustic.cue.voice_onset_time", 0.5),
         (
             "acoustic.cue.closure_voicing",
@@ -1113,7 +1202,7 @@ fn add_affricate_acoustics(
         ),
     ]));
     landmarks.push(closure_landmark(closure_voicing));
-    landmarks.push(release_burst_landmark());
+    landmarks.push(release_burst_landmark(stop_burst_spectral_shape(place)));
 
     add_fricative_acoustics(features, cues, landmarks, spectral_shape);
     put_acoustic_feature(
@@ -1129,6 +1218,7 @@ fn add_nasal_acoustics(
     features: &mut FeatureBundle,
     cues: &mut Vec<WeightedCue>,
     landmarks: &mut Vec<AcousticLandmark>,
+    place: &str,
 ) {
     put_acoustic_feature(
         features,
@@ -1140,12 +1230,18 @@ fn add_nasal_acoustics(
         "nasal_antiresonance",
         Spec::Known(FeatureValue::Bool(true)),
     );
+    put_acoustic_feature(
+        features,
+        "nasal_place",
+        Spec::Known(FeatureValue::Category(nasal_place_cue(place).into())),
+    );
     cues.extend(weighted_cues(&[
         ("acoustic.cue.nasal_murmur", 1.0),
         ("acoustic.cue.nasal_antiresonance", 0.8),
+        ("acoustic.cue.nasal_place", 0.6),
         ("acoustic.cue.periodic_voicing", 0.9),
     ]));
-    landmarks.push(nasal_murmur_landmark());
+    landmarks.push(nasal_murmur_landmark(nasal_place_cue(place)));
 }
 
 fn add_approximant_acoustics(
@@ -1399,7 +1495,7 @@ fn affricate_release_landmark() -> AcousticLandmark {
     }
 }
 
-fn nasal_murmur_landmark() -> AcousticLandmark {
+fn nasal_murmur_landmark(place_cue: &str) -> AcousticLandmark {
     AcousticLandmark {
         id: "nasal_murmur".into(),
         kind: AcousticLandmarkKind::PeriodicVoicing,
@@ -1411,6 +1507,10 @@ fn nasal_murmur_landmark() -> AcousticLandmark {
         expected_features: acoustic_feature_bundle(&[
             ("nasal_murmur", Spec::Known(FeatureValue::Bool(true))),
             ("nasal_antiresonance", Spec::Known(FeatureValue::Bool(true))),
+            (
+                "nasal_place",
+                Spec::Known(FeatureValue::Category(place_cue.into())),
+            ),
         ]),
         weighted_cues: weighted_cues(&[
             ("acoustic.cue.nasal_murmur", 1.0),
@@ -1476,7 +1576,7 @@ fn tap_closure_landmark() -> AcousticLandmark {
     }
 }
 
-fn release_burst_landmark() -> AcousticLandmark {
+fn release_burst_landmark(spectral_shape: &str) -> AcousticLandmark {
     AcousticLandmark {
         id: "release_burst".into(),
         kind: AcousticLandmarkKind::ReleaseBurst,
@@ -1485,12 +1585,42 @@ fn release_burst_landmark() -> AcousticLandmark {
             start_s: -0.005,
             end_s: 0.02,
         },
-        expected_features: acoustic_feature_bundle(&[(
-            "release_burst",
-            Spec::Known(FeatureValue::Bool(true)),
-        )]),
-        weighted_cues: weighted_cues(&[("acoustic.cue.release_burst", 1.0)]),
+        expected_features: acoustic_feature_bundle(&[
+            ("release_burst", Spec::Known(FeatureValue::Bool(true))),
+            (
+                "stop_burst_spectral_shape",
+                Spec::Known(FeatureValue::Category(spectral_shape.into())),
+            ),
+        ]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.release_burst", 1.0),
+            ("acoustic.cue.stop_burst_spectral_shape", 0.8),
+        ]),
         notes: Some("Burst timing is a useful alignment point for oral stops.".into()),
+    }
+}
+
+fn boundary_landmark(boundary_kind: &str) -> AcousticLandmark {
+    AcousticLandmark {
+        id: format!("{boundary_kind}_boundary"),
+        kind: AcousticLandmarkKind::Boundary,
+        anchor: LandmarkAnchor::SegmentCenter,
+        window: RelativeTimeWindow {
+            start_s: -0.005,
+            end_s: 0.005,
+        },
+        expected_features: acoustic_feature_bundle(&[(
+            "segment_boundary",
+            Spec::Known(FeatureValue::Category(boundary_kind.into())),
+        )]),
+        weighted_cues: weighted_cues(&[
+            ("acoustic.cue.segment_boundary", 1.0),
+            ("acoustic.cue.boundary_gap", 0.5),
+        ]),
+        notes: Some(
+            "Boundary phones are alignment anchors and may not correspond to audible energy."
+                .into(),
+        ),
     }
 }
 
@@ -1892,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn acoustic_profile_covers_modelable_inventory_segments() {
+    fn acoustic_profile_covers_all_inventory_segments() {
         let ga = variety("en-US-GA");
         let profile = ga.acoustic_profile.as_ref().expect("acoustic profile");
 
@@ -1904,10 +2034,7 @@ mod tests {
             );
         }
 
-        for (phone_id, phone) in &ga.phones.phones {
-            if acoustic_model_from_features(&phone.features, &phone.ipa).is_none() {
-                continue;
-            }
+        for phone_id in ga.phones.phones.keys() {
             assert!(
                 profile.phone_models.contains_key(phone_id),
                 "missing acoustic model for phone object {:?}",
@@ -1949,9 +2076,15 @@ mod tests {
         let m = phoneme_model_by_alias(&ga, profile, "M");
         let l = phoneme_model_by_alias(&ga, profile, "L");
         let tap = profile.phone_models.get(&TAP).expect("tap acoustic model");
+        let syllable_break = profile
+            .phone_models
+            .get(&SYLLABLE_BREAK)
+            .expect("syllable break acoustic model");
 
         assert_acoustic_bool(t, "stop_closure", true);
         assert_acoustic_bool(t, "release_burst", true);
+        assert_acoustic_category(t, "stop_burst_spectral_shape", "diffuse_rising");
+        assert_acoustic_category(t, "place_formant_locus", "coronal_fronted");
         assert_eq!(
             acoustic_value(t, "aspiration_present"),
             Some(&Spec::Variable(vec![
@@ -1965,9 +2098,11 @@ mod tests {
         assert_acoustic_bool(ch, "frication_noise", true);
         assert_acoustic_bool(m, "nasal_murmur", true);
         assert_acoustic_bool(m, "nasal_antiresonance", true);
+        assert_acoustic_category(m, "nasal_place", "labial_murmur");
         assert_acoustic_bool(l, "approximant_formants", true);
         assert_acoustic_bool(l, "lateral_resonance", true);
         assert_acoustic_bool(tap, "tap_closure", true);
+        assert_acoustic_category(syllable_break, "segment_boundary", "syllable");
     }
 
     #[test]

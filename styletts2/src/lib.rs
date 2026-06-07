@@ -48,5 +48,6 @@ pub mod onnx;
 
 #[cfg(feature = "styletts2-onnx")]
 pub use onnx::{
-    StyleTts2DiffusionOptions, StyleTts2OnnxBackend, StyleTts2OnnxOptimization, StyleTts2OnnxPaths,
+    STYLETTS2_ONNX_INTER_THREADS_ENV, STYLETTS2_ONNX_INTRA_THREADS_ENV, StyleTts2DiffusionOptions,
+    StyleTts2OnnxBackend, StyleTts2OnnxOptimization, StyleTts2OnnxOptions, StyleTts2OnnxPaths,
 };

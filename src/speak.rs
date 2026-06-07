@@ -43,8 +43,10 @@ pub struct SpeakCommand {
     pub voice_wav: Option<PathBuf>,
     #[arg(long)]
     pub style_wav: Option<PathBuf>,
-    #[arg(long, default_value_t = 5)]
-    pub diffusion_steps: usize,
+    #[arg(long, value_enum, default_value_t = SpeakQuality::Balanced)]
+    pub quality: SpeakQuality,
+    #[arg(long)]
+    pub diffusion_steps: Option<usize>,
     #[arg(long, default_value_t = 0.3)]
     pub style_alpha: f32,
     #[arg(long, default_value_t = 0.7)]
@@ -68,6 +70,28 @@ pub enum SpeakBackend {
     Mock,
     Styletts2,
     Piper,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SpeakQuality {
+    Balanced,
+    Fast,
+}
+
+impl SpeakQuality {
+    pub fn diffusion_steps(self) -> usize {
+        match self {
+            Self::Balanced => 5,
+            Self::Fast => 2,
+        }
+    }
+}
+
+impl SpeakCommand {
+    pub fn resolved_diffusion_steps(&self) -> usize {
+        self.diffusion_steps
+            .unwrap_or_else(|| self.quality.diffusion_steps())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +148,7 @@ impl From<&SpeakCommand> for SpeechSynthesisOptions {
             sample_rate_hz: command.sample_rate_hz,
             voice_wav: command.voice_wav.clone(),
             style_wav: command.style_wav.clone(),
-            diffusion_steps: command.diffusion_steps,
+            diffusion_steps: command.resolved_diffusion_steps(),
             style_alpha: command.style_alpha,
             style_beta: command.style_beta,
             embedding_scale: command.embedding_scale,
@@ -831,7 +855,8 @@ mod tests {
             sample_rate_hz: 24_000,
             voice_wav: None,
             style_wav: None,
-            diffusion_steps: 5,
+            quality: SpeakQuality::Balanced,
+            diffusion_steps: None,
             style_alpha: 0.3,
             style_beta: 0.7,
             embedding_scale: 1.0,
@@ -844,5 +869,57 @@ mod tests {
         .expect_err("guessed pronunciation should fail");
 
         assert!(error.to_string().contains("guessed pronunciation"));
+    }
+
+    #[test]
+    fn fast_quality_uses_two_diffusion_steps() {
+        let command = SpeakCommand {
+            text: "hello world".into(),
+            variety: "en-US".into(),
+            backend: SpeakBackend::Mock,
+            output: PathBuf::from("target/quality-fast.wav"),
+            sample_rate_hz: 24_000,
+            voice_wav: None,
+            style_wav: None,
+            quality: SpeakQuality::Fast,
+            diffusion_steps: None,
+            style_alpha: 0.3,
+            style_beta: 0.7,
+            embedding_scale: 1.0,
+            style_seed: 0,
+            debug_pronunciation: false,
+            max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
+            no_tts_chunking: false,
+            fail_on_guessed_pronunciation: false,
+        };
+
+        assert_eq!(command.resolved_diffusion_steps(), 2);
+        assert_eq!(SpeechSynthesisOptions::from(&command).diffusion_steps, 2);
+    }
+
+    #[test]
+    fn explicit_diffusion_steps_override_quality_preset() {
+        let command = SpeakCommand {
+            text: "hello world".into(),
+            variety: "en-US".into(),
+            backend: SpeakBackend::Mock,
+            output: PathBuf::from("target/quality-override.wav"),
+            sample_rate_hz: 24_000,
+            voice_wav: None,
+            style_wav: None,
+            quality: SpeakQuality::Fast,
+            diffusion_steps: Some(4),
+            style_alpha: 0.3,
+            style_beta: 0.7,
+            embedding_scale: 1.0,
+            style_seed: 0,
+            debug_pronunciation: false,
+            max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
+            no_tts_chunking: false,
+            fail_on_guessed_pronunciation: false,
+        };
+
+        assert_eq!(command.resolved_diffusion_steps(), 4);
+        assert_eq!(SpeechSynthesisOptions::from(&command).diffusion_steps, 4);
     }
 }

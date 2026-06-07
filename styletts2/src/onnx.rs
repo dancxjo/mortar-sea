@@ -28,6 +28,8 @@ const STYLE_HALF_DIMS: usize = STYLE_VECTOR_DIMS / 2;
 const HIDDEN_DIMS: i64 = 768;
 const MIN_REFERENCE_SAMPLES: usize = SAMPLE_RATE_HZ as usize;
 const MAX_REFERENCE_SAMPLES: usize = SAMPLE_RATE_HZ as usize * 8;
+pub const STYLETTS2_ONNX_INTRA_THREADS_ENV: &str = "STYLETTS2_ONNX_INTRA_THREADS";
+pub const STYLETTS2_ONNX_INTER_THREADS_ENV: &str = "STYLETTS2_ONNX_INTER_THREADS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyleTts2OnnxPaths {
@@ -91,6 +93,51 @@ impl StyleTts2OnnxOptimization {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyleTts2OnnxOptions {
+    pub optimization: StyleTts2OnnxOptimization,
+    pub intra_threads: usize,
+    pub inter_threads: usize,
+}
+
+impl Default for StyleTts2OnnxOptions {
+    fn default() -> Self {
+        Self {
+            optimization: StyleTts2OnnxOptimization::Generation,
+            intra_threads: 1,
+            inter_threads: 1,
+        }
+    }
+}
+
+impl StyleTts2OnnxOptions {
+    pub fn from_env() -> Result<Self, StyleTts2Error> {
+        let mut options = Self::default();
+        if let Some(intra_threads) = read_thread_count_env(STYLETTS2_ONNX_INTRA_THREADS_ENV)? {
+            options.intra_threads = intra_threads;
+        }
+        if let Some(inter_threads) = read_thread_count_env(STYLETTS2_ONNX_INTER_THREADS_ENV)? {
+            options.inter_threads = inter_threads;
+        }
+        Ok(options)
+    }
+
+    pub fn with_optimization(mut self, optimization: StyleTts2OnnxOptimization) -> Self {
+        self.optimization = optimization;
+        self
+    }
+
+    pub fn with_intra_threads(mut self, intra_threads: usize) -> Self {
+        self.intra_threads = intra_threads;
+        self
+    }
+
+    pub fn with_inter_threads(mut self, inter_threads: usize) -> Self {
+        self.inter_threads = inter_threads;
+        self
+    }
+}
+
 pub struct StyleTts2OnnxBackend {
     diffusion: Session,
     style_encoder: Session,
@@ -117,6 +164,16 @@ impl StyleTts2OnnxBackend {
         paths: StyleTts2OnnxPaths,
         optimization: StyleTts2OnnxOptimization,
     ) -> Result<Self, StyleTts2Error> {
+        let options = StyleTts2OnnxOptions::from_env()?.with_optimization(optimization);
+        Self::load_with_options(paths, options)
+    }
+
+    pub fn load_with_options(
+        paths: StyleTts2OnnxPaths,
+        options: StyleTts2OnnxOptions,
+    ) -> Result<Self, StyleTts2Error> {
+        validate_thread_count("intra-op", options.intra_threads)?;
+        validate_thread_count("inter-op", options.inter_threads)?;
         ensure_file(&paths.diffusion, "StyleTTS2 diffusion denoiser")?;
         ensure_file(&paths.style_encoder, "StyleTTS2 style encoder")?;
         ensure_file(&paths.text_encoder, "StyleTTS2 text encoder")?;
@@ -124,22 +181,10 @@ impl StyleTts2OnnxBackend {
         initialize_ort_runtime()?;
 
         Ok(Self {
-            diffusion: load_session(
-                &paths.diffusion,
-                "StyleTTS2 diffusion denoiser",
-                optimization,
-            )?,
-            style_encoder: load_session(
-                &paths.style_encoder,
-                "StyleTTS2 style encoder",
-                optimization,
-            )?,
-            text_encoder: load_session(
-                &paths.text_encoder,
-                "StyleTTS2 text encoder",
-                optimization,
-            )?,
-            decoder: load_session(&paths.decoder, "StyleTTS2 decoder", optimization)?,
+            diffusion: load_session(&paths.diffusion, "StyleTTS2 diffusion denoiser", options)?,
+            style_encoder: load_session(&paths.style_encoder, "StyleTTS2 style encoder", options)?,
+            text_encoder: load_session(&paths.text_encoder, "StyleTTS2 text encoder", options)?,
+            decoder: load_session(&paths.decoder, "StyleTTS2 decoder", options)?,
             style_vector: vec![0.0; STYLE_VECTOR_DIMS],
             speaker_reference_audio_uri: None,
             style_reference_audio_uri: None,
@@ -164,6 +209,13 @@ impl StyleTts2OnnxBackend {
         optimization: StyleTts2OnnxOptimization,
     ) -> Result<Self, StyleTts2Error> {
         Self::load_with_optimization(StyleTts2OnnxPaths::from_model_dir(model_dir), optimization)
+    }
+
+    pub fn from_model_dir_with_options(
+        model_dir: impl AsRef<Path>,
+        options: StyleTts2OnnxOptions,
+    ) -> Result<Self, StyleTts2Error> {
+        Self::load_with_options(StyleTts2OnnxPaths::from_model_dir(model_dir), options)
     }
 
     pub fn with_style_vector(mut self, style_vector: Vec<f32>) -> Result<Self, StyleTts2Error> {
@@ -366,6 +418,10 @@ impl StyleTts2OnnxBackend {
             (Some(uri), None) | (None, Some(uri)) => self.reference_style_vector(uri)?,
             (None, None) => self.style_vector.clone(),
         };
+
+        if !should_sample_diffusion_style(&self.diffusion_options) {
+            return Ok(reference_features);
+        }
 
         let predicted =
             self.sample_diffusion_style(text_embedding_shape, text_embedding, &reference_features)?;
@@ -572,6 +628,10 @@ fn reference_audio_uri_from_style(style: Option<&StyleRef>) -> Option<&str> {
         Some(StyleSource::ReferenceAudio { uri }) => Some(uri.as_str()),
         _ => None,
     }
+}
+
+fn should_sample_diffusion_style(options: &StyleTts2DiffusionOptions) -> bool {
+    options.alpha != 0.0 || options.beta != 0.0
 }
 
 fn merge_speaker_and_style_vectors(speaker: &[f32], style: &[f32]) -> Vec<f32> {
@@ -904,6 +964,42 @@ fn find_onnxruntime_dylib() -> Option<PathBuf> {
     find_home_onnxruntime_dylib().or_else(find_linker_onnxruntime_dylib)
 }
 
+fn read_thread_count_env(name: &'static str) -> Result<Option<usize>, StyleTts2Error> {
+    match std::env::var(name) {
+        Ok(value) => parse_thread_count_env(name, &value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(backend_error(format!("{name} must be valid UTF-8")))
+        }
+    }
+}
+
+fn parse_thread_count_env(
+    name: &'static str,
+    value: &str,
+) -> Result<Option<usize>, StyleTts2Error> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let threads = value.parse::<usize>().map_err(|error| {
+        backend_error(format!(
+            "{name} must be a positive integer thread count, got `{value}`: {error}"
+        ))
+    })?;
+    validate_thread_count(name, threads)?;
+    Ok(Some(threads))
+}
+
+fn validate_thread_count(label: &str, threads: usize) -> Result<(), StyleTts2Error> {
+    if threads == 0 {
+        return Err(backend_error(format!(
+            "{label} thread count must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
 fn find_home_onnxruntime_dylib() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let mut dirs = Vec::new();
@@ -956,19 +1052,19 @@ fn find_onnxruntime_dylib_in_dirs(dirs: impl IntoIterator<Item = PathBuf>) -> Op
 fn load_session(
     path: &Path,
     label: &str,
-    optimization: StyleTts2OnnxOptimization,
+    options: StyleTts2OnnxOptions,
 ) -> Result<Session, StyleTts2Error> {
     Session::builder()
         .map_err(|error| {
             backend_error(format!("failed to create {label} session builder: {error}"))
         })?
-        .with_intra_threads(1)
+        .with_intra_threads(options.intra_threads)
         .map_err(|error| {
             backend_error(format!(
                 "failed to configure {label} intra-op threads: {error}"
             ))
         })?
-        .with_inter_threads(1)
+        .with_inter_threads(options.inter_threads)
         .map_err(|error| {
             backend_error(format!(
                 "failed to configure {label} inter-op threads: {error}"
@@ -980,7 +1076,7 @@ fn load_session(
                 "failed to configure {label} intra-op spinning: {error}"
             ))
         })?
-        .with_optimization_level(optimization.graph_optimization_level())
+        .with_optimization_level(options.optimization.graph_optimization_level())
         .map_err(|error| {
             backend_error(format!("failed to configure {label} optimization: {error}"))
         })?
@@ -1050,6 +1146,59 @@ mod tests {
             StyleTts2OnnxOptimization::default(),
             StyleTts2OnnxOptimization::Generation
         );
+    }
+
+    #[test]
+    fn onnx_options_default_to_single_threaded_generation() {
+        assert_eq!(
+            StyleTts2OnnxOptions::default(),
+            StyleTts2OnnxOptions {
+                optimization: StyleTts2OnnxOptimization::Generation,
+                intra_threads: 1,
+                inter_threads: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn onnx_thread_env_parsing_accepts_positive_counts() {
+        assert_eq!(
+            parse_thread_count_env(STYLETTS2_ONNX_INTRA_THREADS_ENV, " 4 ").expect("thread count"),
+            Some(4)
+        );
+        assert_eq!(
+            parse_thread_count_env(STYLETTS2_ONNX_INTER_THREADS_ENV, "")
+                .expect("empty env ignored"),
+            None
+        );
+    }
+
+    #[test]
+    fn onnx_thread_env_parsing_rejects_invalid_counts() {
+        let error = parse_thread_count_env(STYLETTS2_ONNX_INTRA_THREADS_ENV, "0")
+            .expect_err("zero thread count should fail");
+        assert!(error.to_string().contains("must be greater than zero"));
+
+        let error = parse_thread_count_env(STYLETTS2_ONNX_INTER_THREADS_ENV, "many")
+            .expect_err("non-numeric thread count should fail");
+        assert!(error.to_string().contains("positive integer"));
+    }
+
+    #[test]
+    fn diffusion_sampling_is_skipped_only_when_reference_blend_is_exact() {
+        let mut options = StyleTts2DiffusionOptions {
+            alpha: 0.0,
+            beta: 0.0,
+            ..Default::default()
+        };
+        assert!(!should_sample_diffusion_style(&options));
+
+        options.alpha = f32::MIN_POSITIVE;
+        assert!(should_sample_diffusion_style(&options));
+
+        options.alpha = 0.0;
+        options.beta = f32::MIN_POSITIVE;
+        assert!(should_sample_diffusion_style(&options));
     }
 
     #[test]
