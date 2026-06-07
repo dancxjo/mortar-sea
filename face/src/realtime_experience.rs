@@ -14,8 +14,10 @@ use uuid::Uuid;
 use crate::app::AppState;
 use crate::llm_scheduler::LlmJobKind;
 use crate::messages::{
-    ExperienceRecord, RealTimeExperienceEvent, SensationRecord, VisionImpressionRecord,
+    EvidenceExclusionDiagnostic, ExperienceRecord, RealTimeExperienceEvent,
+    RealtimeExperienceDiagnostics, SensationRecord, VisionImpressionRecord,
 };
+use tracing::debug;
 
 const FALLBACK_IMPRESSION_CONFIDENCE: f32 = 0.5;
 const RECENT_SENSATION_PROMPT_LIMIT: usize = 8;
@@ -26,6 +28,7 @@ const CONTEXT_FRAME_MAX_TOKENS: usize = 220;
 const REALTIME_EXPERIENCE_MAX_TOKENS: usize = 1024;
 const MAX_CONTEXT_FRAME_TEXT_CHARS: usize = 140;
 const COMPACT_CONTEXT_ITEM_LIMIT: usize = 2;
+const MAX_DIAGNOSTIC_EXCLUDED_RECORDS: usize = 24;
 
 pub(crate) fn spawn_trace(state: AppState) {
     if state
@@ -75,9 +78,20 @@ pub(crate) fn spawn_trace(state: AppState) {
     let pending = state.realtime_experience_pending.clone();
 
     tokio::spawn(async move {
-        let prompt =
+        let prompt_result =
             build_prompt_from_records_opportunistically(&state, &records, &impressions).await;
-        if prompt.trim().is_empty() {
+        debug!(
+            external_evidence_records_included =
+                prompt_result.diagnostics.external_evidence_records_included,
+            internal_cognition_records_excluded =
+                prompt_result.diagnostics.internal_cognition_records_excluded,
+            control_or_ui_records_excluded =
+                prompt_result.diagnostics.control_or_ui_records_excluded,
+            prompt_token_estimate = prompt_result.diagnostics.prompt_token_estimate,
+            excluded_records = ?prompt_result.diagnostics.excluded_records,
+            "built real-time experience prompt"
+        );
+        if prompt_result.prompt.trim().is_empty() {
             active.store(false, Ordering::Release);
             if pending.swap(false, Ordering::AcqRel) {
                 spawn_trace(state);
@@ -87,25 +101,32 @@ pub(crate) fn spawn_trace(state: AppState) {
         let _ = events.send(RealTimeExperienceEvent::Prompt {
             generation_id,
             observed_at: chrono::Utc::now(),
-            prompt: prompt.clone(),
+            prompt: prompt_result.prompt.clone(),
+            diagnostics: prompt_result.diagnostics.clone(),
         });
         let _ = events.send(RealTimeExperienceEvent::ResponseStart { generation_id });
 
-        let generated =
-            match stream_generation(&state, generation_id, prompt.clone(), events.clone()).await {
-                Ok(generated) => generated,
-                Err(err) => {
-                    let fallback = format!("Gemma 4 Experience generation failed: {err}");
-                    for token in streamable_chunks(&fallback, 18) {
-                        let _ = events.send(RealTimeExperienceEvent::ResponseToken {
-                            generation_id,
-                            text: token,
-                        });
-                        sleep(Duration::from_millis(26)).await;
-                    }
-                    fallback
+        let generated = match stream_generation(
+            &state,
+            generation_id,
+            prompt_result.prompt.clone(),
+            events.clone(),
+        )
+        .await
+        {
+            Ok(generated) => generated,
+            Err(err) => {
+                let fallback = format!("Gemma 4 Experience generation failed: {err}");
+                for token in streamable_chunks(&fallback, 18) {
+                    let _ = events.send(RealTimeExperienceEvent::ResponseToken {
+                        generation_id,
+                        text: token,
+                    });
+                    sleep(Duration::from_millis(26)).await;
                 }
-            };
+                fallback
+            }
+        };
 
         record_generated_experiences(&state, generation_id, &generated, &events);
 
@@ -287,26 +308,54 @@ fn build_prompt_from_records(
     records: &[SensationRecord],
     impressions: &[VisionImpressionRecord],
 ) -> String {
-    let frame = build_timeline_frame_from_records(records, impressions);
+    build_prompt_result_from_records(records, impressions).prompt
+}
+
+struct PromptBuildResult {
+    prompt: String,
+    diagnostics: RealtimeExperienceDiagnostics,
+}
+
+#[cfg(test)]
+fn build_prompt_result_from_records(
+    records: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+) -> PromptBuildResult {
+    let mut diagnostics = RealtimeExperienceDiagnostics::default();
+    let frame =
+        build_timeline_frame_from_records_with_diagnostics(records, impressions, &mut diagnostics);
     if frame.entries().is_empty() {
-        return String::new();
+        return PromptBuildResult {
+            prompt: String::new(),
+            diagnostics,
+        };
     }
     let context_frame = compact_context_frame(ContextFrame::from_timeline(
         &frame,
         frame.entries(),
         DEFAULT_CONTEXT_FRAME_ITEMS,
     ));
-    format_realtime_experience_prompt(&context_frame, frame.entries())
+    let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
+    diagnostics.prompt_token_estimate = estimate_prompt_tokens(&prompt);
+    PromptBuildResult {
+        prompt,
+        diagnostics,
+    }
 }
 
 async fn build_prompt_from_records_opportunistically(
     state: &AppState,
     records: &[SensationRecord],
     impressions: &[VisionImpressionRecord],
-) -> String {
-    let frame = build_timeline_frame_from_records(records, impressions);
+) -> PromptBuildResult {
+    let mut diagnostics = RealtimeExperienceDiagnostics::default();
+    let frame =
+        build_timeline_frame_from_records_with_diagnostics(records, impressions, &mut diagnostics);
     if frame.entries().is_empty() {
-        return String::new();
+        return PromptBuildResult {
+            prompt: String::new(),
+            diagnostics,
+        };
     }
     let fallback_context = compact_context_frame(ContextFrame::from_timeline(
         &frame,
@@ -317,16 +366,35 @@ async fn build_prompt_from_records_opportunistically(
         .await
         .unwrap_or(fallback_context);
 
-    format_realtime_experience_prompt(&context_frame, frame.entries())
+    let prompt = format_realtime_experience_prompt(&context_frame, frame.entries());
+    diagnostics.prompt_token_estimate = estimate_prompt_tokens(&prompt);
+    PromptBuildResult {
+        prompt,
+        diagnostics,
+    }
 }
 
+#[cfg(test)]
 fn build_timeline_frame_from_records(
     records: &[SensationRecord],
     impressions: &[VisionImpressionRecord],
 ) -> TimelineFrame {
+    build_timeline_frame_from_records_with_diagnostics(
+        records,
+        impressions,
+        &mut RealtimeExperienceDiagnostics::default(),
+    )
+}
+
+fn build_timeline_frame_from_records_with_diagnostics(
+    records: &[SensationRecord],
+    impressions: &[VisionImpressionRecord],
+    diagnostics: &mut RealtimeExperienceDiagnostics,
+) -> TimelineFrame {
     let mut frame = TimelineFrame::new();
 
-    let selected_records = select_records_for_experience_prompt(records, impressions);
+    let selected_records =
+        select_records_for_experience_prompt_with_diagnostics(records, impressions, diagnostics);
 
     for record in selected_records {
         let sensation = Sensation {
@@ -860,9 +928,239 @@ fn prompt_json_string(text: &str) -> String {
         .replace('>', "\\u003e")
 }
 
+fn estimate_prompt_tokens(prompt: &str) -> usize {
+    prompt
+        .len()
+        .div_ceil(4)
+        .max(prompt.split_whitespace().count())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceClass {
+    ExternalEvidence,
+    InternalCognition,
+    ControlOrUi,
+}
+
+impl EvidenceClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExternalEvidence => "ExternalEvidence",
+            Self::InternalCognition => "InternalCognition",
+            Self::ControlOrUi => "ControlOrUi",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EvidenceClassification {
+    class: EvidenceClass,
+    reason: &'static str,
+}
+
+fn classify_sensation_record(record: &SensationRecord) -> EvidenceClassification {
+    let kind = record.kind.to_ascii_lowercase();
+    let source_faculty = record.source.faculty.to_ascii_lowercase();
+    let sensor_id = record.source.sensor_id.to_ascii_lowercase();
+    let provenance_faculties = record
+        .provenance
+        .faculty_chain
+        .iter()
+        .map(|faculty| faculty.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if record_contains_control_text(record) {
+        return EvidenceClassification {
+            class: EvidenceClass::ControlOrUi,
+            reason: "prompt/control text is not world evidence",
+        };
+    }
+
+    if is_internal_cognition_kind(&kind)
+        || is_internal_cognition_faculty(&source_faculty)
+        || is_internal_cognition_faculty(&sensor_id)
+        || provenance_faculties
+            .iter()
+            .any(|faculty| is_internal_cognition_faculty(faculty))
+    {
+        return EvidenceClassification {
+            class: EvidenceClass::InternalCognition,
+            reason: "voice/commentator/internal cognition output",
+        };
+    }
+
+    if is_control_or_ui_kind(&kind) || is_control_or_ui_faculty(&source_faculty) {
+        return EvidenceClassification {
+            class: EvidenceClass::ControlOrUi,
+            reason: "control/UI/status record",
+        };
+    }
+
+    if is_external_evidence_kind(&kind) {
+        return EvidenceClassification {
+            class: EvidenceClass::ExternalEvidence,
+            reason: "external sensor or faculty evidence",
+        };
+    }
+
+    EvidenceClassification {
+        class: EvidenceClass::ControlOrUi,
+        reason: "record kind is not on the external evidence allowlist",
+    }
+}
+
+fn classify_impression_record(impression: &VisionImpressionRecord) -> EvidenceClassification {
+    let kind = impression.kind.to_ascii_lowercase();
+    let faculty = impression.faculty.to_ascii_lowercase();
+    let source_faculty = impression.source.faculty.to_ascii_lowercase();
+    let sensor_id = impression.source.sensor_id.to_ascii_lowercase();
+
+    if impression
+        .text
+        .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+        || impression
+            .payload
+            .to_string()
+            .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+    {
+        return EvidenceClassification {
+            class: EvidenceClass::ControlOrUi,
+            reason: "prompt/control text is not world evidence",
+        };
+    }
+
+    if is_internal_cognition_kind(&kind)
+        || is_internal_cognition_faculty(&faculty)
+        || is_internal_cognition_faculty(&source_faculty)
+        || is_internal_cognition_faculty(&sensor_id)
+    {
+        return EvidenceClassification {
+            class: EvidenceClass::InternalCognition,
+            reason: "voice/commentator/internal cognition output",
+        };
+    }
+
+    if is_control_or_ui_kind(&kind)
+        || is_control_or_ui_faculty(&faculty)
+        || is_control_or_ui_faculty(&source_faculty)
+    {
+        return EvidenceClassification {
+            class: EvidenceClass::ControlOrUi,
+            reason: "control/UI/status impression",
+        };
+    }
+
+    if is_external_evidence_kind(&kind) {
+        return EvidenceClassification {
+            class: EvidenceClass::ExternalEvidence,
+            reason: "external sensor or faculty impression",
+        };
+    }
+
+    EvidenceClassification {
+        class: EvidenceClass::ControlOrUi,
+        reason: "impression kind is not on the external evidence allowlist",
+    }
+}
+
+fn is_internal_cognition_kind(kind: &str) -> bool {
+    kind.starts_with("voice.")
+        || kind.starts_with("commentator.")
+        || kind.starts_with("mouth.")
+        || kind.starts_with("realtime_experience.")
+        || kind.starts_with("real_time_experience.")
+        || kind.starts_with("context_frame.")
+}
+
+fn is_internal_cognition_faculty(faculty: &str) -> bool {
+    matches!(
+        faculty,
+        "voice"
+            | "commentator"
+            | "mouth"
+            | "contextframe"
+            | "context_frame"
+            | "realtime_experience"
+            | "real_time_experience"
+    )
+}
+
+fn is_control_or_ui_kind(kind: &str) -> bool {
+    kind.starts_with("interface.")
+        || kind.starts_with("ui.")
+        || kind.starts_with("prompt.")
+        || kind.starts_with("heartbeat.")
+        || kind.starts_with("status.")
+        || kind.starts_with("llm.")
+}
+
+fn is_control_or_ui_faculty(faculty: &str) -> bool {
+    matches!(
+        faculty,
+        "ui" | "interface" | "status" | "heartbeat" | "prompt" | "scheduler"
+    )
+}
+
+fn is_external_evidence_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "vision"
+            | "vision.frame"
+            | "vision.face_crop"
+            | "location.gps"
+            | "location.fix"
+            | "audio.utterance"
+            | "audio.voice_clip"
+            | "memory.voice_match"
+            | "memory.face_match"
+    ) || kind.starts_with("motion.")
+}
+
+fn record_contains_control_text(record: &SensationRecord) -> bool {
+    record
+        .detail
+        .to_string()
+        .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+}
+
+fn record_exclusion_diagnostic(
+    record: &SensationRecord,
+    classification: EvidenceClassification,
+    reason: impl Into<String>,
+) -> EvidenceExclusionDiagnostic {
+    EvidenceExclusionDiagnostic {
+        id: record.id,
+        record_kind: record.kind.clone(),
+        evidence_class: classification.class.as_str().to_owned(),
+        reason: reason.into(),
+    }
+}
+
+fn push_excluded_record(
+    diagnostics: &mut RealtimeExperienceDiagnostics,
+    diagnostic: EvidenceExclusionDiagnostic,
+) {
+    if diagnostics.excluded_records.len() < MAX_DIAGNOSTIC_EXCLUDED_RECORDS {
+        diagnostics.excluded_records.push(diagnostic);
+    }
+}
+
+#[cfg(test)]
 fn select_records_for_experience_prompt<'a>(
     records: &'a [SensationRecord],
     impressions: &[VisionImpressionRecord],
+) -> Vec<&'a SensationRecord> {
+    select_records_for_experience_prompt_with_diagnostics(
+        records,
+        impressions,
+        &mut RealtimeExperienceDiagnostics::default(),
+    )
+}
+
+fn select_records_for_experience_prompt_with_diagnostics<'a>(
+    records: &'a [SensationRecord],
+    impressions: &[VisionImpressionRecord],
+    diagnostics: &mut RealtimeExperienceDiagnostics,
 ) -> Vec<&'a SensationRecord> {
     let mut selected_ids = HashSet::new();
     let mut selected = Vec::new();
@@ -907,35 +1205,48 @@ fn select_records_for_experience_prompt<'a>(
     }
 
     selected.sort_by_key(|record| (record.occurred_at, record.observed_at, record.id));
+    diagnostics.external_evidence_records_included = selected.len();
+
+    for record in records {
+        let classification = classify_sensation_record(record);
+        match classification.class {
+            EvidenceClass::ExternalEvidence if selected_ids.contains(&record.id) => {}
+            EvidenceClass::ExternalEvidence => {
+                push_excluded_record(
+                    diagnostics,
+                    record_exclusion_diagnostic(
+                        record,
+                        classification,
+                        "external evidence outside prompt budget",
+                    ),
+                );
+            }
+            EvidenceClass::InternalCognition => {
+                diagnostics.internal_cognition_records_excluded += 1;
+                push_excluded_record(
+                    diagnostics,
+                    record_exclusion_diagnostic(record, classification, classification.reason),
+                );
+            }
+            EvidenceClass::ControlOrUi => {
+                diagnostics.control_or_ui_records_excluded += 1;
+                push_excluded_record(
+                    diagnostics,
+                    record_exclusion_diagnostic(record, classification, classification.reason),
+                );
+            }
+        }
+    }
+
     selected
 }
 
 fn is_experience_grounding_sensation(record: &SensationRecord) -> bool {
-    matches!(
-        record.kind.as_str(),
-        "vision.frame"
-            | "vision.face_crop"
-            | "location.fix"
-            | "audio.utterance"
-            | "audio.voice_clip"
-            | "memory.voice_match"
-            | "memory.face_match"
-    ) || record.kind.starts_with("motion.")
+    classify_sensation_record(record).class == EvidenceClass::ExternalEvidence
 }
 
 fn is_experience_grounding_impression(impression: &VisionImpressionRecord) -> bool {
-    matches!(
-        impression.kind.as_str(),
-        "vision"
-            | "vision.frame"
-            | "vision.face_crop"
-            | "location.gps"
-            | "location.fix"
-            | "audio.utterance"
-            | "audio.voice_clip"
-            | "memory.voice_match"
-            | "memory.face_match"
-    ) || impression.kind.starts_with("motion.")
+    classify_impression_record(impression).class == EvidenceClass::ExternalEvidence
 }
 
 fn prompt_limited_text(text: &str, max_chars: usize) -> String {
@@ -1490,6 +1801,255 @@ mod tests {
         assert!(!prompt.contains("about to say"));
         assert!(!prompt.contains("commentator.internal_thought"));
         assert!(!prompt.contains("voice.speech_queued"));
+    }
+
+    #[test]
+    fn voice_fallback_observation_is_excluded_from_realtime_experience_prompt() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let fallback_id = Uuid::new_v4();
+        let records = vec![
+            sensation_record(vision_id, 1, t0),
+            self_generated_record(
+                fallback_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "commentator.internal_thought",
+                "Commentator",
+                "I notice I am here with the present moment.",
+            ),
+        ];
+        let impressions = vec![
+            vision_impression(
+                vision_id,
+                t0,
+                "I see a man with a dog in a room with shelving.",
+            ),
+            self_generated_impression(
+                fallback_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "commentator.internal_thought",
+                "Commentator",
+                "I think: I notice I am here with the present moment.",
+            ),
+        ];
+
+        let prompt = build_prompt_from_records(&records, &impressions);
+
+        assert!(prompt.contains("I see a man with a dog in a room with shelving."));
+        assert!(!prompt.contains("present moment"));
+        assert!(!prompt.contains("commentator.internal_thought"));
+    }
+
+    #[test]
+    fn prompt_centers_one_vision_impression_despite_many_internal_outputs() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let mut records = vec![sensation_record(vision_id, 1, t0)];
+        let mut impressions = vec![vision_impression(
+            vision_id,
+            t0,
+            "I see a man with a dog in a room with shelving.",
+        )];
+
+        for index in 0..32 {
+            let id = Uuid::new_v4();
+            let occurred_at = t0 + ChronoDuration::milliseconds(index + 1);
+            let text = if index % 2 == 0 {
+                "I feel the data stream continuing."
+            } else {
+                "I observe the steady hum."
+            };
+            let kind = if index % 3 == 0 {
+                "commentator.internal_thought"
+            } else {
+                "voice.spoken_utterance"
+            };
+            let faculty = if index % 3 == 0 {
+                "Commentator"
+            } else {
+                "Voice"
+            };
+            records.push(self_generated_record(id, occurred_at, kind, faculty, text));
+            impressions.push(self_generated_impression(
+                id,
+                occurred_at,
+                kind,
+                faculty,
+                &format!("I think: {text}"),
+            ));
+        }
+
+        let result = build_prompt_result_from_records(&records, &impressions);
+
+        assert!(
+            result
+                .prompt
+                .contains("I see a man with a dog in a room with shelving.")
+        );
+        assert!(!result.prompt.contains("data stream"));
+        assert!(!result.prompt.contains("steady hum"));
+        assert_eq!(result.diagnostics.external_evidence_records_included, 1);
+        assert_eq!(result.diagnostics.internal_cognition_records_excluded, 32);
+        assert_eq!(result.diagnostics.control_or_ui_records_excluded, 0);
+    }
+
+    #[test]
+    fn context_frame_world_fields_are_not_populated_from_internal_cognition() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let voice_id = Uuid::new_v4();
+        let commentator_id = Uuid::new_v4();
+        let records = vec![
+            sensation_record(vision_id, 1, t0),
+            self_generated_record(
+                voice_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "voice.spoken_utterance",
+                "Voice",
+                "I feel the data stream continuing in the room.",
+            ),
+            self_generated_record(
+                commentator_id,
+                t0 + ChronoDuration::milliseconds(2),
+                "commentator.internal_thought",
+                "Commentator",
+                "I observe the steady hum near Pete.",
+            ),
+        ];
+        let impressions = vec![
+            vision_impression(
+                vision_id,
+                t0,
+                "I see a man with a dog in a room with shelving.",
+            ),
+            self_generated_impression(
+                voice_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "voice.spoken_utterance",
+                "Voice",
+                "I say: I feel the data stream continuing in the room.",
+            ),
+            self_generated_impression(
+                commentator_id,
+                t0 + ChronoDuration::milliseconds(2),
+                "commentator.internal_thought",
+                "Commentator",
+                "I think: I observe the steady hum near Pete.",
+            ),
+        ];
+
+        let frame = build_timeline_frame_from_records(&records, &impressions);
+        let context = compact_context_frame(ContextFrame::from_timeline(
+            &frame,
+            frame.entries(),
+            DEFAULT_CONTEXT_FRAME_ITEMS,
+        ));
+        let rendered = context.render();
+
+        assert!(rendered.contains("man with a dog"));
+        assert!(!rendered.contains("data stream"));
+        assert!(!rendered.contains("steady hum"));
+        assert!(!context.who.iter().any(|item| item.contains("Pete")));
+        assert!(
+            !context
+                .where_
+                .iter()
+                .any(|item| item.contains("data stream") || item.contains("steady hum"))
+        );
+    }
+
+    #[test]
+    fn live_wit_update_prompt_text_is_never_ingested_as_evidence() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let append_id = Uuid::new_v4();
+        let records = vec![
+            sensation_record(vision_id, 1, t0),
+            self_generated_record(
+                append_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "audio.utterance",
+                "microphone",
+                "LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS: I feel the data stream continuing.",
+            ),
+        ];
+        let impressions = vec![
+            vision_impression(
+                vision_id,
+                t0,
+                "I see a man with a dog in a room with shelving.",
+            ),
+            self_generated_impression(
+                append_id,
+                t0 + ChronoDuration::milliseconds(1),
+                "audio.utterance",
+                "microphone",
+                "LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS: I feel the data stream continuing.",
+            ),
+        ];
+
+        let result = build_prompt_result_from_records(&records, &impressions);
+
+        assert!(
+            result
+                .prompt
+                .contains("I see a man with a dog in a room with shelving.")
+        );
+        assert!(
+            !result
+                .prompt
+                .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+        );
+        assert!(!result.prompt.contains("data stream"));
+        assert_eq!(result.diagnostics.external_evidence_records_included, 1);
+        assert_eq!(result.diagnostics.control_or_ui_records_excluded, 1);
+    }
+
+    #[test]
+    fn prompt_size_stays_bounded_when_many_internal_cognition_events_occur() {
+        let t0 = chrono::Utc::now();
+        let vision_id = Uuid::new_v4();
+        let mut records = vec![sensation_record(vision_id, 1, t0)];
+        let mut impressions = vec![vision_impression(
+            vision_id,
+            t0,
+            "I see a man with a dog in a room with shelving.",
+        )];
+
+        for index in 0..500 {
+            let id = Uuid::new_v4();
+            let occurred_at = t0 + ChronoDuration::milliseconds(index + 1);
+            let text = format!(
+                "I feel the data stream continuing and observe the steady hum number {index}."
+            );
+            records.push(self_generated_record(
+                id,
+                occurred_at,
+                "commentator.internal_thought",
+                "Commentator",
+                &text,
+            ));
+            impressions.push(self_generated_impression(
+                id,
+                occurred_at,
+                "commentator.internal_thought",
+                "Commentator",
+                &format!("I think: {text}"),
+            ));
+        }
+
+        let result = build_prompt_result_from_records(&records, &impressions);
+
+        assert!(
+            result
+                .prompt
+                .contains("I see a man with a dog in a room with shelving.")
+        );
+        assert!(!result.prompt.contains("steady hum"));
+        assert_eq!(result.diagnostics.external_evidence_records_included, 1);
+        assert_eq!(result.diagnostics.internal_cognition_records_excluded, 500);
+        assert!(result.diagnostics.prompt_token_estimate < 1_200);
+        assert!(result.diagnostics.excluded_records.len() <= MAX_DIAGNOSTIC_EXCLUDED_RECORDS);
     }
 
     #[test]

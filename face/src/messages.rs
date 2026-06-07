@@ -177,6 +177,24 @@ pub(crate) struct MediaRecord {
     pub(crate) encoding: String,
 }
 
+#[derive(Debug, Serialize, Clone, Default)]
+pub(crate) struct RealtimeExperienceDiagnostics {
+    pub(crate) external_evidence_records_included: usize,
+    pub(crate) internal_cognition_records_excluded: usize,
+    pub(crate) control_or_ui_records_excluded: usize,
+    pub(crate) prompt_token_estimate: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) excluded_records: Vec<EvidenceExclusionDiagnostic>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct EvidenceExclusionDiagnostic {
+    pub(crate) id: Uuid,
+    pub(crate) record_kind: String,
+    pub(crate) evidence_class: String,
+    pub(crate) reason: String,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AckMessage {
     pub(crate) r#type: &'static str,
@@ -200,6 +218,7 @@ pub(crate) enum RealTimeExperienceEvent {
         generation_id: Uuid,
         observed_at: DateTime<Utc>,
         prompt: String,
+        diagnostics: RealtimeExperienceDiagnostics,
     },
     ResponseStart {
         generation_id: Uuid,

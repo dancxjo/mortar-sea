@@ -41,6 +41,7 @@ window.faceApp = function faceApp() {
     fps: 3,
     experiencePrompt: '',
     experienceResponse: '',
+    experienceDiagnostics: '',
     experienceSocket: null,
     experienceStatus: 'disconnected',
     activeExperienceGenerationId: null,
@@ -317,6 +318,9 @@ window.faceApp = function faceApp() {
         if (message.type === 'prompt') {
           this.activeExperienceGenerationId = message.generation_id;
           this.experiencePrompt = message.prompt;
+          this.experienceDiagnostics = message.diagnostics
+            ? JSON.stringify(message.diagnostics, null, 2)
+            : '';
           this.experienceResponse = '';
           return;
         }

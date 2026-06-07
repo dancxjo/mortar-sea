@@ -34,15 +34,35 @@ impl ContextFrame {
         let scan_limit = window
             .len()
             .max(max_items.saturating_mul(CONTEXT_SCAN_MULTIPLIER));
-        let recent_entries = frame.recent_entries(scan_limit);
+        let excluded_sensation_ids = window
+            .iter()
+            .chain(frame.recent_entries(scan_limit).iter())
+            .filter_map(|entry| match entry {
+                TimelineEntry::Sensation(sensation) if !is_world_context_sensation(sensation) => {
+                    Some(sensation.id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let window = window
+            .iter()
+            .filter(|entry| is_world_context_entry(entry, &excluded_sensation_ids))
+            .cloned()
+            .collect::<Vec<_>>();
+        let recent_entries = frame
+            .recent_entries(scan_limit)
+            .iter()
+            .filter(|entry| is_world_context_entry(entry, &excluded_sensation_ids))
+            .cloned()
+            .collect::<Vec<_>>();
 
         Self {
-            who: collect_who(window, recent_entries, max_items),
-            what: collect_what(window, recent_entries, max_items),
-            where_: collect_where(window, recent_entries, max_items),
-            when: format_when(window),
-            why: collect_why(window, max_items),
-            how: collect_how(window, recent_entries, max_items),
+            who: collect_who(&window, &recent_entries, max_items),
+            what: collect_what(&window, &recent_entries, max_items),
+            where_: collect_where(&window, &recent_entries, max_items),
+            when: format_when(&window),
+            why: collect_why(&window, max_items),
+            how: collect_how(&window, &recent_entries, max_items),
         }
     }
 
@@ -395,6 +415,99 @@ fn looks_like_person_name(token: &str) -> bool {
     )
 }
 
+fn is_world_context_entry(entry: &TimelineEntry, excluded_sensation_ids: &[uuid::Uuid]) -> bool {
+    match entry {
+        TimelineEntry::Sensation(sensation) => is_world_context_sensation(sensation),
+        TimelineEntry::Impression(impression) => {
+            !impression
+                .about
+                .iter()
+                .any(|id| excluded_sensation_ids.contains(id))
+                && is_world_context_impression(impression)
+        }
+        TimelineEntry::Experience(_) => true,
+    }
+}
+
+fn is_world_context_sensation(sensation: &crate::sensation::Sensation) -> bool {
+    let kind = sensation.kind.to_ascii_lowercase();
+    if is_external_context_kind(&kind) {
+        return true;
+    }
+    !is_internal_or_control_context_kind(&kind)
+        && !is_internal_or_control_context_source(&sensation.source)
+        && !sensation
+            .payload
+            .to_string()
+            .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+}
+
+fn is_world_context_impression(impression: &crate::impression::Impression) -> bool {
+    let kind = impression.kind.to_ascii_lowercase();
+    if is_external_context_kind(&kind) {
+        return true;
+    }
+    !is_internal_or_control_context_kind(&kind)
+        && !is_internal_or_control_context_source(&impression.faculty)
+        && !impression
+            .text
+            .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+        && !impression
+            .payload
+            .to_string()
+            .contains("LIVE REAL-WORLD EXPERIENCE UPDATE FROM WITS")
+}
+
+fn is_external_context_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "vision"
+            | "vision.frame"
+            | "vision.face_crop"
+            | "location.gps"
+            | "location.fix"
+            | "audio.utterance"
+            | "audio.voice_clip"
+            | "memory.related_experience"
+            | "memory.voice_match"
+            | "memory.face_match"
+    ) || kind.starts_with("motion.")
+}
+
+fn is_internal_or_control_context_kind(kind: &str) -> bool {
+    kind.starts_with("voice.")
+        || kind.starts_with("commentator.")
+        || kind.starts_with("mouth.")
+        || kind.starts_with("context_frame.")
+        || kind.starts_with("realtime_experience.")
+        || kind.starts_with("real_time_experience.")
+        || kind.starts_with("interface.")
+        || kind.starts_with("ui.")
+        || kind.starts_with("prompt.")
+        || kind.starts_with("heartbeat.")
+        || kind.starts_with("status.")
+        || kind.starts_with("llm.")
+}
+
+fn is_internal_or_control_context_source(source: &str) -> bool {
+    let lowered = source.to_ascii_lowercase();
+    matches!(
+        lowered.as_str(),
+        "voice"
+            | "commentator"
+            | "mouth"
+            | "contextframe"
+            | "context_frame"
+            | "realtime_experience"
+            | "real_time_experience"
+            | "ui"
+            | "interface"
+            | "prompt"
+            | "heartbeat"
+            | "status"
+    )
+}
+
 fn extract_location_from_payload(payload: &Value) -> Option<String> {
     for key in ["room", "location", "place", "where", "label"] {
         if let Some(text) = payload.get(key).and_then(Value::as_str) {
@@ -699,5 +812,59 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("camera.default"))
         );
+    }
+
+    #[test]
+    fn context_frame_ignores_voice_and_commentator_entries_as_world_context() {
+        let t0 = now();
+        let vision = Sensation::new("vision.frame", "camera.default", t0, t0, json!({}));
+        let vision_impression = Impression::new(
+            vec![vision.id],
+            t0,
+            t0,
+            "I see a man with a dog in a room with shelving.",
+        );
+        let voice = Sensation::new(
+            "voice.spoken_utterance",
+            "voice",
+            t0 + Duration::milliseconds(1),
+            t0 + Duration::milliseconds(1),
+            json!({"text": "I feel the data stream continuing in the room."}),
+        );
+        let voice_impression = Impression::new(
+            vec![voice.id],
+            voice.occurred_at,
+            voice.observed_at,
+            "I say: I feel the data stream continuing in the room.",
+        );
+        let commentator = Sensation::new(
+            "commentator.internal_thought",
+            "commentator",
+            t0 + Duration::milliseconds(2),
+            t0 + Duration::milliseconds(2),
+            json!({"text": "I observe the steady hum near Pete."}),
+        );
+        let commentator_impression = Impression::new(
+            vec![commentator.id],
+            commentator.occurred_at,
+            commentator.observed_at,
+            "I think: I observe the steady hum near Pete.",
+        );
+
+        let mut frame = TimelineFrame::new();
+        frame.push(TimelineEntry::Sensation(vision));
+        frame.push(TimelineEntry::Impression(vision_impression));
+        frame.push(TimelineEntry::Sensation(voice));
+        frame.push(TimelineEntry::Impression(voice_impression));
+        frame.push(TimelineEntry::Sensation(commentator));
+        frame.push(TimelineEntry::Impression(commentator_impression));
+
+        let context = ContextFrame::from_timeline(&frame, frame.entries(), 4);
+        let rendered = context.render();
+
+        assert!(rendered.contains("man with a dog"));
+        assert!(!rendered.contains("data stream"));
+        assert!(!rendered.contains("steady hum"));
+        assert!(!context.who.iter().any(|item| item.contains("Pete")));
     }
 }

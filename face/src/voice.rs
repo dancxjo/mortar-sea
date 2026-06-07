@@ -42,7 +42,6 @@ const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_PIPER_SYNTHESIS_TIMEOUT: StdDuration = StdDuration::from_secs(90);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
 const DIALOGUE_VOICE_MAX_TOKENS_PER_TURN: usize = 96;
-const VOICE_FALLBACK_INTERNAL_OBSERVATION: &str = "I notice I am here with the present moment.";
 
 static PIPER_SYNTHESIS_WORKER: LazyLock<Mutex<Option<PiperSynthesisWorker>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -452,17 +451,7 @@ async fn run_commentator(state: AppState) {
 
                         match result {
                             Ok(generated) => {
-                                let (completed_turn, fallback_observation) =
-                                    voice_turn_with_minimum_observation(generated);
-                                if let Some(observation) = fallback_observation {
-                                    let token = format!("\n{observation}");
-                                    let _ = state.realtime_experience_events.send(
-                                        RealTimeExperienceEvent::VoiceResponseToken {
-                                            generation_id,
-                                            text: token.clone(),
-                                        },
-                                    );
-                                }
+                                let completed_turn = voice_turn_or_silence(generated);
                                 remember_recent_voice_turn(
                                     &mut recent_voice_turns,
                                     completed_turn.clone(),
@@ -1775,7 +1764,7 @@ fn build_dialogue_voice_messages(
     append_chat_message(
         &mut messages,
         "user",
-        "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice unless it starts with <thought/>. Start with <thought/> to pass the turn or keep the response internal; that response will not be spoken.",
+        "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice. Leave the response empty to stay silent.",
     );
     messages
 }
@@ -1810,7 +1799,7 @@ fn dialogue_voice_system_prompt() -> &'static str {
      Keep responses brief, plain, and conversational. \
      Give the interlocutor a chance to speak; do not monologue. \
      Whatever you write is spoken aloud verbatim by Mouth, so do not wrap speech in <say> tags. \
-     If it is better to wait, listen, or pass the turn, start the response with <thought/>; responses that start with <thought/> are recorded internally and are not spoken. \
+     If it is better to wait, listen, or pass the turn, leave the response empty; empty responses are treated as silence. \
      Treat only the structured context and conversation turns as external fact. \
      Preserve uncertainty and do not invent new external events, people, objects, or intentions."
 }
@@ -2014,14 +2003,11 @@ fn voice_conversation_needs_response(turns: &VecDeque<VoiceConversationTurn>) ->
         .is_some_and(|turn| turn.role == VoiceConversationRole::User)
 }
 
-fn voice_turn_with_minimum_observation(text: String) -> (String, Option<&'static str>) {
+fn voice_turn_or_silence(text: String) -> String {
     if voice_turn_has_observation(&text) {
-        (text, None)
+        text
     } else {
-        (
-            VOICE_FALLBACK_INTERNAL_OBSERVATION.to_string(),
-            Some(VOICE_FALLBACK_INTERNAL_OBSERVATION),
-        )
+        String::new()
     }
 }
 
@@ -3308,7 +3294,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_voice_prompt_speaks_plain_text_and_supports_thought_pass() {
+    fn dialogue_voice_prompt_speaks_plain_text_and_supports_silence() {
         let messages = build_dialogue_voice_messages(
             &VecDeque::new(),
             &VecDeque::new(),
@@ -3325,8 +3311,10 @@ mod tests {
         assert!(prompt.contains("do not wrap speech in <say> tags"));
         assert!(prompt.contains("Keep responses brief"));
         assert!(prompt.contains("Give the interlocutor a chance to speak"));
-        assert!(prompt.contains("Start with <thought/> to pass the turn"));
-        assert!(prompt.contains("will not be spoken"));
+        assert!(prompt.contains("Leave the response empty to stay silent"));
+        assert!(prompt.contains("empty responses are treated as silence"));
+        assert!(!prompt.contains("Start with <thought/>"));
+        assert!(!prompt.contains("<thought/> to pass the turn"));
     }
 
     #[test]
@@ -3450,32 +3438,29 @@ mod tests {
     }
 
     #[test]
-    fn voice_turn_marker_only_output_gets_internal_observation_fallback() {
-        let (turn, fallback) =
-            voice_turn_with_minimum_observation("<|im_start|>assistant".to_string());
+    fn voice_turn_marker_only_output_becomes_silence() {
+        let turn = voice_turn_or_silence("<|im_start|>assistant".to_string());
 
-        assert_eq!(turn, VOICE_FALLBACK_INTERNAL_OBSERVATION);
-        assert_eq!(fallback, Some(VOICE_FALLBACK_INTERNAL_OBSERVATION));
-        assert!(voice_turn_has_observation(&turn));
+        assert!(turn.is_empty());
+        assert!(!voice_turn_has_observation(&turn));
     }
 
     #[test]
-    fn voice_turn_tag_only_output_gets_internal_observation_fallback() {
-        let (turn, fallback) = voice_turn_with_minimum_observation("<say></say>".to_string());
+    fn voice_turn_tag_only_output_becomes_silence() {
+        let turn = voice_turn_or_silence("<say></say>".to_string());
 
-        assert_eq!(turn, VOICE_FALLBACK_INTERNAL_OBSERVATION);
-        assert_eq!(fallback, Some(VOICE_FALLBACK_INTERNAL_OBSERVATION));
+        assert!(turn.is_empty());
     }
 
     #[test]
     fn voice_turn_existing_internal_or_spoken_observation_is_preserved() {
         assert_eq!(
-            voice_turn_with_minimum_observation("I am watching the room.".to_string()),
-            ("I am watching the room.".to_string(), None)
+            voice_turn_or_silence("I am watching the room.".to_string()),
+            "I am watching the room.".to_string()
         );
         assert_eq!(
-            voice_turn_with_minimum_observation("<say>I see Travis.</say>".to_string()),
-            ("<say>I see Travis.</say>".to_string(), None)
+            voice_turn_or_silence("<say>I see Travis.</say>".to_string()),
+            "<say>I see Travis.</say>".to_string()
         );
     }
 
