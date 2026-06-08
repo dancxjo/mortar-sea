@@ -676,6 +676,75 @@ fn feature_track_segments_emit_only_voicing_or_silence_labels() {
 }
 
 #[test]
+fn voicing_pattern_stage_aligns_phone_runs_to_voicing_lane() {
+    let output = phonemicized("see do");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..50).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -80.0;
+        frame.energy_norm = 0.0;
+        frame.voicing = 0.0;
+        frame.sonority = 0.0;
+        frame.high_ratio = 0.0;
+    }
+    for frame in frames.iter_mut().take(15).skip(5) {
+        frame.energy_db = -22.0;
+        frame.energy_norm = 0.68;
+        frame.voicing = 0.05;
+        frame.sonority = 0.08;
+        frame.high_ratio = 0.82;
+    }
+    for frame in frames.iter_mut().take(45).skip(15) {
+        frame.energy_db = -20.0;
+        frame.energy_norm = 0.74;
+        frame.voicing = 0.78;
+        frame.sonority = 0.72;
+        frame.high_ratio = 0.14;
+    }
+
+    let spans =
+        voicing_pattern_unit_spans(&units, &frames, 500).expect("voicing pattern alignment");
+
+    assert_eq!(known_phone_id(unit_phone(&units[0])), Some("ipa.phone.s"));
+    assert_eq!(spans[0].start_ms, 5 * ALIGN_HOP_MS);
+    assert_eq!(spans[0].end_ms, 15 * ALIGN_HOP_MS);
+    assert!(spans[1].start_ms >= 15 * ALIGN_HOP_MS);
+    assert_eq!(
+        spans.last().map(|span| span.end_ms),
+        Some(45 * ALIGN_HOP_MS)
+    );
+}
+
+#[test]
+fn voicing_pattern_stage_distributes_when_lane_is_too_short() {
+    let output = phonemicized("see do");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..2).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -20.0;
+        frame.energy_norm = 0.74;
+        frame.voicing = 0.78;
+        frame.sonority = 0.72;
+    }
+
+    let spans =
+        voicing_pattern_unit_spans(&units, &frames, 20).expect("fallback voicing alignment");
+
+    assert_eq!(spans.len(), units.len());
+    assert!(
+        spans
+            .windows(2)
+            .all(|pair| pair[0].end_ms == pair[1].start_ms)
+    );
+}
+
+#[test]
 fn near_silent_frames_do_not_report_autocorrelation_voicing() {
     let frame = vec![0.0005; (ALIGN_SAMPLE_RATE_HZ as usize * ALIGN_FRAME_MS as usize) / 1000];
     let spectrum_plan = SpectrumPlan::new(frame.len());
@@ -1367,6 +1436,13 @@ fn word_boundary_index(units: &[AlignableUnit<'_>]) -> Option<usize> {
             ) if previous != next
         )
     })
+}
+
+fn unit_phone<'a>(unit: &'a AlignableUnit<'a>) -> &'a PhoneToken {
+    match unit {
+        AlignableUnit::Phone { token, .. } => token,
+        AlignableUnit::Boundary { .. } => panic!("expected phone unit"),
+    }
 }
 
 fn test_frame(index: usize) -> AcousticFrameFeatures {

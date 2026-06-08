@@ -20,6 +20,7 @@ const ASR_SAMPLE_RATE_HZ: u32 = 16_000;
 const ALIGN_SAMPLE_RATE_HZ: u32 = 16_000;
 const ALIGN_FRAME_MS: u64 = 25;
 const ALIGN_HOP_MS: u64 = 10;
+#[allow(dead_code)]
 const MAX_FULL_TRAJECTORY_SAMPLES: usize = 7;
 
 #[derive(Clone)]

@@ -14,8 +14,7 @@ pub(super) fn feature_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<Fe
     if frames.is_empty() {
         return Vec::new();
     }
-    let activity_threshold = speech_activity_threshold(frames);
-    let kinds = smoothed_feature_kinds(frames, activity_threshold);
+    let kinds = voicing_feature_kinds(frames);
     let mut segments = Vec::new();
     let mut current_kind = kinds[0];
     let mut start_ms = frames[0].start_ms;
@@ -41,6 +40,14 @@ pub(super) fn feature_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<Fe
         ));
     }
     segments
+}
+
+pub(super) fn voicing_feature_kinds(frames: &[AcousticFrameFeatures]) -> Vec<&'static str> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let activity_threshold = speech_activity_threshold(frames);
+    smoothed_feature_kinds(frames, activity_threshold)
 }
 
 fn smoothed_feature_kinds(

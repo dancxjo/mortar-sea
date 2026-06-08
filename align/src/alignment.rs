@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::{
     ALIGN_HOP_MS, ALIGN_SAMPLE_RATE_HZ, AsrSentence, DecodedWav, FeatureTrackSegment,
     MAX_FULL_TRAJECTORY_SAMPLES, SegmentAlignment, TimedWord, WordAlignment,
@@ -27,6 +29,7 @@ use acoustic::{SpectrumPlan, analyze_frame};
 pub(crate) use feature_tracks::alignment_feature_tracks;
 #[cfg(test)]
 use feature_tracks::feature_track_segments;
+use feature_tracks::voicing_feature_kinds;
 use scoring::*;
 pub(crate) use timing::alignment_tracks;
 use timing::distribute_spans;
@@ -55,6 +58,12 @@ enum PhoneClass {
 enum AlignmentDirection {
     Forward,
     Reverse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VoicingKind {
+    Voiced,
+    Voiceless,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,11 +133,11 @@ pub(crate) fn forced_alignment_tracks(
     Vec<SegmentAlignment>,
 )> {
     let context = AlignmentAcousticContext::for_output(output);
-    let mut units = alignable_units(output, &context);
-    if units
-        .iter()
-        .all(|unit| !matches!(unit, AlignableUnit::Phone { .. }))
-    {
+    let units = alignable_phones(output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    if units.is_empty() {
         return None;
     }
     let samples = resample_linear(
@@ -140,8 +149,7 @@ pub(crate) fn forced_alignment_tracks(
     if frames.len() < units.len().min(3) {
         return None;
     }
-    insert_acoustic_pause_units(&mut units, &frames, &context);
-    let spans = viterbi_unit_spans(output, &units, &frames, decoded.duration_ms, &context)?;
+    let spans = voicing_pattern_unit_spans(&units, &frames, decoded.duration_ms)?;
     let aligned_segments = aligned_segments_from_units(units, spans, output, &context);
     Some(alignment_tracks_from_segments(
         output,
@@ -576,6 +584,261 @@ fn phoneme_spans_from_phone_spans(
         spans.push(PhoneSpan { start_ms, end_ms });
     }
     spans
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedVoicingRun {
+    kind: VoicingKind,
+    start_unit: usize,
+    end_unit: usize,
+}
+
+fn voicing_pattern_unit_spans(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+) -> Option<Vec<PhoneSpan>> {
+    let expected_runs = expected_voicing_runs(units)?;
+    let lane = voicing_feature_kinds(frames);
+    let (active_start, active_end) =
+        voicing_lane_active_range(&lane).or_else(|| active_frame_range(frames))?;
+    if active_start >= active_end {
+        return Some(distributed_unit_spans(0, duration_ms, units.len()));
+    }
+    let active = &lane[active_start..active_end];
+    if active.len() < expected_runs.len() {
+        let start_ms = frames[active_start].start_ms.min(duration_ms);
+        let end_ms = frames[active_end - 1].end_ms.min(duration_ms).max(start_ms);
+        return Some(distributed_unit_spans(start_ms, end_ms, units.len()));
+    }
+
+    let frame_count = active.len();
+    let run_count = expected_runs.len();
+    let total_units = units.len().max(1);
+    let expected_lengths = expected_runs
+        .iter()
+        .map(|run| {
+            let unit_count = run.end_unit.saturating_sub(run.start_unit).max(1);
+            ((frame_count * unit_count) / total_units).max(1)
+        })
+        .collect::<Vec<_>>();
+    let prefix_scores = voicing_pattern_prefix_scores(active, &expected_runs);
+    let neg = f32::NEG_INFINITY;
+    let mut dp = vec![vec![neg; frame_count + 1]; run_count + 1];
+    let mut previous_len = vec![vec![0usize; frame_count + 1]; run_count + 1];
+    dp[0][0] = 0.0;
+
+    for run_index in 1..=run_count {
+        let expected_len = expected_lengths[run_index - 1].max(1);
+        for end in run_index..=frame_count {
+            let remaining_runs = run_count.saturating_sub(run_index);
+            if frame_count.saturating_sub(end) < remaining_runs {
+                continue;
+            }
+            let max_len = end
+                .saturating_sub(run_index - 1)
+                .min((expected_len * 4).max(expected_len + 4))
+                .max(1);
+            for len in 1..=max_len {
+                let start = end - len;
+                let previous = dp[run_index - 1][start];
+                if !previous.is_finite() {
+                    continue;
+                }
+                let emission =
+                    prefix_scores[run_index - 1][end] - prefix_scores[run_index - 1][start];
+                let candidate =
+                    previous + emission + 0.65 * duration_score(len, expected_len as f32);
+                if candidate > dp[run_index][end] {
+                    dp[run_index][end] = candidate;
+                    previous_len[run_index][end] = len;
+                }
+            }
+        }
+    }
+
+    let mut end = frame_count;
+    if !dp[run_count][end].is_finite() {
+        let start_ms = frames[active_start].start_ms.min(duration_ms);
+        let end_ms = frames[active_end - 1].end_ms.min(duration_ms).max(start_ms);
+        return Some(distributed_unit_spans(start_ms, end_ms, units.len()));
+    }
+
+    let mut run_spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 1
+        };
+        run_count
+    ];
+    for run_index in (1..=run_count).rev() {
+        let len = previous_len[run_index][end];
+        if len == 0 {
+            return None;
+        }
+        let start = end - len;
+        let start_frame = active_start + start;
+        let end_frame = active_start + end;
+        let start_ms = frames[start_frame].start_ms.min(duration_ms);
+        let end_ms = if end_frame < frames.len() {
+            frames[end_frame].start_ms
+        } else {
+            frames[end_frame - 1].end_ms
+        }
+        .min(duration_ms)
+        .max(start_ms.saturating_add(1));
+        run_spans[run_index - 1] = PhoneSpan { start_ms, end_ms };
+        end = start;
+    }
+
+    Some(expand_voicing_run_spans(
+        units.len(),
+        &expected_runs,
+        &run_spans,
+        duration_ms,
+    ))
+}
+
+fn expected_voicing_runs(units: &[AlignableUnit<'_>]) -> Option<Vec<ExpectedVoicingRun>> {
+    let mut kinds = units
+        .iter()
+        .map(unit_expected_voicing)
+        .collect::<Vec<Option<VoicingKind>>>();
+    let mut previous = None;
+    for kind in &mut kinds {
+        if kind.is_none() {
+            *kind = previous;
+        } else {
+            previous = *kind;
+        }
+    }
+    let mut next = None;
+    for kind in kinds.iter_mut().rev() {
+        if kind.is_none() {
+            *kind = next;
+        } else {
+            next = *kind;
+        }
+    }
+
+    let first = kinds.first().and_then(|kind| *kind)?;
+    let mut runs = Vec::new();
+    let mut start_unit = 0usize;
+    let mut current = first;
+    for (index, kind) in kinds.iter().copied().enumerate().skip(1) {
+        let kind = kind?;
+        if kind == current {
+            continue;
+        }
+        runs.push(ExpectedVoicingRun {
+            kind: current,
+            start_unit,
+            end_unit: index,
+        });
+        start_unit = index;
+        current = kind;
+    }
+    runs.push(ExpectedVoicingRun {
+        kind: current,
+        start_unit,
+        end_unit: kinds.len(),
+    });
+    Some(runs)
+}
+
+fn unit_expected_voicing(unit: &AlignableUnit<'_>) -> Option<VoicingKind> {
+    let AlignableUnit::Phone { token, .. } = unit else {
+        return None;
+    };
+    match phone_feature_category(token, "phonology.voicing") {
+        Some("voiced") => Some(VoicingKind::Voiced),
+        Some("voiceless") => Some(VoicingKind::Voiceless),
+        _ => match phone_class(token) {
+            PhoneClass::Vowel | PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => {
+                Some(VoicingKind::Voiced)
+            }
+            _ => None,
+        },
+    }
+}
+
+fn voicing_lane_active_range(kinds: &[&str]) -> Option<(usize, usize)> {
+    let start = kinds
+        .iter()
+        .position(|kind| voicing_lane_kind(kind).is_some())?;
+    let end = kinds
+        .iter()
+        .rposition(|kind| voicing_lane_kind(kind).is_some())?
+        .saturating_add(1);
+    Some((start, end))
+}
+
+fn voicing_pattern_prefix_scores(
+    lane: &[&str],
+    expected_runs: &[ExpectedVoicingRun],
+) -> Vec<Vec<f32>> {
+    expected_runs
+        .iter()
+        .map(|run| {
+            let mut prefix = Vec::with_capacity(lane.len() + 1);
+            prefix.push(0.0);
+            for kind in lane {
+                let score = voicing_lane_score(run.kind, kind);
+                prefix.push(prefix.last().copied().unwrap_or(0.0) + score);
+            }
+            prefix
+        })
+        .collect()
+}
+
+fn voicing_lane_score(expected: VoicingKind, observed: &str) -> f32 {
+    match voicing_lane_kind(observed) {
+        Some(observed) if observed == expected => 1.0,
+        Some(_) => -1.25,
+        None => -0.75,
+    }
+}
+
+fn voicing_lane_kind(kind: &str) -> Option<VoicingKind> {
+    match kind {
+        "voiced" => Some(VoicingKind::Voiced),
+        "unvoiced" => Some(VoicingKind::Voiceless),
+        _ => None,
+    }
+}
+
+fn expand_voicing_run_spans(
+    unit_count: usize,
+    expected_runs: &[ExpectedVoicingRun],
+    run_spans: &[PhoneSpan],
+    duration_ms: u64,
+) -> Vec<PhoneSpan> {
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 1
+        };
+        unit_count
+    ];
+    for (run, span) in expected_runs.iter().zip(run_spans) {
+        let count = run.end_unit.saturating_sub(run.start_unit);
+        for (unit_index, (start_ms, end_ms)) in (run.start_unit..run.end_unit).zip(
+            distribute_spans(span.start_ms, span.end_ms, count)
+                .into_iter()
+                .map(|(start_ms, end_ms)| (start_ms, end_ms.max(start_ms.saturating_add(1)))),
+        ) {
+            spans[unit_index] = PhoneSpan { start_ms, end_ms };
+        }
+    }
+    normalize_unit_span_sequence(&mut spans, duration_ms);
+    spans
+}
+
+fn distributed_unit_spans(start_ms: u64, end_ms: u64, unit_count: usize) -> Vec<PhoneSpan> {
+    distribute_spans(start_ms, end_ms.max(start_ms.saturating_add(1)), unit_count)
+        .into_iter()
+        .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
+        .collect()
 }
 
 fn viterbi_unit_spans(
