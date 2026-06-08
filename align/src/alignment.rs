@@ -158,6 +158,50 @@ pub(crate) fn forced_alignment_tracks(
     ))
 }
 
+pub(crate) fn projected_voicing_tracks(
+    output: &PhonemicizeOutput,
+    phones: &[SegmentAlignment],
+) -> Vec<FeatureTrackSegment> {
+    let aligned_phones = phones
+        .iter()
+        .filter(|phone| !phone.token_id.starts_with("boundary."))
+        .collect::<Vec<_>>();
+    let target_phones = output
+        .phones
+        .iter()
+        .filter(|phone| !is_boundary_phone(phone))
+        .collect::<Vec<_>>();
+    let mut segments: Vec<FeatureTrackSegment> = Vec::new();
+    for (aligned, token) in aligned_phones.into_iter().zip(target_phones) {
+        let (kind, label) = projected_voicing_label(token);
+        if aligned.end_ms <= aligned.start_ms {
+            continue;
+        }
+        if let Some(previous) = segments.last_mut() {
+            if previous.kind == kind && aligned.start_ms <= previous.end_ms.saturating_add(1) {
+                previous.end_ms = previous.end_ms.max(aligned.end_ms);
+                continue;
+            }
+        }
+        segments.push(FeatureTrackSegment {
+            index: segments.len(),
+            kind: kind.into(),
+            label: label.into(),
+            start_ms: aligned.start_ms,
+            end_ms: aligned.end_ms,
+        });
+    }
+    segments
+}
+
+fn projected_voicing_label(phone: &PhoneToken) -> (&'static str, &'static str) {
+    match phone_expected_voicing(phone) {
+        Some(VoicingKind::Voiced) => ("voiced", "voiced"),
+        Some(VoicingKind::Voiceless) => ("unvoiced", "voiceless"),
+        None => ("unspecified", "unspecified"),
+    }
+}
+
 fn alignable_phones(output: &PhonemicizeOutput) -> Vec<(&PhoneToken, usize)> {
     output
         .phones
@@ -750,6 +794,10 @@ fn unit_expected_voicing(unit: &AlignableUnit<'_>) -> Option<VoicingKind> {
     let AlignableUnit::Phone { token, .. } = unit else {
         return None;
     };
+    phone_expected_voicing(token)
+}
+
+fn phone_expected_voicing(token: &PhoneToken) -> Option<VoicingKind> {
     match phone_feature_category(token, "phonology.voicing") {
         Some("voiced") => Some(VoicingKind::Voiced),
         Some("voiceless") => Some(VoicingKind::Voiceless),

@@ -23,7 +23,10 @@ use crate::{
     StyleTts2VoicesResponse, SynthesizeRequestBody, SynthesizeResponse, UploadResponse,
 };
 use crate::{
-    alignment::{alignment_feature_tracks, alignment_tracks, forced_alignment_tracks},
+    alignment::{
+        alignment_feature_tracks, alignment_tracks, forced_alignment_tracks,
+        projected_voicing_tracks,
+    },
     asr::transcribe_with_ear,
     audio::{
         audio_path_from_url, decode_wav, is_wav_filename, resample_linear, safe_filename,
@@ -255,6 +258,7 @@ async fn align_audio(
     let (words, phonemes, phones) = forced_alignment_tracks(&phonemicized.ir, &decoded)
         .unwrap_or_else(|| alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms));
     let feature_tracks = alignment_feature_tracks(&decoded);
+    let projected_voicing = projected_voicing_tracks(&phonemicized.ir, &phones);
 
     Ok(Json(AlignmentResponse {
         audio_url: request.audio_url,
@@ -267,6 +271,7 @@ async fn align_audio(
         asr_segments,
         phonemicization: phonemicized,
         feature_tracks,
+        projected_voicing,
         words,
         phonemes,
         phones,

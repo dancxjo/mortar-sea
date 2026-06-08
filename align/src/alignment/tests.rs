@@ -745,6 +745,37 @@ fn voicing_pattern_stage_distributes_when_lane_is_too_short() {
 }
 
 #[test]
+fn projected_voicing_tracks_show_expected_phone_pattern() {
+    let output = phonemicized("seven seas");
+    let phone_segments = output
+        .phones
+        .iter()
+        .filter(|phone| !is_boundary_phone(phone))
+        .enumerate()
+        .map(|(index, phone)| SegmentAlignment {
+            word_index: phone_word_index(phone).unwrap_or(0),
+            index,
+            label: phone_label(phone),
+            token_id: phone_token_id(phone),
+            start_ms: index as u64 * 40,
+            end_ms: index as u64 * 40 + 40,
+        })
+        .collect::<Vec<_>>();
+
+    let projected = projected_voicing_tracks(&output, &phone_segments);
+
+    assert_eq!(
+        projected
+            .iter()
+            .map(|segment| segment.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["voiceless", "voiced", "voiceless", "voiced"]
+    );
+    assert_eq!(projected[0].start_ms, 0);
+    assert_eq!(projected[1].start_ms, 40);
+}
+
+#[test]
 fn near_silent_frames_do_not_report_autocorrelation_voicing() {
     let frame = vec![0.0005; (ALIGN_SAMPLE_RATE_HZ as usize * ALIGN_FRAME_MS as usize) / 1000];
     let spectrum_plan = SpectrumPlan::new(frame.len());

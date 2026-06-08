@@ -68,7 +68,16 @@ window.addEventListener('DOMContentLoaded', () => {
   ]) {
     elements[id] = document.getElementById(id);
   }
-  for (const id of ['ruler', 'waveform', 'spectrogram', 'feature-track', 'word-track', 'phoneme-track', 'phone-track']) {
+  for (const id of [
+    'ruler',
+    'waveform',
+    'spectrogram',
+    'feature-track',
+    'projected-voicing-track',
+    'word-track',
+    'phoneme-track',
+    'phone-track',
+  ]) {
     canvases[id] = document.getElementById(id);
   }
 
@@ -361,7 +370,7 @@ function renderAlignment(payload) {
       return `${formatMs(segment.start_ms)}-${formatMs(segment.end_ms)} ${segment.text}`;
     }),
   ].join('\n');
-  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.feature_tracks || []).length} features`;
+  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.feature_tracks || []).length} features, ${(payload.projected_voicing || []).length} projected`;
   drawAll();
 }
 
@@ -528,6 +537,12 @@ function drawAll(options = {}) {
     color: featureTrackColor,
     text: '#f3f6f1',
     empty: 'Features',
+  });
+  drawTrack(canvases['projected-voicing-track'], state.currentAlignment?.projected_voicing || [], {
+    kind: 'projected_voicing',
+    color: projectedVoicingColor,
+    text: '#f3f6f1',
+    empty: 'Projected',
   });
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
     kind: 'word',
@@ -879,6 +894,12 @@ function featureTrackColor(segment) {
   return '#66727a';
 }
 
+function projectedVoicingColor(segment) {
+  if (segment.kind === 'voiced') return '#2f9cc9';
+  if (segment.kind === 'unvoiced') return '#9f7fd2';
+  return '#66727a';
+}
+
 function drawSelection() {
   const selection = state.selection;
   if (!selection) return;
@@ -997,12 +1018,14 @@ function hitTestTimelineSegment(event) {
 
 function alignmentSegments(alignment, kind) {
   if (kind === 'feature') return alignment.feature_tracks || [];
+  if (kind === 'projected_voicing') return alignment.projected_voicing || [];
   return alignment[`${kind}s`] || [];
 }
 
 function trackKindForTarget(target) {
   if (!target || !target.id) return '';
   if (target.id === 'feature-track') return 'feature';
+  if (target.id === 'projected-voicing-track') return 'projected_voicing';
   if (target.id === 'word-track') return 'word';
   if (target.id === 'phoneme-track') return 'phoneme';
   if (target.id === 'phone-track') return 'phone';
@@ -1015,7 +1038,7 @@ function isSelectedSegment(kind, segment) {
 }
 
 function segmentKey(kind, segment) {
-  if (kind === 'feature') return String(segment.index);
+  if (kind === 'feature' || kind === 'projected_voicing') return String(segment.index);
   if (kind === 'word') return String(segment.index);
   return `${segment.word_index}:${segment.index}:${segment.token_id || segment.label || ''}`;
 }

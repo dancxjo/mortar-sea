@@ -116,6 +116,7 @@ struct AlignmentResponse {
     asr_segments: Vec<AsrSentence>,
     phonemicization: PhonemicizeResponse,
     feature_tracks: Vec<FeatureTrackSegment>,
+    projected_voicing: Vec<FeatureTrackSegment>,
     words: Vec<WordAlignment>,
     phonemes: Vec<SegmentAlignment>,
     phones: Vec<SegmentAlignment>,

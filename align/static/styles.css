@@ -237,7 +237,7 @@ textarea {
 
 .track-labels {
   display: grid;
-  grid-template-rows: 34px 176px 150px 42px 54px 66px 54px;
+  grid-template-rows: 34px 176px 150px 42px 42px 54px 66px 54px;
   border-right: 1px solid var(--line);
   background: #12171a;
 }
