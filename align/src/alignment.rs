@@ -31,6 +31,8 @@ use scoring::*;
 pub(crate) use timing::alignment_tracks;
 use timing::distribute_spans;
 
+const ENABLE_REVERSE_VITERBI_SCAN: bool = false;
+
 #[derive(Debug, Clone, Copy)]
 struct PhoneSpan {
     start_ms: u64,
@@ -606,25 +608,31 @@ fn viterbi_unit_spans(
         context,
         AlignmentDirection::Forward,
     );
-    let reverse = directional_viterbi_unit_spans(
-        output,
-        units,
-        frames,
-        active_start,
-        active_end,
-        &boundary_priors,
-        duration_ms,
-        context,
-        AlignmentDirection::Reverse,
-    );
-
-    let mut spans = match (forward, reverse) {
-        (Some(forward), Some(reverse)) => {
-            reconcile_bidirectional_spans(&forward, &reverse, duration_ms)
+    let mut spans = if ENABLE_REVERSE_VITERBI_SCAN {
+        let reverse = directional_viterbi_unit_spans(
+            output,
+            units,
+            frames,
+            active_start,
+            active_end,
+            &boundary_priors,
+            duration_ms,
+            context,
+            AlignmentDirection::Reverse,
+        );
+        match (forward, reverse) {
+            (Some(forward), Some(reverse)) => {
+                reconcile_bidirectional_spans(&forward, &reverse, duration_ms)
+            }
+            (Some(forward), None) => forward,
+            (None, Some(reverse)) => reverse,
+            (None, None) => return None,
         }
-        (Some(forward), None) => forward,
-        (None, Some(reverse)) => reverse,
-        (None, None) => return None,
+    } else {
+        match forward {
+            Some(forward) => forward,
+            None => return None,
+        }
     };
     refine_acoustic_alignment_spans(output, units, frames, duration_ms, &mut spans);
     Some(spans)

@@ -91,7 +91,7 @@ fn close_short_voicing_gaps(
     max_frames: usize,
 ) {
     for (start, end, kind) in feature_kind_runs(kinds) {
-        if kind != "unvoiced" || start == 0 || end >= kinds.len() {
+        if kind != "voiceless" || start == 0 || end >= kinds.len() {
             continue;
         }
         if end.saturating_sub(start) > max_frames {
@@ -162,12 +162,10 @@ fn frame_feature_kind(frame: &AcousticFrameFeatures, activity_threshold: f32) ->
         "silence"
     } else if frame.voicing > 0.42 && frame.sonority > 0.16 {
         "voiced"
-    } else if reduced_vowel_shadow_score(frame) > 0.55 {
-        "vowel"
     } else if breath_noise_score(frame) > 0.58 {
         "breath"
     } else {
-        "unvoiced"
+        "voiceless"
     }
 }
 
@@ -183,9 +181,8 @@ fn feature_track_segment(
         label: match kind {
             "silence" => "silence",
             "breath" => "breath",
-            "vowel" => "vowel",
-            "voiced" => "voice",
-            "unvoiced" => "unvoiced",
+            "voiced" => "voiced",
+            "voiceless" => "voiceless",
             _ => kind,
         }
         .to_string(),

@@ -462,7 +462,7 @@ fn active_range_ignores_low_level_leading_noise() {
 }
 
 #[test]
-fn feature_track_segments_mark_silence_voicing_and_unvoiced_regions() {
+fn feature_track_segments_mark_silence_voiced_and_voiceless_regions() {
     let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
     for frame in frames.iter_mut().take(10) {
         frame.energy_db = -80.0;
@@ -490,12 +490,12 @@ fn feature_track_segments_mark_silence_voicing_and_unvoiced_regions() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["silence", "voiced", "unvoiced"]
+        vec!["silence", "voiced", "voiceless"]
     );
 }
 
 #[test]
-fn feature_track_segments_smooth_tiny_unvoiced_islands_inside_voicing() {
+fn feature_track_segments_smooth_tiny_voiceless_islands_inside_voicing() {
     let mut frames = (0..28).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {
         frame.energy_db = -22.0;
@@ -557,7 +557,7 @@ fn feature_track_segments_preserve_real_short_silence_inside_voicing() {
 }
 
 #[test]
-fn feature_track_segments_mark_weak_vowel_shadow() {
+fn feature_track_segments_classify_weak_vowel_shadow_by_voicing() {
     let mut frames = (0..12).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {
         frame.energy_db = -34.0;
@@ -580,12 +580,12 @@ fn feature_track_segments_mark_weak_vowel_shadow() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["vowel"]
+        vec!["voiceless"]
     );
 }
 
 #[test]
-fn feature_track_segments_mark_breath_distinct_from_unvoiced_speech() {
+fn feature_track_segments_mark_breath_distinct_from_voiceless_speech() {
     let mut frames = (0..18).map(test_frame).collect::<Vec<_>>();
     for frame in frames.iter_mut().take(9) {
         frame.energy_db = -36.0;
@@ -615,7 +615,7 @@ fn feature_track_segments_mark_breath_distinct_from_unvoiced_speech() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["breath", "unvoiced"]
+        vec!["breath", "voiceless"]
     );
 }
 

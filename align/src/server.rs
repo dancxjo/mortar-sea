@@ -32,6 +32,8 @@ use crate::{
     format::{format_phonemes, format_phones, format_syllables},
 };
 
+const ENABLE_ASR_WORD_TIMING_REPORTS: bool = false;
+
 pub async fn run() -> anyhow::Result<()> {
     let addr = align_addr()?;
     let audio_dir = audio_dir();
@@ -240,7 +242,7 @@ async fn align_audio(
         .with_context(|| format!("failed to read {}", audio_path.display()))?;
     let decoded = decode_wav(&audio_bytes)?;
     let phonemicized = phonemicize_text(request.text, request.variety)?;
-    let asr_segments = if asr_transcript_enabled() {
+    let asr_segments = if ENABLE_ASR_WORD_TIMING_REPORTS && asr_transcript_enabled() {
         let asr_samples =
             resample_linear(&decoded.samples, decoded.sample_rate_hz, ASR_SAMPLE_RATE_HZ);
         let duration_ms = decoded.duration_ms;
