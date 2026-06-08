@@ -38,6 +38,7 @@ pub(super) fn phone_frame_score(
     let class = phone_class(phone);
     let voicing = phone_feature_category(phone, "phonology.voicing");
     let reduced_vowel = phone_feature_bool(phone, "phonology.reduced_vowel").unwrap_or(false);
+    let allows_devoicing = phone_allows_devoicing(phone);
     let mut score = match class {
         PhoneClass::Vowel => vowel_score(phone, frame),
         PhoneClass::Stop => stop_score(voicing, frame),
@@ -51,7 +52,10 @@ pub(super) fn phone_frame_score(
         PhoneClass::Other => neutral_score(frame),
     };
 
-    if matches!(voicing, Some("voiced")) {
+    if allows_devoicing {
+        score +=
+            0.35 * closeness(frame.voicing, 0.72, 0.35).max(closeness(frame.voicing, 0.15, 0.35));
+    } else if matches!(voicing, Some("voiced")) {
         score += 0.5 * closeness(frame.voicing, 0.72, 0.35);
     } else if matches!(voicing, Some("voiceless")) {
         score += 0.25 * closeness(frame.voicing, 0.15, 0.35);
@@ -59,7 +63,9 @@ pub(super) fn phone_frame_score(
     if let Some(model) = context.phone_token_model(phone) {
         score += acoustic_model_frame_score(model, frame, context);
     }
-    score += phone_feature_compatibility_score(class, voicing, reduced_vowel, frame);
+    score += devoicing_feature_similarity_score(phone, class, allows_devoicing, frame);
+    score +=
+        phone_feature_compatibility_score(class, voicing, reduced_vowel, allows_devoicing, frame);
     let silence_penalty = match class {
         PhoneClass::Stop | PhoneClass::Affricate => 0.35,
         PhoneClass::Other => 0.85,
@@ -77,6 +83,7 @@ pub(super) fn phone_feature_compatibility_score(
     class: PhoneClass,
     voicing: Option<&str>,
     reduced_vowel: bool,
+    allows_devoicing: bool,
     frame: &AcousticFrameFeatures,
 ) -> f32 {
     let breath = breath_noise_score(frame);
@@ -96,6 +103,7 @@ pub(super) fn phone_feature_compatibility_score(
     }
 
     if matches!(voicing, Some("voiced"))
+        && !allows_devoicing
         && !reduced_vowel
         && !matches!(class, PhoneClass::Stop | PhoneClass::Affricate)
     {
@@ -210,6 +218,62 @@ pub(super) fn glide_score(frame: &AcousticFrameFeatures) -> f32 {
 
 pub(super) fn neutral_score(frame: &AcousticFrameFeatures) -> f32 {
     0.3 * closeness(frame.energy_norm, 0.45, 0.50) + 0.2 * closeness(frame.voicing, 0.45, 0.55)
+}
+
+pub(super) fn devoicing_feature_similarity_score(
+    phone: &PhoneToken,
+    class: PhoneClass,
+    allows_devoicing: bool,
+    frame: &AcousticFrameFeatures,
+) -> f32 {
+    if !allows_devoicing {
+        return 0.0;
+    }
+    match class {
+        PhoneClass::Fricative => {
+            let manner = cue_frame_match("acoustic.cue.frication_noise", frame);
+            let place = fricative_place_similarity(phone, frame);
+            let voicing_mismatch = positive_closeness(frame.voicing, 0.08, 0.28);
+            0.55 * manner + 0.45 * place - 0.18 * voicing_mismatch
+        }
+        PhoneClass::Affricate => {
+            let release = cue_frame_match("acoustic.cue.affricate_release", frame);
+            let frication = cue_frame_match("acoustic.cue.frication_noise", frame);
+            let place = fricative_place_similarity(phone, frame);
+            0.35 * release + 0.35 * frication + 0.30 * place
+        }
+        PhoneClass::Stop => {
+            let closure_or_release =
+                stop_score(Some("voiceless"), frame).max(stop_score(None, frame));
+            0.45 * closure_or_release
+        }
+        _ => 0.0,
+    }
+}
+
+fn fricative_place_similarity(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+    match (
+        phone_feature_category(phone, "phonology.place"),
+        phone_feature_category(phone, "phonology.frication_spectral_shape"),
+    ) {
+        (Some("alveolar"), _) | (_, Some("high_sibilant")) => {
+            0.55 * positive_closeness(frame.spectral_centroid_hz, 5200.0, 2600.0)
+                + 0.45 * positive_closeness(frame.high_ratio, 0.78, 0.30)
+        }
+        (Some("postalveolar"), _) | (_, Some("lower_sibilant")) => {
+            0.60 * positive_closeness(frame.spectral_centroid_hz, 3600.0, 1800.0)
+                + 0.40 * positive_closeness(frame.high_ratio, 0.66, 0.32)
+        }
+        (Some("labiodental"), _) => {
+            0.55 * positive_closeness(frame.spectral_centroid_hz, 3000.0, 2200.0)
+                + 0.45 * positive_closeness(frame.high_ratio, 0.52, 0.35)
+        }
+        (Some("dental"), _) => {
+            0.55 * positive_closeness(frame.spectral_centroid_hz, 3600.0, 2400.0)
+                + 0.45 * positive_closeness(frame.high_ratio, 0.58, 0.35)
+        }
+        _ => 0.0,
+    }
 }
 
 pub(super) fn formant_region_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
@@ -472,6 +536,7 @@ pub(super) fn phone_segment_feature_score(
     let class = phone_class(phone);
     let voicing = phone_feature_category(phone, "phonology.voicing");
     let reduced_vowel = phone_feature_bool(phone, "phonology.reduced_vowel").unwrap_or(false);
+    let allows_devoicing = phone_allows_devoicing(phone);
     let average_breath = frames.iter().map(breath_noise_score).sum::<f32>() / frames.len() as f32;
     let average_silence = frames.iter().map(silence_frame_score).sum::<f32>() / frames.len() as f32;
     let mismatch_ratio = frames
@@ -526,8 +591,16 @@ pub(super) fn phone_segment_feature_score(
         PhoneClass::Fricative | PhoneClass::Affricate => 0.35 * average_breath,
         PhoneClass::Stop | PhoneClass::Other => -0.25 * average_silence,
     };
+    if allows_devoicing {
+        let shared_feature_evidence = frames
+            .iter()
+            .map(|frame| devoicing_feature_similarity_score(phone, class, true, frame))
+            .fold(0.0_f32, f32::max);
+        score += 0.55 * shared_feature_evidence;
+    }
 
     if matches!(voicing, Some("voiced"))
+        && !allows_devoicing
         && !reduced_vowel
         && !matches!(class, PhoneClass::Stop | PhoneClass::Affricate)
     {
@@ -540,6 +613,14 @@ pub(super) fn phone_segment_feature_score(
     }
 
     score
+}
+
+pub(super) fn phone_allows_devoicing(phone: &PhoneToken) -> bool {
+    phone_feature_bool(phone, "phonology.partial_devoicing").unwrap_or(false)
+        || matches!(
+            phone_feature_category(phone, "phonology.devoicing"),
+            Some("partial" | "final_optional")
+        )
 }
 
 pub(super) fn sampled_range_score(

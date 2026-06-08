@@ -67,6 +67,7 @@ enum AlignmentDirection {
 enum VoicingKind {
     Voiced,
     Voiceless,
+    DevoicingAllowed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +354,7 @@ fn projected_voicing_label(phone: &PhoneToken) -> (&'static str, &'static str) {
     match phone_expected_voicing(phone) {
         Some(VoicingKind::Voiced) => ("voiced", "voiced"),
         Some(VoicingKind::Voiceless) => ("unvoiced", "voiceless"),
+        Some(VoicingKind::DevoicingAllowed) => ("devoicing", "voiced~voiceless"),
         None => ("unspecified", "unspecified"),
     }
 }
@@ -1629,18 +1631,21 @@ fn voicing_pattern_unit_spans(
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
 ) -> Option<Vec<PhoneSpan>> {
+    if !clip_can_fit_units(duration_ms, units.len()) {
+        return None;
+    }
     let expected_runs = expected_voicing_runs(units)?;
     let lane = voicing_feature_kinds(frames);
     let (active_start, active_end) =
         voicing_lane_active_range(&lane).or_else(|| active_frame_range(frames))?;
     if active_start >= active_end {
-        return Some(distributed_unit_spans(0, duration_ms, units.len()));
+        return distributed_unit_spans(0, duration_ms, units.len());
     }
     let active = &lane[active_start..active_end];
     if active.len() < expected_runs.len() {
         let start_ms = frames[active_start].start_ms.min(duration_ms);
         let end_ms = frames[active_end - 1].end_ms.min(duration_ms).max(start_ms);
-        return Some(distributed_unit_spans(start_ms, end_ms, units.len()));
+        return distributed_unit_spans(start_ms, end_ms, units.len());
     }
 
     let frame_count = active.len();
@@ -1692,7 +1697,7 @@ fn voicing_pattern_unit_spans(
     if !dp[run_count][end].is_finite() {
         let start_ms = frames[active_start].start_ms.min(duration_ms);
         let end_ms = frames[active_end - 1].end_ms.min(duration_ms).max(start_ms);
-        return Some(distributed_unit_spans(start_ms, end_ms, units.len()));
+        return distributed_unit_spans(start_ms, end_ms, units.len());
     }
 
     let mut run_spans = vec![
@@ -1710,24 +1715,17 @@ fn voicing_pattern_unit_spans(
         let start = end - len;
         let start_frame = active_start + start;
         let end_frame = active_start + end;
-        let start_ms = frames[start_frame].start_ms.min(duration_ms);
+        let start_ms = frames[start_frame].start_ms;
         let end_ms = if end_frame < frames.len() {
             frames[end_frame].start_ms
         } else {
             frames[end_frame - 1].end_ms
-        }
-        .min(duration_ms)
-        .max(start_ms.saturating_add(1));
-        run_spans[run_index - 1] = PhoneSpan { start_ms, end_ms };
+        };
+        run_spans[run_index - 1] = span_within_clip(start_ms, end_ms, duration_ms)?;
         end = start;
     }
 
-    Some(expand_voicing_run_spans(
-        units.len(),
-        &expected_runs,
-        &run_spans,
-        duration_ms,
-    ))
+    expand_voicing_run_spans(units.len(), &expected_runs, &run_spans, duration_ms)
 }
 
 fn expected_voicing_runs(units: &[AlignableUnit<'_>]) -> Option<Vec<ExpectedVoicingRun>> {
@@ -1785,6 +1783,9 @@ fn unit_expected_voicing(unit: &AlignableUnit<'_>) -> Option<VoicingKind> {
 }
 
 fn phone_expected_voicing(token: &PhoneToken) -> Option<VoicingKind> {
+    if phone_allows_devoicing(token) {
+        return Some(VoicingKind::DevoicingAllowed);
+    }
     match phone_feature_category(token, "phonology.voicing") {
         Some("voiced") => Some(VoicingKind::Voiced),
         Some("voiceless") => Some(VoicingKind::Voiceless),
@@ -1828,8 +1829,10 @@ fn voicing_pattern_prefix_scores(
 
 fn voicing_lane_score(expected: VoicingKind, observed: &str) -> f32 {
     match voicing_lane_kind(observed) {
+        Some(_) if expected == VoicingKind::DevoicingAllowed => 0.65,
         Some(observed) if observed == expected => 1.0,
         Some(_) => -1.25,
+        None if expected == VoicingKind::DevoicingAllowed => -0.25,
         None => -0.75,
     }
 }
@@ -1847,7 +1850,7 @@ fn expand_voicing_run_spans(
     expected_runs: &[ExpectedVoicingRun],
     run_spans: &[PhoneSpan],
     duration_ms: u64,
-) -> Vec<PhoneSpan> {
+) -> Option<Vec<PhoneSpan>> {
     let mut spans = vec![
         PhoneSpan {
             start_ms: 0,
@@ -1857,23 +1860,35 @@ fn expand_voicing_run_spans(
     ];
     for (run, span) in expected_runs.iter().zip(run_spans) {
         let count = run.end_unit.saturating_sub(run.start_unit);
-        for (unit_index, (start_ms, end_ms)) in (run.start_unit..run.end_unit).zip(
-            distribute_spans(span.start_ms, span.end_ms, count)
-                .into_iter()
-                .map(|(start_ms, end_ms)| (start_ms, end_ms.max(start_ms.saturating_add(1)))),
-        ) {
-            spans[unit_index] = PhoneSpan { start_ms, end_ms };
+        let run_unit_spans = distributed_unit_spans(span.start_ms, span.end_ms, count)?;
+        for (unit_index, span) in (run.start_unit..run.end_unit).zip(run_unit_spans) {
+            spans[unit_index] = span;
         }
     }
     normalize_unit_span_sequence(&mut spans, duration_ms);
-    spans
+    Some(spans)
 }
 
-fn distributed_unit_spans(start_ms: u64, end_ms: u64, unit_count: usize) -> Vec<PhoneSpan> {
-    distribute_spans(start_ms, end_ms.max(start_ms.saturating_add(1)), unit_count)
+fn distributed_unit_spans(start_ms: u64, end_ms: u64, unit_count: usize) -> Option<Vec<PhoneSpan>> {
+    if unit_count == 0 {
+        return Some(Vec::new());
+    }
+    if end_ms <= start_ms || end_ms.saturating_sub(start_ms) < unit_count as u64 {
+        return None;
+    }
+    distribute_spans(start_ms, end_ms, unit_count)
         .into_iter()
-        .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
+        .map(|(start_ms, end_ms)| (start_ms < end_ms).then_some(PhoneSpan { start_ms, end_ms }))
         .collect()
+}
+
+fn clip_can_fit_units(duration_ms: u64, unit_count: usize) -> bool {
+    unit_count == 0 || duration_ms >= unit_count as u64
+}
+
+fn span_within_clip(start_ms: u64, end_ms: u64, duration_ms: u64) -> Option<PhoneSpan> {
+    let end_ms = end_ms.min(duration_ms);
+    (start_ms < end_ms && end_ms <= duration_ms).then_some(PhoneSpan { start_ms, end_ms })
 }
 
 fn reverse_snipper_unit_spans(
@@ -2025,15 +2040,13 @@ fn viterbi_unit_spans(
     context: &AlignmentAcousticContext,
     candidate_facts: &[CandidateFact],
 ) -> Option<Vec<PhoneSpan>> {
+    if !clip_can_fit_units(duration_ms, units.len()) {
+        return None;
+    }
     let (active_start, active_end) = active_frame_range_for_units(frames, units)?;
     let active = &frames[active_start..active_end];
     if active.len() < units.len() {
-        return Some(
-            distribute_spans(0, duration_ms, units.len())
-                .into_iter()
-                .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
-                .collect(),
-        );
+        return distributed_unit_spans(0, duration_ms, units.len());
     }
     let boundary_priors = boundary_landmark_priors(units, frames, active_start, active_end);
 
@@ -2092,6 +2105,9 @@ fn directional_viterbi_unit_spans(
     candidate_facts: &[CandidateFact],
     direction: AlignmentDirection,
 ) -> Option<Vec<PhoneSpan>> {
+    if !clip_can_fit_units(duration_ms, units.len()) {
+        return None;
+    }
     let active = &frames[active_start..active_end];
     let unit_count = units.len();
     let frame_count = active.len();
@@ -2234,15 +2250,13 @@ fn directional_viterbi_unit_spans(
             directed_span_frame_range(start, end, frame_count, direction);
         let start_frame = active_start + original_start;
         let end_frame = active_start + original_end;
-        let start_ms = frames[start_frame].start_ms.min(duration_ms);
+        let start_ms = frames[start_frame].start_ms;
         let end_ms = if end_frame < frames.len() {
             frames[end_frame].start_ms
         } else {
             frames[end_frame - 1].end_ms
-        }
-        .min(duration_ms)
-        .max(start_ms.saturating_add(1));
-        spans[original_unit_index] = PhoneSpan { start_ms, end_ms };
+        };
+        spans[original_unit_index] = span_within_clip(start_ms, end_ms, duration_ms)?;
         end = start;
     }
     Some(spans)
@@ -2394,6 +2408,7 @@ fn candidate_fact_unit_affinity(
     match fact.kind {
         CandidateKind::PeriodicVoicing => match unit_expected_voicing(unit) {
             Some(VoicingKind::Voiced) => 0.65,
+            Some(VoicingKind::DevoicingAllowed) => 0.25,
             Some(VoicingKind::Voiceless) => -0.45,
             None => 0.0,
         },

@@ -6,7 +6,7 @@ use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::phonology::{PhoneToken, PhonemeToken};
 use crate::prosody::Stress;
 use crate::rules::{AllophoneRule, EpenthesisRule, RuleCondition};
-use crate::segment::{SegmentMatcher, SyllablePosition};
+use crate::segment::{SegmentMatcher, SyllablePosition, WordPosition};
 use crate::spec::Spec;
 use crate::variety::LinguisticVariety;
 
@@ -203,8 +203,62 @@ fn environment_matches(
         Spec::Unspecified => true,
         _ => false,
     };
+    let word_position_matches = match &rule.environment.word_position {
+        Spec::Known(expected) => {
+            token_word_position(phonemes, index).is_some_and(|actual| actual == *expected)
+        }
+        Spec::Unspecified => true,
+        _ => false,
+    };
 
-    before_matches && after_matches && stress_matches && syllable_position_matches
+    before_matches
+        && after_matches
+        && stress_matches
+        && syllable_position_matches
+        && word_position_matches
+}
+
+fn token_word_position(phonemes: &[PhonemeToken], index: usize) -> Option<WordPosition> {
+    let token_word = phonemes.get(index).and_then(token_word_index);
+    let previous_same_word = index.checked_sub(1).is_some_and(|previous| {
+        token_word
+            .zip(token_word_index(&phonemes[previous]))
+            .is_some_and(|(current, previous)| current == previous)
+    });
+    let next_same_word = phonemes.get(index + 1).is_some_and(|next| {
+        token_word
+            .zip(token_word_index(next))
+            .is_some_and(|(current, next)| current == next)
+    });
+
+    if token_word.is_some() {
+        return match (previous_same_word, next_same_word) {
+            (false, false) => Some(WordPosition::Isolated),
+            (false, true) => Some(WordPosition::Initial),
+            (true, false) => Some(WordPosition::Final),
+            (true, true) => Some(WordPosition::Medial),
+        };
+    }
+
+    match (index == 0, index + 1 == phonemes.len()) {
+        (true, true) => Some(WordPosition::Isolated),
+        (true, false) => Some(WordPosition::Initial),
+        (false, true) => Some(WordPosition::Final),
+        (false, false) => Some(WordPosition::Medial),
+    }
+}
+
+fn token_word_index(token: &PhonemeToken) -> Option<usize> {
+    let value = token
+        .features
+        .values
+        .get(&FeatureId("orthography.word_index".into()))?;
+    match value {
+        Spec::Known(FeatureValue::Number(value)) if value.is_finite() && *value >= 0.0 => {
+            Some(*value as usize)
+        }
+        _ => None,
+    }
 }
 
 fn condition_matches(

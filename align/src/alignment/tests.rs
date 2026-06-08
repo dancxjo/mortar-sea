@@ -1111,6 +1111,44 @@ fn voicing_pattern_stage_distributes_when_lane_is_too_short() {
 }
 
 #[test]
+fn voicing_pattern_stage_rejects_hypothesis_that_cannot_fit_clip() {
+    let output = phonemicized("see do");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -20.0;
+        frame.energy_norm = 0.74;
+        frame.voicing = 0.78;
+        frame.sonority = 0.72;
+    }
+
+    assert!(voicing_pattern_unit_spans(&units, &frames, units.len() as u64 - 1).is_none());
+}
+
+#[test]
+fn viterbi_rejects_hypothesis_that_extends_past_clip_duration() {
+    let output = phonemicized("see");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -20.0;
+        frame.energy_norm = 0.74;
+        frame.voicing = 0.78;
+        frame.sonority = 0.72;
+    }
+    let duration_ms = units.len() as u64 + 1;
+
+    assert!(viterbi_unit_spans(&output, &units, &frames, duration_ms, &context, &[]).is_none());
+}
+
+#[test]
 fn projected_voicing_tracks_show_expected_phone_pattern() {
     let output = phonemicized("seven seas");
     let phone_segments = output
@@ -1135,10 +1173,20 @@ fn projected_voicing_tracks_show_expected_phone_pattern() {
             .iter()
             .map(|segment| segment.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["voiceless", "voiced", "voiceless", "voiced"]
+        vec![
+            "voiceless",
+            "voiced",
+            "voiceless",
+            "voiced",
+            "voiced~voiceless"
+        ]
     );
     assert_eq!(projected[0].start_ms, 0);
     assert_eq!(projected[1].start_ms, 40);
+    assert_eq!(
+        projected.last().expect("final projected segment").kind,
+        "devoicing"
+    );
 }
 
 #[test]
@@ -1225,6 +1273,138 @@ fn reduced_vowel_score_accepts_weak_schwa_shadow() {
         phone_segment_feature_score(schwa, &[shadow; 5])
             > phone_segment_feature_score(full_vowel, &[shadow; 5]) + 0.7
     );
+}
+
+#[test]
+fn final_devoiced_z_scores_voiceless_sibilant_frication() {
+    let seas = phonemicized("seas");
+    let seas_context = AlignmentAcousticContext::for_output(&seas);
+    let final_z = seas
+        .phones
+        .iter()
+        .rev()
+        .find(|phone| known_phone_id(phone) == Some("ipa.phone.z"))
+        .expect("final z");
+    let zoo = phonemicized("zoo");
+    let zoo_context = AlignmentAcousticContext::for_output(&zoo);
+    let initial_z = zoo
+        .phones
+        .iter()
+        .find(|phone| known_phone_id(phone) == Some("ipa.phone.z"))
+        .expect("initial z");
+    let love = phonemicized("love");
+    let love_context = AlignmentAcousticContext::for_output(&love);
+    let final_v = love
+        .phones
+        .iter()
+        .rev()
+        .find(|phone| known_phone_id(phone) == Some("ipa.phone.v"))
+        .expect("final v");
+    let mut frication = test_frame(0);
+    frication.energy_db = -28.0;
+    frication.energy_norm = 0.42;
+    frication.voicing = 0.06;
+    frication.high_ratio = 0.82;
+    frication.zero_crossing_rate = 0.24;
+    frication.spectral_centroid_hz = 5200.0;
+    frication.spectral_flux = 0.62;
+    frication.sonority = 0.04;
+    frication.vowel_nucleus_likelihood = 0.02;
+
+    assert!(phone_allows_devoicing(final_z));
+    assert!(!phone_allows_devoicing(initial_z));
+    assert!(phone_allows_devoicing(final_v));
+    assert!(
+        devoicing_feature_similarity_score(
+            final_z,
+            phone_class(final_z),
+            phone_allows_devoicing(final_z),
+            &frication
+        ) > devoicing_feature_similarity_score(
+            final_v,
+            phone_class(final_v),
+            phone_allows_devoicing(final_v),
+            &frication
+        ) + 0.25
+    );
+    assert!(
+        phone_frame_score(final_z, &frication, &seas_context)
+            > phone_frame_score(initial_z, &frication, &zoo_context) + 0.25
+    );
+    assert!(
+        phone_frame_score(final_z, &frication, &seas_context)
+            > phone_frame_score(final_v, &frication, &love_context) + 0.25
+    );
+    assert!(
+        phone_segment_feature_score(final_z, &[frication; 5])
+            > phone_segment_feature_score(initial_z, &[frication; 5]) + 0.4
+    );
+}
+
+#[test]
+fn voicing_pattern_stage_keeps_final_devoiced_z_before_trailing_silence() {
+    let output = phonemicized("seven seas");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let final_z_index = units
+        .iter()
+        .rposition(|unit| {
+            matches!(
+                unit,
+                AlignableUnit::Phone { token, .. }
+                    if known_phone_id(token) == Some("ipa.phone.z") && phone_allows_devoicing(token)
+            )
+        })
+        .expect("final devoiced z unit");
+    let frames_per_unit = 4;
+    let mut frames = Vec::new();
+    for unit in &units {
+        for _ in 0..frames_per_unit {
+            let mut frame = test_frame(frames.len());
+            match unit_expected_voicing(unit) {
+                Some(VoicingKind::Voiced) => {
+                    frame.energy_db = -24.0;
+                    frame.energy_norm = 0.60;
+                    frame.voicing = 0.78;
+                    frame.sonority = 0.55;
+                    frame.high_ratio = 0.20;
+                    frame.vowel_nucleus_likelihood = 0.50;
+                }
+                Some(VoicingKind::Voiceless) | Some(VoicingKind::DevoicingAllowed) => {
+                    frame.energy_db = -28.0;
+                    frame.energy_norm = 0.42;
+                    frame.voicing = 0.05;
+                    frame.sonority = 0.04;
+                    frame.high_ratio = 0.82;
+                    frame.zero_crossing_rate = 0.24;
+                    frame.spectral_centroid_hz = 5200.0;
+                }
+                None => {}
+            }
+            frames.push(frame);
+        }
+    }
+    let speech_end_ms = frames.last().expect("speech frames").end_ms;
+    for _ in 0..8 {
+        let mut frame = test_frame(frames.len());
+        frame.energy_db = -72.0;
+        frame.energy_norm = 0.0;
+        frame.voicing = 0.0;
+        frame.sonority = 0.0;
+        frame.high_ratio = 0.0;
+        frame.vowel_nucleus_likelihood = 0.0;
+        frames.push(frame);
+    }
+
+    let duration_ms = frames.last().expect("all frames").end_ms;
+    let spans =
+        voicing_pattern_unit_spans(&units, &frames, duration_ms).expect("voicing alignment");
+    let final_z_span = spans[final_z_index];
+
+    assert!(final_z_span.start_ms >= speech_end_ms.saturating_sub(120));
+    assert!(final_z_span.end_ms <= speech_end_ms);
 }
 
 #[test]

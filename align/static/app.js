@@ -797,11 +797,6 @@ function drawSpectrogram() {
 
   drawGrid(ctx, width, height);
   drawSpectrogramCandidateOverlays(ctx, width, height);
-  ctx.fillStyle = 'rgba(12, 16, 18, 0.72)';
-  ctx.fillRect(7, 7, 86, 20);
-  ctx.fillStyle = '#aab5af';
-  ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.fillText(`0-${Math.round(state.spectrogramMeta.maxHz / 1000)} kHz`, 13, 21);
 }
 
 function ensureSpectrogram() {
@@ -1037,7 +1032,19 @@ function drawBlendedTrack(ctx, width, height, segments, options) {
 }
 
 function drawCandidateSummaryTrack(ctx, width, height, segments, options) {
-  const items = visibleCandidateOverlayItems(segments, width, options);
+  const items = layoutCandidateTokenItems(
+    ctx,
+    visibleCandidateOverlayItems(segments, width, options).filter((item) => candidateDisplayLabel(item.segment)),
+    width,
+    height,
+  );
+  if (!items.length) {
+    ctx.fillStyle = '#66727a';
+    ctx.font = '13px Inter, sans-serif';
+    ctx.fillText(options.empty, 14, Math.floor(height / 2) + 4);
+    return;
+  }
+
   const baseline = Math.floor(height / 2) + 0.5;
   ctx.strokeStyle = 'rgba(102, 114, 122, 0.65)';
   ctx.beginPath();
@@ -1047,16 +1054,109 @@ function drawCandidateSummaryTrack(ctx, width, height, segments, options) {
 
   for (const item of items) {
     const chipColor = item.selected ? '#f3f6f1' : item.fillColor;
-    const y = item.selected ? 7 : 13;
-    const h = item.selected ? height - 14 : height - 26;
-    ctx.fillStyle = rgba(chipColor, item.selected ? 0.86 : item.alpha * 0.42);
-    ctx.fillRect(item.x, y, item.w, Math.max(3, h));
-    if (!item.selected) continue;
-    ctx.strokeStyle = '#ef8c86';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(item.x + 0.5, y + 0.5, Math.max(1, item.w - 1), Math.max(3, h - 1));
+    const markerY = Math.max(4, item.labelY + item.labelHeight - 4);
+    ctx.fillStyle = rgba(chipColor, item.selected ? 0.9 : item.alpha * 0.55);
+    ctx.fillRect(item.x, markerY, item.w, 3);
+
+    ctx.fillStyle = item.selected ? '#f3f6f1' : '#14191c';
+    ctx.fillRect(item.labelX, item.labelY, item.labelWidth, item.labelHeight);
+    ctx.strokeStyle = item.selected ? '#ef8c86' : rgba(chipColor, item.alpha * 0.86);
+    ctx.lineWidth = item.selected ? 1.5 : 1;
+    ctx.strokeRect(
+      item.labelX + 0.5,
+      item.labelY + 0.5,
+      Math.max(1, item.labelWidth - 1),
+      Math.max(1, item.labelHeight - 1),
+    );
     ctx.lineWidth = 1;
+
+    ctx.fillStyle = item.selected ? '#0b0e10' : '#f3f6f1';
+    ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(item.label, item.labelX + item.labelWidth / 2, item.labelY + item.labelHeight / 2 + 0.5);
   }
+}
+
+function layoutCandidateTokenItems(ctx, items, width, height) {
+  if (!items.length) return [];
+  ctx.save();
+  ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const laneCount = height >= 54 ? 2 : 1;
+  const laneHeight = Math.floor((height - 8) / laneCount);
+  const laneEnds = new Array(laneCount).fill(Number.NEGATIVE_INFINITY);
+  for (const item of items) {
+    item.label = candidateDisplayLabel(item.segment);
+    item.labelWidth = Math.ceil(Math.max(22, Math.min(94, ctx.measureText(item.label).width + 12)));
+    item.labelHeight = Math.max(18, Math.min(22, laneHeight - 3));
+    item.labelX = clamp(item.x + item.w / 2 - item.labelWidth / 2, 3, Math.max(3, width - item.labelWidth - 3));
+    const lane = firstOpenCandidateLane(laneEnds, item.labelX, item.labelWidth);
+    if (lane === -1) {
+      item.labelWidth = Math.min(item.labelWidth, Math.max(18, item.w + 8));
+      item.label = fitCanvasText(ctx, item.label, item.labelWidth - 6);
+      item.labelX = clamp(item.x + item.w / 2 - item.labelWidth / 2, 3, Math.max(3, width - item.labelWidth - 3));
+      item.lane = 0;
+    } else {
+      item.lane = lane;
+    }
+    item.labelY = 4 + item.lane * laneHeight + Math.floor((laneHeight - item.labelHeight) / 2);
+    laneEnds[item.lane] = Math.max(laneEnds[item.lane], item.labelX + item.labelWidth + 4);
+  }
+  ctx.restore();
+  return items.filter((item) => item.label);
+}
+
+function firstOpenCandidateLane(laneEnds, labelX, labelWidth) {
+  for (let lane = 0; lane < laneEnds.length; lane += 1) {
+    if (laneEnds[lane] <= labelX) return lane;
+  }
+  return -1;
+}
+
+function candidateDisplayLabel(segment) {
+  return candidateTokenLabel(segment) || candidateFeatureLabel(segment);
+}
+
+function candidateTokenLabel(segment) {
+  const tokenId = String(segment.token_id || '');
+  if (!tokenId) return '';
+
+  const label = String(segment.label || '').trim();
+  if (label) {
+    const compact = label.includes(':') ? label.slice(label.lastIndexOf(':') + 1).trim() : label;
+    if (compact && !/\s/.test(compact)) return compact;
+  }
+
+  const parts = tokenId.split('.');
+  return parts[parts.length - 1] || tokenId;
+}
+
+function candidateFeatureLabel(segment) {
+  const kind = String(segment.kind || '');
+  const label = String(segment.label || '').toLowerCase();
+  if (kind === 'periodic_voicing' || label.includes('voicing')) return '[+voice]';
+  if (kind === 'nucleus_candidate' || label.includes('vowel')) return '[+syll]';
+  if (kind === 'sonority_peak') return '[+son]';
+  if (kind === 'frication_noise' || label.includes('fric') || label.includes('centroid')) return '[+fric]';
+  if (kind === 'sibilant_noise' || label.includes('sibil') || label.includes('skew')) return '[+strid]';
+  if (kind === 'stop_closure' || label.includes('closure')) return '[-cont]';
+  if (kind === 'release_burst' || label.includes('release') || label.includes('burst')) return '[rel]';
+  if (kind === 'aspiration') return '[+spread]';
+  if (kind === 'boundary' || label.includes('silence')) return '[#]';
+  if (kind === 'rhotic_region' || label.includes('rhotic')) return '[+rhotic]';
+  if (
+    kind === 'nasal_murmur' ||
+    kind === 'nasal_antiresonance' ||
+    kind === 'nasal_place' ||
+    label.includes('nasal')
+  ) {
+    return '[+nasal]';
+  }
+  if (kind === 'approximant_formants') return '[+approx]';
+  if (kind === 'tap_closure') return '[tap]';
+  if (kind === 'formant_region' && /^f[123]$/.test(label)) return `[${label.toUpperCase()}]`;
+  if (kind === 'formant_trajectory' || label.includes('formant')) return '[form]';
+  return '';
 }
 
 function drawSpectrogramCandidateOverlays(ctx, width, height) {
@@ -1077,25 +1177,9 @@ function drawSpectrogramCandidateOverlays(ctx, width, height) {
     ctx.stroke();
     ctx.lineWidth = 1;
   }
-
-  for (const item of layout) {
-    if (!item.showLabel) continue;
-    ctx.save();
-    ctx.font = spectrogramCandidateFont();
-    ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
-    ctx.shadowBlur = 3;
-    ctx.shadowOffsetY = 1;
-    ctx.fillStyle = item.selected ? '#f3f6f1' : 'rgba(218, 226, 220, 0.68)';
-    drawFittedText(ctx, item.label, item.labelX, item.labelY, item.labelMaxWidth);
-    ctx.restore();
-  }
 }
 
 function layoutSpectrogramCandidateOverlays(ctx, segments, width, height) {
-  ctx.save();
-  ctx.font = spectrogramCandidateFont();
-  const laneEnds = new Map();
   const items = visibleCandidateOverlayItems(segments, width, {
     kind: 'candidate_overlay',
     color: candidateOverlayColor,
@@ -1103,36 +1187,9 @@ function layoutSpectrogramCandidateOverlays(ctx, segments, width, height) {
   });
   for (const item of items) {
     item.y = spectrogramCandidateY(item.segment, height);
-    item.label = candidateSpectrogramLabel(item.segment);
-    item.labelMaxWidth = Math.min(220, Math.max(40, item.w + 74));
-    item.labelWidth = Math.min(ctx.measureText(item.label).width, item.labelMaxWidth);
-    item.labelX = clamp(item.x + 3, 6, Math.max(6, width - item.labelWidth - 6));
-    item.labelY = item.y - 8;
-    item.showLabel = item.w >= 10 && placeSpectrogramCandidateLabel(item, laneEnds, width, height);
+    item.showLabel = false;
   }
-  ctx.restore();
   return items;
-}
-
-function placeSpectrogramCandidateLabel(item, laneEnds, width, height) {
-  const base = spectrogramCandidateBandKey(item.segment);
-  const offsets = [0, -16, 16, -32, 32];
-  const labelHeight = 13;
-  for (const offset of offsets) {
-    const key = `${base}:${offset}`;
-    const labelY = clamp(item.labelY + offset, 16, height - 12);
-    const labelRight = Math.min(width - 6, item.labelX + item.labelWidth);
-    const occupiedUntil = laneEnds.get(key) ?? Number.NEGATIVE_INFINITY;
-    if (occupiedUntil + 8 > item.labelX) continue;
-    item.labelY = labelY;
-    item.hitTop = labelY - labelHeight / 2;
-    item.hitBottom = labelY + labelHeight / 2;
-    item.hitLeft = item.labelX;
-    item.hitRight = labelRight;
-    laneEnds.set(key, labelRight);
-    return true;
-  }
-  return false;
 }
 
 function visibleCandidateOverlayItems(segments, width, options) {
@@ -1165,16 +1222,6 @@ function visibleCandidateOverlayItems(segments, width, options) {
         String(left.segment.kind || '').localeCompare(String(right.segment.kind || ''))
       );
     });
-}
-
-function candidateSpectrogramLabel(segment) {
-  const label = trackSegmentLabel(segment, {}) || String(segment.kind || 'candidate').replaceAll('_', ' ');
-  const source = candidateOverlaySourceLabel(segment);
-  return label.startsWith(source) ? label : `${source} ${label}`;
-}
-
-function spectrogramCandidateFont() {
-  return '11px ui-monospace, SFMono-Regular, Menlo, monospace';
 }
 
 function spectrogramCandidateY(segment, height) {
@@ -1212,16 +1259,6 @@ function spectrogramCandidateBandKey(segment) {
   return 'measurement';
 }
 
-function candidateOverlaySourceLabel(segment) {
-  if (segment.source === 'reverse_snipper') return 'reverse';
-  if (segment.source === 'syllable_nucleus') return 'nucleus';
-  if (segment.source === 'acoustic_cue') return 'cue';
-  if (segment.source === 'acoustic_landmark') return 'landmark';
-  if (segment.source === 'acoustic_measurement') return 'measure';
-  if (segment.source === 'inference_rule') return 'infer';
-  return String(segment.source || segment.kind || 'candidate').replaceAll('_', ' ');
-}
-
 function candidateOverlaySourceOrder(segment) {
   const order = {
     syllable_nucleus: 0,
@@ -1232,11 +1269,6 @@ function candidateOverlaySourceOrder(segment) {
     inference_rule: 5,
   };
   return order[segment.source] ?? 99;
-}
-
-function drawFittedText(ctx, text, x, y, maxWidth) {
-  const fitted = fitCanvasText(ctx, text, maxWidth);
-  if (fitted) ctx.fillText(fitted, x, y);
 }
 
 function fitCanvasText(ctx, text, maxWidth) {

@@ -20,7 +20,7 @@ use crate::rules::{
     AllophoneRule, EpenthesisRule, PhonePattern, PhonemePattern, PhonotacticConstraint,
     Phonotactics, RuleCondition, RuleStatus, SyllableShape,
 };
-use crate::segment::{Environment, SegmentMatcher, SyllablePosition};
+use crate::segment::{Environment, SegmentMatcher, SyllablePosition, WordPosition};
 use crate::spec::Spec;
 use crate::variety::{
     LinguisticVariety, OrthographicUnitKind, OrthographicUnitPronunciation,
@@ -2930,6 +2930,44 @@ fn allophone_rules(variety_id: &str) -> Vec<AllophoneRule> {
             confidence: 0.95,
             status: RuleStatus::Productive,
         });
+    }
+
+    for symbol in ["B", "D", "G", "V", "DH", "Z", "ZH", "JH"] {
+        for word_position in [WordPosition::Final, WordPosition::Isolated] {
+            let position_id = match word_position {
+                WordPosition::Final => "word_final",
+                WordPosition::Isolated => "isolated",
+                _ => unreachable!("final devoicing positions are explicit"),
+            };
+            rules.push(AllophoneRule {
+                id: format!(
+                    "american_english_optional_final_devoicing_{}_{}",
+                    symbol.to_lowercase(),
+                    position_id
+                ),
+                name: format!(
+                    "American English optional final devoicing of /{symbol}/ in {position_id} position"
+                ),
+                input: phoneme_pattern(variety_id, symbol),
+                environment: Environment {
+                    word_position: Spec::Known(word_position),
+                    ..Default::default()
+                },
+                conditions: Vec::new(),
+                output: PhonePattern {
+                    phone: Spec::Known(arpabet_phone_id(symbol)),
+                    features: feature_bundle_with_values(&[
+                        ("phonology.partial_devoicing", FeatureValue::Bool(true)),
+                        (
+                            "phonology.devoicing",
+                            FeatureValue::Category("final_optional".into()),
+                        ),
+                    ]),
+                },
+                confidence: 0.6,
+                status: RuleStatus::Optional,
+            });
+        }
     }
 
     for symbol in ["B", "D", "G", "V", "DH", "Z", "ZH", "JH"] {

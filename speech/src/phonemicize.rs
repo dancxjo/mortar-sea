@@ -1390,6 +1390,24 @@ mod tests {
         }
     }
 
+    fn phone_feature_category<'a>(token: &'a PhoneToken, feature_id: &str) -> Option<&'a str> {
+        let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+        match value {
+            Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn phone_feature_bool(token: &PhoneToken, feature_id: &str) -> Option<bool> {
+        let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+        match value {
+            Spec::Known(FeatureValue::Bool(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
     fn cmu_stress_digit(stress: &str) -> Option<&'static str> {
         match stress {
             "unstressed" => Some("0"),
@@ -1688,6 +1706,61 @@ mod tests {
             .expect("fallback");
         assert!(phone_symbols(&before_d).contains(&"n".into()));
         assert!(!phone_symbols(&before_d).contains(&"ŋ".into()));
+    }
+
+    #[test]
+    fn final_devoicing_marks_final_z_without_rewriting_phone() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("seas", "en-US"))
+            .expect("seas should phonemicize");
+        let final_phone = output
+            .phones
+            .iter()
+            .rev()
+            .find(|phone| !is_boundary_phone(phone))
+            .expect("final speech phone");
+
+        assert!(matches!(
+            &final_phone.phone,
+            Spec::Known(id) if id.as_str() == "ipa.phone.z"
+        ));
+        assert_eq!(
+            phone_feature_category(final_phone, "phonology.voicing"),
+            Some("voiced")
+        );
+        assert_eq!(
+            phone_feature_bool(final_phone, "phonology.partial_devoicing"),
+            Some(true)
+        );
+        assert_eq!(
+            phone_feature_category(final_phone, "phonology.devoicing"),
+            Some("final_optional")
+        );
+    }
+
+    #[test]
+    fn final_devoicing_does_not_mark_nonfinal_initial_z() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("zoo", "en-US"))
+            .expect("zoo should phonemicize");
+        let initial_phone = output
+            .phones
+            .iter()
+            .find(|phone| !is_boundary_phone(phone))
+            .expect("initial speech phone");
+
+        assert!(matches!(
+            &initial_phone.phone,
+            Spec::Known(id) if id.as_str() == "ipa.phone.z"
+        ));
+        assert_eq!(
+            phone_feature_category(initial_phone, "phonology.voicing"),
+            Some("voiced")
+        );
+        assert_ne!(
+            phone_feature_bool(initial_phone, "phonology.partial_devoicing"),
+            Some(true)
+        );
     }
 
     #[test]
