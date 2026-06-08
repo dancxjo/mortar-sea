@@ -1,3 +1,10 @@
+const PREFERENCES_STORAGE_KEY = 'mortar-align.preferences.v1';
+const DEFAULT_PREFERENCES = {
+  backend: 'styletts2',
+  styletts2Voice: '',
+  variety: 'en-US',
+};
+
 const state = {
   audioContext: null,
   source: null,
@@ -11,6 +18,7 @@ const state = {
   currentPhonemicization: null,
   currentAlignment: null,
   styletts2VoiceDir: 'voices/styletts2',
+  pendingStyletts2Voice: '',
   audioBuffer: null,
   spectrogramCanvas: null,
   spectrogramMeta: null,
@@ -85,7 +93,16 @@ window.addEventListener('DOMContentLoaded', () => {
   elements.phonemicize.addEventListener('click', phonemicize);
   elements.synthesize.addEventListener('click', synthesize);
   elements.align.addEventListener('click', alignAudio);
-  elements.backend.addEventListener('change', syncVoiceSelector);
+  elements.backend.addEventListener('change', () => {
+    syncVoiceSelector();
+    savePreferences();
+  });
+  elements['styletts2-voice'].addEventListener('change', () => {
+    state.pendingStyletts2Voice = elements['styletts2-voice'].value;
+    savePreferences();
+  });
+  elements.variety.addEventListener('change', savePreferences);
+  elements.variety.addEventListener('input', savePreferences);
   elements['refresh-voices'].addEventListener('click', loadStyleTts2Voices);
   elements['wav-file'].addEventListener('change', uploadSelectedFile);
   elements.record.addEventListener('click', startRecording);
@@ -110,10 +127,44 @@ window.addEventListener('DOMContentLoaded', () => {
   window.addEventListener('resize', drawAll);
 
   fitTimeline();
+  applyPreferences();
   loadStyleTts2Voices();
   syncVoiceSelector();
   drawAll();
 });
+
+function loadPreferences() {
+  try {
+    const raw = window.localStorage?.getItem(PREFERENCES_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_PREFERENCES };
+    return { ...DEFAULT_PREFERENCES, ...JSON.parse(raw) };
+  } catch (_error) {
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+function savePreferences() {
+  try {
+    window.localStorage?.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
+      backend: elements.backend.value || DEFAULT_PREFERENCES.backend,
+      styletts2Voice: state.pendingStyletts2Voice || elements['styletts2-voice'].value || '',
+      variety: elements.variety.value || DEFAULT_PREFERENCES.variety,
+    }));
+  } catch (_error) {
+    // Private browsing or locked-down storage should not break the aligner.
+  }
+}
+
+function applyPreferences() {
+  const preferences = loadPreferences();
+  if (selectHasValue(elements.backend, preferences.backend)) {
+    elements.backend.value = preferences.backend;
+  } else {
+    elements.backend.value = DEFAULT_PREFERENCES.backend;
+  }
+  elements.variety.value = preferences.variety || DEFAULT_PREFERENCES.variety;
+  state.pendingStyletts2Voice = preferences.styletts2Voice || '';
+}
 
 async function phonemicize() {
   await runJsonAction('/api/phonemicize', {
@@ -142,7 +193,7 @@ async function synthesize() {
 
 async function loadStyleTts2Voices() {
   try {
-    const selected = elements['styletts2-voice'].value;
+    const selected = state.pendingStyletts2Voice || elements['styletts2-voice'].value;
     const response = await fetch('/api/styletts2/voices');
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || response.statusText);
@@ -151,7 +202,7 @@ async function loadStyleTts2Voices() {
       optionElement('', 'default reference'),
       ...(payload.voices || []).map((voice) => optionElement(voice.id, voice.label)),
     );
-    if ([...elements['styletts2-voice'].options].some((option) => option.value === selected)) {
+    if (selectHasValue(elements['styletts2-voice'], selected)) {
       elements['styletts2-voice'].value = selected;
     }
     elements['voice-detail'].textContent = (payload.voices || []).length
@@ -162,6 +213,10 @@ async function loadStyleTts2Voices() {
   } finally {
     syncVoiceSelector();
   }
+}
+
+function selectHasValue(select, value) {
+  return [...select.options].some((option) => option.value === value);
 }
 
 function optionElement(value, label) {
@@ -553,7 +608,7 @@ function drawAll(options = {}) {
     alpha: candidateOverlayAlpha,
     text: '#f3f6f1',
     empty: 'Candidates',
-    blendedChips: true,
+    candidateSummary: true,
   });
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
     kind: 'word',
@@ -741,6 +796,7 @@ function drawSpectrogram() {
   );
 
   drawGrid(ctx, width, height);
+  drawSpectrogramCandidateOverlays(ctx, width, height);
   ctx.fillStyle = 'rgba(12, 16, 18, 0.72)';
   ctx.fillRect(7, 7, 86, 20);
   ctx.fillStyle = '#aab5af';
@@ -872,6 +928,11 @@ function drawTrack(canvas, segments, options) {
     return;
   }
 
+  if (options.candidateSummary) {
+    drawCandidateSummaryTrack(ctx, width, height, segments, options);
+    return;
+  }
+
   if (options.blendedChips) {
     drawBlendedTrack(ctx, width, height, segments, options);
     return;
@@ -973,6 +1034,226 @@ function drawBlendedTrack(ctx, width, height, segments, options) {
     ctx.fillText(trackSegmentLabel(item.segment, options), item.x + item.w / 2, Math.floor(height / 2) + 4);
     ctx.restore();
   }
+}
+
+function drawCandidateSummaryTrack(ctx, width, height, segments, options) {
+  const items = visibleCandidateOverlayItems(segments, width, options);
+  const baseline = Math.floor(height / 2) + 0.5;
+  ctx.strokeStyle = 'rgba(102, 114, 122, 0.65)';
+  ctx.beginPath();
+  ctx.moveTo(0, baseline);
+  ctx.lineTo(width, baseline);
+  ctx.stroke();
+
+  for (const item of items) {
+    const chipColor = item.selected ? '#f3f6f1' : item.fillColor;
+    const y = item.selected ? 7 : 13;
+    const h = item.selected ? height - 14 : height - 26;
+    ctx.fillStyle = rgba(chipColor, item.selected ? 0.86 : item.alpha * 0.42);
+    ctx.fillRect(item.x, y, item.w, Math.max(3, h));
+    if (!item.selected) continue;
+    ctx.strokeStyle = '#ef8c86';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(item.x + 0.5, y + 0.5, Math.max(1, item.w - 1), Math.max(3, h - 1));
+    ctx.lineWidth = 1;
+  }
+}
+
+function drawSpectrogramCandidateOverlays(ctx, width, height) {
+  const segments = state.currentAlignment?.candidate_overlays || [];
+  if (!segments.length) return;
+
+  const layout = layoutSpectrogramCandidateOverlays(ctx, segments, width, height);
+  for (const item of layout) {
+    const color = candidateOverlayColor(item.segment);
+    const alpha = candidateOverlayAlpha(item.segment);
+    ctx.fillStyle = rgba(color, alpha * 0.1);
+    ctx.fillRect(item.x, item.y - 6, item.w, 12);
+    ctx.strokeStyle = rgba(color, alpha * 0.42);
+    ctx.lineWidth = item.selected ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(item.x, item.y + 0.5);
+    ctx.lineTo(item.right, item.y + 0.5);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+
+  for (const item of layout) {
+    if (!item.showLabel) continue;
+    ctx.save();
+    ctx.font = spectrogramCandidateFont();
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+    ctx.shadowBlur = 3;
+    ctx.shadowOffsetY = 1;
+    ctx.fillStyle = item.selected ? '#f3f6f1' : 'rgba(218, 226, 220, 0.68)';
+    drawFittedText(ctx, item.label, item.labelX, item.labelY, item.labelMaxWidth);
+    ctx.restore();
+  }
+}
+
+function layoutSpectrogramCandidateOverlays(ctx, segments, width, height) {
+  ctx.save();
+  ctx.font = spectrogramCandidateFont();
+  const laneEnds = new Map();
+  const items = visibleCandidateOverlayItems(segments, width, {
+    kind: 'candidate_overlay',
+    color: candidateOverlayColor,
+    alpha: candidateOverlayAlpha,
+  });
+  for (const item of items) {
+    item.y = spectrogramCandidateY(item.segment, height);
+    item.label = candidateSpectrogramLabel(item.segment);
+    item.labelMaxWidth = Math.min(220, Math.max(40, item.w + 74));
+    item.labelWidth = Math.min(ctx.measureText(item.label).width, item.labelMaxWidth);
+    item.labelX = clamp(item.x + 3, 6, Math.max(6, width - item.labelWidth - 6));
+    item.labelY = item.y - 8;
+    item.showLabel = item.w >= 10 && placeSpectrogramCandidateLabel(item, laneEnds, width, height);
+  }
+  ctx.restore();
+  return items;
+}
+
+function placeSpectrogramCandidateLabel(item, laneEnds, width, height) {
+  const base = spectrogramCandidateBandKey(item.segment);
+  const offsets = [0, -16, 16, -32, 32];
+  const labelHeight = 13;
+  for (const offset of offsets) {
+    const key = `${base}:${offset}`;
+    const labelY = clamp(item.labelY + offset, 16, height - 12);
+    const labelRight = Math.min(width - 6, item.labelX + item.labelWidth);
+    const occupiedUntil = laneEnds.get(key) ?? Number.NEGATIVE_INFINITY;
+    if (occupiedUntil + 8 > item.labelX) continue;
+    item.labelY = labelY;
+    item.hitTop = labelY - labelHeight / 2;
+    item.hitBottom = labelY + labelHeight / 2;
+    item.hitLeft = item.labelX;
+    item.hitRight = labelRight;
+    laneEnds.set(key, labelRight);
+    return true;
+  }
+  return false;
+}
+
+function visibleCandidateOverlayItems(segments, width, options) {
+  return segments
+    .flatMap((segment) => {
+      const x = timeToX(segment.start_ms / 1000);
+      const right = timeToX(segment.end_ms / 1000);
+      const w = Math.max(1, right - x);
+      if (right < 0 || x > width) return [];
+      return [
+        {
+          segment,
+          selected: isSelectedSegment(options.kind, segment),
+          x,
+          right,
+          w,
+          fillColor: typeof options.color === 'function' ? options.color(segment) : options.color,
+          alpha: typeof options.alpha === 'function' ? options.alpha(segment) : 0.92,
+          lane: 0,
+          y: 0,
+          h: 0,
+        },
+      ];
+    })
+    .sort((left, right) => {
+      return (
+        left.x - right.x ||
+        left.right - right.right ||
+        candidateOverlaySourceOrder(left.segment) - candidateOverlaySourceOrder(right.segment) ||
+        String(left.segment.kind || '').localeCompare(String(right.segment.kind || ''))
+      );
+    });
+}
+
+function candidateSpectrogramLabel(segment) {
+  const label = trackSegmentLabel(segment, {}) || String(segment.kind || 'candidate').replaceAll('_', ' ');
+  const source = candidateOverlaySourceLabel(segment);
+  return label.startsWith(source) ? label : `${source} ${label}`;
+}
+
+function spectrogramCandidateFont() {
+  return '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+}
+
+function spectrogramCandidateY(segment, height) {
+  const band = spectrogramCandidateBandKey(segment);
+  const ratios = {
+    high_noise: 0.24,
+    release: 0.36,
+    measurement: 0.5,
+    nucleus: 0.62,
+    reverse: 0.76,
+    inferred: 0.14,
+  };
+  return Math.round(clamp(ratios[band] ?? 0.46, 0.08, 0.88) * height);
+}
+
+function spectrogramCandidateBandKey(segment) {
+  const source = String(segment.source || '');
+  const kind = String(segment.kind || '').toLowerCase();
+  const label = String(segment.label || '').toLowerCase();
+  const text = `${kind} ${label}`;
+  if (source === 'syllable_nucleus' || text.includes('nucleus') || text.includes('vowel')) return 'nucleus';
+  if (source === 'reverse_snipper') return 'reverse';
+  if (source === 'inference_rule') return 'inferred';
+  if (source === 'acoustic_measurement') return 'measurement';
+  if (
+    text.includes('fric') ||
+    text.includes('sibil') ||
+    text.includes('strident') ||
+    text.includes('noise')
+  ) {
+    return 'high_noise';
+  }
+  if (text.includes('burst') || text.includes('release') || text.includes('onset')) return 'release';
+  if (source === 'acoustic_landmark') return 'release';
+  return 'measurement';
+}
+
+function candidateOverlaySourceLabel(segment) {
+  if (segment.source === 'reverse_snipper') return 'reverse';
+  if (segment.source === 'syllable_nucleus') return 'nucleus';
+  if (segment.source === 'acoustic_cue') return 'cue';
+  if (segment.source === 'acoustic_landmark') return 'landmark';
+  if (segment.source === 'acoustic_measurement') return 'measure';
+  if (segment.source === 'inference_rule') return 'infer';
+  return String(segment.source || segment.kind || 'candidate').replaceAll('_', ' ');
+}
+
+function candidateOverlaySourceOrder(segment) {
+  const order = {
+    syllable_nucleus: 0,
+    reverse_snipper: 1,
+    acoustic_cue: 2,
+    acoustic_landmark: 3,
+    acoustic_measurement: 4,
+    inference_rule: 5,
+  };
+  return order[segment.source] ?? 99;
+}
+
+function drawFittedText(ctx, text, x, y, maxWidth) {
+  const fitted = fitCanvasText(ctx, text, maxWidth);
+  if (fitted) ctx.fillText(fitted, x, y);
+}
+
+function fitCanvasText(ctx, text, maxWidth) {
+  if (maxWidth <= 6) return '';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  const ellipsis = '...';
+  let left = 0;
+  let right = text.length;
+  while (left < right) {
+    const mid = Math.ceil((left + right) / 2);
+    if (ctx.measureText(`${text.slice(0, mid)}${ellipsis}`).width <= maxWidth) {
+      left = mid;
+    } else {
+      right = mid - 1;
+    }
+  }
+  return left > 0 ? `${text.slice(0, left)}${ellipsis}` : '';
 }
 
 function rgba(color, alpha) {
@@ -1129,11 +1410,47 @@ function hitTestTimelineSegment(event) {
   const alignment = state.currentAlignment;
   if (!alignment) return null;
   const timeMs = xToTime(timelineX(event)) * 1000;
+  if (kind === 'spectrogram_candidate') {
+    return hitTestSpectrogramCandidateOverlay(event, alignment, timeMs);
+  }
+  if (kind === 'candidate_overlay') {
+    return hitTestCandidateOverlay(event, alignment, timeMs);
+  }
   const segments = alignmentSegments(alignment, kind);
   const segment = segments.find((candidate) => {
     return timeMs >= candidate.start_ms && timeMs <= candidate.end_ms;
   });
   return segment ? { kind, segment } : null;
+}
+
+function hitTestCandidateOverlay(event, alignment, timeMs) {
+  const segment = [...(alignment.candidate_overlays || [])]
+    .filter((candidate) => timeMs >= candidate.start_ms && timeMs <= candidate.end_ms)
+    .sort((left, right) => Number(right.confidence || 0) - Number(left.confidence || 0))[0];
+  return segment ? { kind: 'candidate_overlay', segment } : null;
+}
+
+function hitTestSpectrogramCandidateOverlay(event, alignment, timeMs) {
+  const canvas = event.target;
+  const rect = canvas.getBoundingClientRect();
+  const y = event.clientY - rect.top;
+  const layout = layoutSpectrogramCandidateOverlays(
+    canvas.getContext('2d'),
+    alignment.candidate_overlays || [],
+    canvas.clientWidth,
+    canvas.clientHeight,
+  );
+  const segment = [...layout].reverse().find((item) => {
+    const onGuide = timeMs >= item.segment.start_ms && timeMs <= item.segment.end_ms && Math.abs(y - item.y) <= 7;
+    const onLabel =
+      item.showLabel &&
+      event.clientX - rect.left >= item.hitLeft &&
+      event.clientX - rect.left <= item.hitRight &&
+      y >= item.hitTop &&
+      y <= item.hitBottom;
+    return onGuide || onLabel;
+  })?.segment;
+  return segment ? { kind: 'candidate_overlay', segment } : null;
 }
 
 function alignmentSegments(alignment, kind) {
@@ -1147,6 +1464,7 @@ function trackKindForTarget(target) {
   if (!target || !target.id) return '';
   if (target.id === 'feature-track') return 'feature';
   if (target.id === 'projected-voicing-track') return 'projected_voicing';
+  if (target.id === 'spectrogram') return 'spectrogram_candidate';
   if (target.id === 'candidate-overlay-track') return 'candidate_overlay';
   if (target.id === 'word-track') return 'word';
   if (target.id === 'phoneme-track') return 'phoneme';

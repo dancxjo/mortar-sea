@@ -283,5 +283,5 @@ fn default_variety() -> String {
 }
 
 fn default_backend() -> AlignBackend {
-    AlignBackend::Mock
+    AlignBackend::Styletts2
 }
