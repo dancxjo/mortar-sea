@@ -869,6 +869,11 @@ function drawTrack(canvas, segments, options) {
     return;
   }
 
+  if (options.blendedChips) {
+    drawBlendedTrack(ctx, width, height, segments, options);
+    return;
+  }
+
   for (const segment of segments) {
     const selected = isSelectedSegment(options.kind, segment);
     const x = timeToX(segment.start_ms / 1000);
@@ -879,37 +884,14 @@ function drawTrack(canvas, segments, options) {
     const alpha = typeof options.alpha === 'function' ? options.alpha(segment) : 0.92;
     const y = 8;
     const h = height - 16;
-    if (options.blendedChips) {
-      const bleed = Math.min(10, Math.max(2, w * 0.16));
-      const gradient = ctx.createLinearGradient(x - bleed, 0, right + bleed, 0);
-      const chipColor = selected ? '#f3f6f1' : fillColor;
-      gradient.addColorStop(0, rgba(chipColor, 0));
-      gradient.addColorStop(0.18, rgba(chipColor, alpha * 0.76));
-      gradient.addColorStop(0.5, rgba(chipColor, alpha));
-      gradient.addColorStop(0.82, rgba(chipColor, alpha * 0.76));
-      gradient.addColorStop(1, rgba(chipColor, 0));
-      ctx.fillStyle = gradient;
-      ctx.fillRect(x - bleed, y, w + bleed * 2, h);
-    } else {
-      ctx.fillStyle = selected ? '#f3f6f1' : fillColor;
-      ctx.globalAlpha = alpha;
-      ctx.fillRect(x, y, w, h);
-      ctx.globalAlpha = 1;
-    }
+    ctx.fillStyle = selected ? '#f3f6f1' : fillColor;
+    ctx.globalAlpha = alpha;
+    ctx.fillRect(x, y, w, h);
     ctx.globalAlpha = 1;
-    if (options.blendedChips) {
-      if (selected) {
-        ctx.strokeStyle = '#ef8c86';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(x + 1, y + 1, Math.max(1, w - 2), Math.max(1, h - 2));
-        ctx.lineWidth = 1;
-      }
-    } else {
-      ctx.strokeStyle = selected ? '#ef8c86' : '#0b0e10';
-      ctx.lineWidth = selected ? 2 : 1;
-      ctx.strokeRect(x, y, w, h);
-      ctx.lineWidth = 1;
-    }
+    ctx.strokeStyle = selected ? '#ef8c86' : '#0b0e10';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.lineWidth = 1;
     if (w > 16) {
       ctx.save();
       ctx.beginPath();
@@ -917,15 +899,65 @@ function drawTrack(canvas, segments, options) {
       ctx.clip();
       ctx.fillStyle = selected ? '#0b0e10' : options.text;
       ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-      if (options.blendedChips) {
-        ctx.textAlign = 'center';
-        ctx.fillText(segment.label || segment.text || '', x + w / 2, Math.floor(height / 2) + 4);
-        ctx.textAlign = 'start';
-      } else {
-        ctx.fillText(segment.label || segment.text || '', x + 5, Math.floor(height / 2) + 4);
-      }
+      ctx.fillText(segment.label || segment.text || '', x + 5, Math.floor(height / 2) + 4);
       ctx.restore();
     }
+  }
+}
+
+function drawBlendedTrack(ctx, width, height, segments, options) {
+  const y = 8;
+  const h = height - 16;
+  const visibleSegments = segments.flatMap((segment) => {
+    const x = timeToX(segment.start_ms / 1000);
+    const right = timeToX(segment.end_ms / 1000);
+    const w = Math.max(1, right - x);
+    if (right < 0 || x > width) return [];
+    return [
+      {
+        segment,
+        selected: isSelectedSegment(options.kind, segment),
+        x,
+        right,
+        w,
+        fillColor: typeof options.color === 'function' ? options.color(segment) : options.color,
+        alpha: typeof options.alpha === 'function' ? options.alpha(segment) : 0.92,
+      },
+    ];
+  });
+
+  for (const item of visibleSegments) {
+    const bleed = Math.min(10, Math.max(2, item.w * 0.16));
+    const gradient = ctx.createLinearGradient(item.x - bleed, 0, item.right + bleed, 0);
+    const chipColor = item.selected ? '#f3f6f1' : item.fillColor;
+    gradient.addColorStop(0, rgba(chipColor, 0));
+    gradient.addColorStop(0.18, rgba(chipColor, item.alpha * 0.76));
+    gradient.addColorStop(0.5, rgba(chipColor, item.alpha));
+    gradient.addColorStop(0.82, rgba(chipColor, item.alpha * 0.76));
+    gradient.addColorStop(1, rgba(chipColor, 0));
+    ctx.fillStyle = gradient;
+    ctx.fillRect(item.x - bleed, y, item.w + bleed * 2, h);
+  }
+
+  for (const item of visibleSegments) {
+    if (!item.selected) continue;
+    ctx.strokeStyle = '#ef8c86';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(item.x + 1, y + 1, Math.max(1, item.w - 2), Math.max(1, h - 2));
+    ctx.lineWidth = 1;
+  }
+
+  for (const item of visibleSegments) {
+    if (item.w <= 16) continue;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(item.x + 2, y, Math.max(0, item.w - 4), h);
+    ctx.clip();
+    ctx.fillStyle = item.selected ? '#0b0e10' : options.text;
+    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(item.segment.label || item.segment.text || '', item.x + item.w / 2, Math.floor(height / 2) + 4);
+    ctx.restore();
   }
 }
 
