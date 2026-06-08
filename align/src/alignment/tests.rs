@@ -597,6 +597,133 @@ fn candidate_overlay_serializes_expected_wire_shape() {
 }
 
 #[test]
+fn acoustic_types_emit_candidate_facts_and_inferred_sibilants() {
+    let output = phonemicized("see");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..36).map(test_frame).collect::<Vec<_>>();
+    for frame in frames.iter_mut().skip(4).take(10) {
+        frame.energy_norm = 0.58;
+        frame.voicing = 0.05;
+        frame.zero_crossing_rate = 0.24;
+        frame.high_ratio = 0.86;
+        frame.spectral_centroid_hz = 5200.0;
+        frame.spectral_skew = 0.90;
+    }
+    for frame in frames.iter_mut().skip(18).take(10) {
+        frame.energy_norm = 0.82;
+        frame.voicing = 0.84;
+        frame.sonority = 0.90;
+        frame.vowel_nucleus_likelihood = 0.90;
+    }
+
+    let facts = alignment_candidate_facts(&output, &units, &frames, 360, &context, None);
+
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.source == CandidateSource::AcousticCue)
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.source == CandidateSource::AcousticLandmark)
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.source == CandidateSource::AcousticMeasurement)
+    );
+    assert!(facts.iter().any(|fact| {
+        fact.source == CandidateSource::InferenceRule && fact.kind == CandidateKind::SibilantNoise
+    }));
+    assert!(facts.iter().any(|fact| {
+        fact.source == CandidateSource::SyllableNucleus && fact.kind == CandidateKind::VowelNucleus
+    }));
+}
+
+#[test]
+fn fixed_point_rules_derive_sibilant_from_overlapping_frication_facts() {
+    let mut facts = vec![
+        CandidateFact {
+            source: CandidateSource::AcousticCue,
+            kind: CandidateKind::FricationNoise,
+            target: CandidateTarget::Any,
+            cue_id: Some("acoustic.cue.frication_noise".into()),
+            span: PhoneSpan {
+                start_ms: 40,
+                end_ms: 130,
+            },
+            frame_start: 4,
+            frame_end: 13,
+            confidence: 0.82,
+            label: "frication noise".into(),
+            token_id: None,
+            value: CandidateValue::Bool(true),
+        },
+        CandidateFact {
+            source: CandidateSource::AcousticMeasurement,
+            kind: CandidateKind::SibilantNoise,
+            target: CandidateTarget::Any,
+            cue_id: None,
+            span: PhoneSpan {
+                start_ms: 50,
+                end_ms: 120,
+            },
+            frame_start: 5,
+            frame_end: 12,
+            confidence: 0.76,
+            label: "spectral skew".into(),
+            token_id: None,
+            value: CandidateValue::Bool(true),
+        },
+    ];
+
+    infer_candidate_fact_fixed_point(&mut facts);
+
+    assert!(facts.iter().any(|fact| {
+        fact.source == CandidateSource::InferenceRule
+            && fact.kind == CandidateKind::SibilantNoise
+            && fact.label == "sibilant noise"
+    }));
+}
+
+#[test]
+fn candidate_facts_reward_matching_viterbi_segments_and_penalize_missed_pins() {
+    let output = phonemicized("see");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let fact = CandidateFact {
+        source: CandidateSource::InferenceRule,
+        kind: CandidateKind::SibilantNoise,
+        target: CandidateTarget::Unit(0),
+        cue_id: None,
+        span: PhoneSpan {
+            start_ms: 50,
+            end_ms: 120,
+        },
+        frame_start: 5,
+        frame_end: 12,
+        confidence: 0.92,
+        label: "sibilant noise".into(),
+        token_id: None,
+        value: CandidateValue::Bool(true),
+    };
+
+    let matching = candidate_segment_score(0, &units[0], 5..12, std::slice::from_ref(&fact));
+    let competing_vowel = candidate_segment_score(1, &units[1], 5..12, std::slice::from_ref(&fact));
+    let missed_pin = candidate_segment_score(0, &units[0], 13..18, &[fact]);
+
+    assert!(matching > competing_vowel + 2.0);
+    assert!(missed_pin < -2.0);
+}
+
+#[test]
 fn nucleus_anchor_rewards_spans_containing_target_frame() {
     let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
     frames[10].vowel_nucleus_likelihood = 0.95;

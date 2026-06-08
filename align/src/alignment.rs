@@ -454,7 +454,10 @@ fn acoustic_landmark_candidate_facts(frames: &[AcousticFrameFeatures]) -> Vec<Ca
         CandidateTarget::Feature(FeatureId("phonology.syllabic".into())),
         None,
         frames,
-        &frames.iter().map(nucleus_peak_confidence).collect::<Vec<_>>(),
+        &frames
+            .iter()
+            .map(nucleus_peak_confidence)
+            .collect::<Vec<_>>(),
         CANDIDATE_SOFT_BIAS_CONFIDENCE,
         &mut facts,
     );
@@ -515,7 +518,10 @@ fn acoustic_landmark_candidate_facts(frames: &[AcousticFrameFeatures]) -> Vec<Ca
         CandidateTarget::Any,
         None,
         frames,
-        &frames.iter().map(aspiration_frame_score).collect::<Vec<_>>(),
+        &frames
+            .iter()
+            .map(aspiration_frame_score)
+            .collect::<Vec<_>>(),
         0.56,
         &mut facts,
     );
@@ -691,8 +697,16 @@ fn push_candidate_score_runs(
         }
         if let Some(run_start) = start.take() {
             push_candidate_score_run(
-                source, kind, label, target.clone(), cue_id.clone(), frames, scores, run_start,
-                index, facts,
+                source,
+                kind,
+                label,
+                target.clone(),
+                cue_id.clone(),
+                frames,
+                scores,
+                run_start,
+                index,
+                facts,
             );
         }
     }
@@ -853,9 +867,7 @@ fn candidate_kind_for_cue(cue_id: &str) -> CandidateKind {
         "acoustic.cue.formant_trajectory"
         | "acoustic.cue.consonant_place_transition"
         | "acoustic.cue.place_formant_locus"
-        | "acoustic.cue.approximant_formant_transition_detail" => {
-            CandidateKind::FormantTrajectory
-        }
+        | "acoustic.cue.approximant_formant_transition_detail" => CandidateKind::FormantTrajectory,
         "acoustic.cue.f3_region" => CandidateKind::RhoticRegion,
         "acoustic.cue.nasal_murmur" => CandidateKind::NasalMurmur,
         "acoustic.cue.nasal_antiresonance" => CandidateKind::NasalAntiresonance,
@@ -864,8 +876,7 @@ fn candidate_kind_for_cue(cue_id: &str) -> CandidateKind {
         }
         "acoustic.cue.approximant_formants" => CandidateKind::ApproximantFormants,
         "acoustic.cue.tap_closure" => CandidateKind::TapClosure,
-        "acoustic.cue.affricate_release"
-        | "acoustic.cue.affricate_closure_to_frication_timing" => {
+        "acoustic.cue.affricate_release" | "acoustic.cue.affricate_closure_to_frication_timing" => {
             CandidateKind::ReleaseBurst
         }
         _ => CandidateKind::UnknownCue,
@@ -1034,19 +1045,19 @@ fn derive_pairwise_candidate_facts(
     for left in facts.iter().filter(|fact| fact.kind == left_kind) {
         for right in facts.iter().filter(|fact| fact.kind == right_kind) {
             let overlap = span_overlap_ratio(left.span, right.span);
-            let close = left.span.end_ms.abs_diff(right.span.start_ms).min(
-                right
-                    .span
-                    .end_ms
-                    .abs_diff(left.span.start_ms),
-            ) <= 45;
+            let close = left
+                .span
+                .end_ms
+                .abs_diff(right.span.start_ms)
+                .min(right.span.end_ms.abs_diff(left.span.start_ms))
+                <= 45;
             if overlap <= 0.15 && !close {
                 continue;
             }
             let start_ms = left.span.start_ms.min(right.span.start_ms);
             let end_ms = left.span.end_ms.max(right.span.end_ms);
-            let confidence = (0.35 * left.confidence + 0.35 * right.confidence + 0.30 * overlap)
-                .clamp(0.0, 1.0);
+            let confidence =
+                (0.35 * left.confidence + 0.35 * right.confidence + 0.30 * overlap).clamp(0.0, 1.0);
             if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
                 continue;
             }
@@ -2328,7 +2339,8 @@ fn candidate_segment_score(
     }
     let mut score = 0.0;
     for fact in facts {
-        let overlap = frame_range_overlap_ratio(frame_range.clone(), fact.frame_start..fact.frame_end);
+        let overlap =
+            frame_range_overlap_ratio(frame_range.clone(), fact.frame_start..fact.frame_end);
         let exact = candidate_fact_exactly_targets_unit(fact, unit_index, unit);
         let affinity = candidate_fact_unit_affinity(fact, unit_index, unit);
         if overlap > 0.0 {
@@ -2341,10 +2353,7 @@ fn candidate_segment_score(
     score
 }
 
-fn frame_range_overlap_ratio(
-    left: std::ops::Range<usize>,
-    right: std::ops::Range<usize>,
-) -> f32 {
+fn frame_range_overlap_ratio(left: std::ops::Range<usize>, right: std::ops::Range<usize>) -> f32 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
@@ -2354,7 +2363,11 @@ fn frame_range_overlap_ratio(
         return 0.0;
     }
     let overlap = end.saturating_sub(start) as f32;
-    let union = left.end.max(right.end).saturating_sub(left.start.min(right.start)).max(1) as f32;
+    let union = left
+        .end
+        .max(right.end)
+        .saturating_sub(left.start.min(right.start))
+        .max(1) as f32;
     (overlap / union).clamp(0.0, 1.0)
 }
 
@@ -2476,10 +2489,18 @@ fn candidate_feature_affinity(
             PhoneClass::Other => 0.0,
         },
         "phonology.manner" => match (kind, unit_phone_class(unit)) {
-            (CandidateKind::FricationNoise | CandidateKind::SibilantNoise, PhoneClass::Fricative)
-            | (CandidateKind::FricationNoise | CandidateKind::SibilantNoise, PhoneClass::Affricate) => 1.15,
+            (
+                CandidateKind::FricationNoise | CandidateKind::SibilantNoise,
+                PhoneClass::Fricative,
+            )
+            | (
+                CandidateKind::FricationNoise | CandidateKind::SibilantNoise,
+                PhoneClass::Affricate,
+            ) => 1.15,
             (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Stop)
-            | (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Affricate) => 1.0,
+            | (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Affricate) => {
+                1.0
+            }
             _ => 0.0,
         },
         "phonology.place" => match kind {

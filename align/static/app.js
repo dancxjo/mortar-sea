@@ -1005,6 +1005,10 @@ function projectedVoicingColor(segment) {
 function candidateOverlayColor(segment) {
   if (segment.source === 'reverse_snipper') return '#e8c36f';
   if (segment.source === 'syllable_nucleus') return '#ef8c86';
+  if (segment.source === 'acoustic_cue') return '#79b8ff';
+  if (segment.source === 'acoustic_landmark') return '#6fd2a4';
+  if (segment.source === 'acoustic_measurement') return '#c3a4ff';
+  if (segment.source === 'inference_rule') return '#f3f6f1';
   if (segment.source === 'frication') return '#c3a4ff';
   if (segment.source === 'vowel_trajectory') return '#6fd2a4';
   return '#66727a';
