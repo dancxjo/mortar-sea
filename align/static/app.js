@@ -537,7 +537,9 @@ function drawAll(options = {}) {
     kind: 'feature',
     color: featureTrackColor,
     text: '#f3f6f1',
-    empty: 'Features',
+    empty: 'voicing',
+    label: voicingTrackLabel,
+    centeredLabel: true,
   });
   drawTrack(canvases['projected-voicing-track'], state.currentAlignment?.projected_voicing || [], {
     kind: 'projected_voicing',
@@ -551,6 +553,7 @@ function drawAll(options = {}) {
     alpha: candidateOverlayAlpha,
     text: '#f3f6f1',
     empty: 'Candidates',
+    blendedChips: true,
   });
   drawTrack(canvases['word-track'], state.currentAlignment?.words || [], {
     kind: 'word',
@@ -897,12 +900,23 @@ function drawTrack(canvas, segments, options) {
       ctx.beginPath();
       ctx.rect(x + 2, y, Math.max(0, w - 4), h);
       ctx.clip();
+      const label = trackSegmentLabel(segment, options);
       ctx.fillStyle = selected ? '#0b0e10' : options.text;
       ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-      ctx.fillText(segment.label || segment.text || '', x + 5, Math.floor(height / 2) + 4);
+      if (options.centeredLabel) {
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x + w / 2, Math.floor(height / 2) + 4);
+      } else {
+        ctx.fillText(label, x + 5, Math.floor(height / 2) + 4);
+      }
       ctx.restore();
     }
   }
+}
+
+function trackSegmentLabel(segment, options) {
+  if (typeof options.label === 'function') return options.label(segment);
+  return segment.label || segment.text || '';
 }
 
 function drawBlendedTrack(ctx, width, height, segments, options) {
@@ -956,7 +970,7 @@ function drawBlendedTrack(ctx, width, height, segments, options) {
     ctx.fillStyle = item.selected ? '#0b0e10' : options.text;
     ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(item.segment.label || item.segment.text || '', item.x + item.w / 2, Math.floor(height / 2) + 4);
+    ctx.fillText(trackSegmentLabel(item.segment, options), item.x + item.w / 2, Math.floor(height / 2) + 4);
     ctx.restore();
   }
 }
@@ -976,6 +990,10 @@ function featureTrackColor(segment) {
   if (segment.kind === 'voiced') return '#5bc6ff';
   if (segment.kind === 'unvoiced') return '#c3a4ff';
   return '#66727a';
+}
+
+function voicingTrackLabel(segment) {
+  return segment.kind === 'voiced' ? '+' : '-';
 }
 
 function projectedVoicingColor(segment) {

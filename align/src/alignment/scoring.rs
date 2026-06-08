@@ -326,6 +326,10 @@ pub(super) fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f3
     match cue_id {
         "acoustic.cue.f1_region" => formant_plausibility(frame.f1_hz, 180.0, 1050.0),
         "acoustic.cue.f2_region" => formant_plausibility(frame.f2_hz, 700.0, 3400.0),
+        "acoustic.cue.rounding_resonance" => {
+            0.70 * positive_closeness(frame.f2_hz, 900.0, 700.0)
+                + 0.30 * positive_closeness(frame.f3_hz, 2300.0, 800.0)
+        }
         "acoustic.cue.f3_region" => rhotic_formant_evidence(frame),
         "acoustic.cue.vowel_nucleus" => frame.vowel_nucleus_likelihood,
         "acoustic.cue.sonority_peak" => frame.sonority,
@@ -337,6 +341,11 @@ pub(super) fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f3
         "acoustic.cue.stop_closure" => {
             0.65 * positive_closeness(frame.energy_norm, 0.08, 0.20)
                 + 0.35 * positive_closeness(frame.low_ratio, 0.72, 0.30)
+        }
+        "acoustic.cue.stop_burst_spectral_shape" => {
+            0.45 * frame.spectral_flux
+                + 0.35 * positive_closeness(frame.spectral_centroid_hz, 3200.0, 2600.0)
+                + 0.20 * positive_closeness(frame.high_ratio, 0.42, 0.35)
         }
         "acoustic.cue.release_burst" => frame.spectral_flux,
         "acoustic.cue.aspiration_noise" => {
@@ -360,6 +369,11 @@ pub(super) fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f3
         }
         "acoustic.cue.affricate_release" => {
             0.5 * frame.spectral_flux + 0.5 * positive_closeness(frame.high_ratio, 0.65, 0.35)
+        }
+        "acoustic.cue.affricate_closure_to_frication_timing" => {
+            0.45 * frame.spectral_flux
+                + 0.35 * positive_closeness(frame.high_ratio, 0.65, 0.35)
+                + 0.20 * positive_closeness(frame.zero_crossing_rate, 0.20, 0.16)
         }
         "acoustic.cue.nasal_murmur" => nasal_murmur_evidence(frame),
         "acoustic.cue.nasal_antiresonance" => nasal_antiresonance_evidence(frame),

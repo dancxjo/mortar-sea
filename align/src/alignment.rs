@@ -37,6 +37,7 @@ use timing::distribute_spans;
 const ENABLE_REVERSE_VITERBI_SCAN: bool = false;
 const CANDIDATE_OVERLAY_MIN_CONFIDENCE: f32 = 0.35;
 const CANDIDATE_SOFT_BIAS_CONFIDENCE: f32 = 0.65;
+const CANDIDATE_PIN_CONFIDENCE: f32 = 0.85;
 
 #[derive(Debug, Clone, Copy)]
 struct PhoneSpan {
@@ -90,6 +91,114 @@ struct BoundaryLandmarkPrior {
 struct WeakWordDurationHint {
     expected_ms: u64,
     max_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateSource {
+    AcousticCue,
+    AcousticLandmark,
+    AcousticMeasurement,
+    SyllableNucleus,
+    ReverseSnipper,
+    InferenceRule,
+}
+
+impl CandidateSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AcousticCue => "acoustic_cue",
+            Self::AcousticLandmark => "acoustic_landmark",
+            Self::AcousticMeasurement => "acoustic_measurement",
+            Self::SyllableNucleus => "syllable_nucleus",
+            Self::ReverseSnipper => "reverse_snipper",
+            Self::InferenceRule => "inference_rule",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateKind {
+    PeriodicVoicing,
+    VowelNucleus,
+    SonorityPeak,
+    FricationNoise,
+    SibilantNoise,
+    StopClosure,
+    ReleaseBurst,
+    Aspiration,
+    Boundary,
+    FormantRegion,
+    FormantTrajectory,
+    RhoticRegion,
+    NasalMurmur,
+    NasalAntiresonance,
+    NasalPlace,
+    ApproximantFormants,
+    TapClosure,
+    PhoneCandidate,
+    UnknownCue,
+}
+
+impl CandidateKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PeriodicVoicing => "periodic_voicing",
+            Self::VowelNucleus => "nucleus_candidate",
+            Self::SonorityPeak => "sonority_peak",
+            Self::FricationNoise => "frication_noise",
+            Self::SibilantNoise => "sibilant_noise",
+            Self::StopClosure => "stop_closure",
+            Self::ReleaseBurst => "release_burst",
+            Self::Aspiration => "aspiration",
+            Self::Boundary => "boundary",
+            Self::FormantRegion => "formant_region",
+            Self::FormantTrajectory => "formant_trajectory",
+            Self::RhoticRegion => "rhotic_region",
+            Self::NasalMurmur => "nasal_murmur",
+            Self::NasalAntiresonance => "nasal_antiresonance",
+            Self::NasalPlace => "nasal_place",
+            Self::ApproximantFormants => "approximant_formants",
+            Self::TapClosure => "tap_closure",
+            Self::PhoneCandidate => "phone_candidate",
+            Self::UnknownCue => "unknown_cue",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateTarget {
+    Any,
+    Unit(usize),
+    Phone(PhoneId),
+    Feature(FeatureId),
+    Boundary,
+    Stress,
+    Tone,
+    Speaker,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CandidateValue {
+    Bool(bool),
+    Category(String),
+    Numeric(f32),
+    PhoneLabel(String),
+    Unspecified,
+}
+
+#[derive(Debug, Clone)]
+struct CandidateFact {
+    source: CandidateSource,
+    kind: CandidateKind,
+    target: CandidateTarget,
+    cue_id: Option<String>,
+    span: PhoneSpan,
+    frame_start: usize,
+    frame_end: usize,
+    confidence: f32,
+    label: String,
+    token_id: Option<String>,
+    value: CandidateValue,
 }
 
 struct AlignedPhone<'a> {
@@ -151,20 +260,17 @@ pub(crate) fn forced_alignment_tracks(
     if frames.len() < units.len().min(3) {
         return None;
     }
-    let mut spans = voicing_pattern_unit_spans(&units, &frames, decoded.duration_ms)?;
-    refine_spans_with_nucleus_candidates(output, &units, &frames, decoded.duration_ms, &mut spans);
-    if let Some(reverse_spans) =
-        reverse_snipper_unit_spans(output, &units, &frames, decoded.duration_ms, &context)
-    {
-        apply_reverse_candidate_soft_bias(
-            &units,
-            &frames,
-            decoded.duration_ms,
-            &context,
-            &reverse_spans,
-            &mut spans,
-        );
-    }
+    let candidate_facts =
+        alignment_candidate_facts(output, &units, &frames, decoded.duration_ms, &context, None);
+    let spans = viterbi_unit_spans(
+        output,
+        &units,
+        &frames,
+        decoded.duration_ms,
+        &context,
+        &candidate_facts,
+    )
+    .or_else(|| voicing_pattern_unit_spans(&units, &frames, decoded.duration_ms))?;
     let aligned_segments = aligned_segments_from_units(units, spans, output, &context);
     Some(alignment_tracks_from_segments(
         output,
@@ -197,28 +303,14 @@ pub(crate) fn alignment_candidate_overlays(
     }
 
     let final_spans = aligned_phone_spans(aligned_phones);
-    let mut overlays = Vec::new();
-    if let Some(reverse_spans) =
-        reverse_snipper_unit_spans(output, &units, &frames, decoded.duration_ms, &context)
-    {
-        overlays.extend(reverse_snipper_candidate_overlays(
-            &units,
-            &frames,
-            &context,
-            &reverse_spans,
-            &final_spans,
-        ));
-    }
-    overlays.extend(syllable_nucleus_candidate_overlays(
+    candidate_facts_to_overlays(&alignment_candidate_facts(
         output,
         &units,
         &frames,
         decoded.duration_ms,
-    ));
-    for (index, overlay) in overlays.iter_mut().enumerate() {
-        overlay.index = index;
-    }
-    overlays
+        &context,
+        Some(&final_spans),
+    ))
 }
 
 pub(crate) fn projected_voicing_tracks(
@@ -276,43 +368,538 @@ fn aligned_phone_spans(phones: &[SegmentAlignment]) -> Vec<PhoneSpan> {
         .collect()
 }
 
-fn reverse_snipper_candidate_overlays(
-    units: &[AlignableUnit<'_>],
-    frames: &[AcousticFrameFeatures],
-    context: &AlignmentAcousticContext,
-    reverse_spans: &[PhoneSpan],
-    final_spans: &[PhoneSpan],
-) -> Vec<CandidateOverlaySegment> {
-    units
-        .iter()
-        .zip(reverse_spans.iter())
-        .enumerate()
-        .filter_map(|(index, (unit, span))| {
-            let AlignableUnit::Phone { token, .. } = unit else {
-                return None;
-            };
-            let final_span = final_spans.get(index).copied().unwrap_or(*span);
-            let confidence = reverse_candidate_confidence(unit, frames, context, *span, final_span);
-            (confidence >= CANDIDATE_OVERLAY_MIN_CONFIDENCE).then(|| CandidateOverlaySegment {
-                index: 0,
-                source: "reverse_snipper".into(),
-                kind: "phone_candidate".into(),
-                label: phone_label(token),
-                start_ms: span.start_ms,
-                end_ms: span.end_ms.max(span.start_ms.saturating_add(1)),
-                confidence,
-                token_id: Some(phone_token_id(token)),
-            })
-        })
-        .collect()
-}
-
-fn syllable_nucleus_candidate_overlays(
+fn alignment_candidate_facts(
     output: &PhonemicizeOutput,
     units: &[AlignableUnit<'_>],
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
-) -> Vec<CandidateOverlaySegment> {
+    context: &AlignmentAcousticContext,
+    final_spans: Option<&[PhoneSpan]>,
+) -> Vec<CandidateFact> {
+    let mut facts = acoustic_profile_candidate_facts(context, frames);
+    facts.extend(syllable_nucleus_candidate_facts(
+        output,
+        units,
+        frames,
+        duration_ms,
+    ));
+    infer_candidate_fact_fixed_point(&mut facts);
+
+    if let Some(reverse_spans) =
+        reverse_snipper_unit_spans(output, units, frames, duration_ms, context, &facts)
+    {
+        facts.extend(reverse_snipper_candidate_facts(
+            units,
+            frames,
+            context,
+            &reverse_spans,
+            final_spans.unwrap_or(&reverse_spans),
+        ));
+        infer_candidate_fact_fixed_point(&mut facts);
+    }
+    facts
+}
+
+fn acoustic_profile_candidate_facts(
+    context: &AlignmentAcousticContext,
+    frames: &[AcousticFrameFeatures],
+) -> Vec<CandidateFact> {
+    let mut facts = acoustic_landmark_candidate_facts(frames);
+    facts.extend(acoustic_measurement_candidate_facts(frames));
+    let Some(profile) = &context.profile else {
+        return facts;
+    };
+    let mut cues = profile.cues.values().collect::<Vec<_>>();
+    cues.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+    for cue in cues {
+        facts.extend(acoustic_cue_candidate_facts(cue, context, frames));
+    }
+    facts
+}
+
+fn acoustic_landmark_candidate_facts(frames: &[AcousticFrameFeatures]) -> Vec<CandidateFact> {
+    let mut facts = Vec::new();
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::ReleaseBurst,
+        "release burst",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| frame.spectral_flux.clamp(0.0, 1.0))
+            .collect::<Vec<_>>(),
+        0.72,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::FricationNoise,
+        "aperiodic noise",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| cue_frame_match("acoustic.cue.frication_noise", frame))
+            .collect::<Vec<_>>(),
+        0.58,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::VowelNucleus,
+        "vowel target",
+        CandidateTarget::Feature(FeatureId("phonology.syllabic".into())),
+        None,
+        frames,
+        &frames.iter().map(nucleus_peak_confidence).collect::<Vec<_>>(),
+        CANDIDATE_SOFT_BIAS_CONFIDENCE,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::PeriodicVoicing,
+        "periodic voicing",
+        CandidateTarget::Feature(FeatureId("phonology.voicing".into())),
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| frame.voicing.clamp(0.0, 1.0))
+            .collect::<Vec<_>>(),
+        0.62,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::Boundary,
+        "boundary",
+        CandidateTarget::Boundary,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| {
+                silence_frame_score(frame)
+                    .max(frame.spectral_flux)
+                    .clamp(0.0, 1.0)
+            })
+            .collect::<Vec<_>>(),
+        0.70,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::StopClosure,
+        "closure",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| {
+                (0.65 * positive_closeness(frame.energy_norm, 0.08, 0.20)
+                    + 0.35 * positive_closeness(frame.low_ratio, 0.72, 0.30))
+                .clamp(0.0, 1.0)
+            })
+            .collect::<Vec<_>>(),
+        0.58,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::Aspiration,
+        "aspiration",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames.iter().map(aspiration_frame_score).collect::<Vec<_>>(),
+        0.56,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticLandmark,
+        CandidateKind::FormantTrajectory,
+        "formant transition",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| {
+                (frame.spectral_flux * formant_plausibility(frame.f2_hz, 700.0, 3400.0))
+                    .clamp(0.0, 1.0)
+            })
+            .collect::<Vec<_>>(),
+        0.62,
+        &mut facts,
+    );
+    facts.extend(voicing_onset_candidate_facts(frames));
+    facts
+}
+
+fn acoustic_measurement_candidate_facts(frames: &[AcousticFrameFeatures]) -> Vec<CandidateFact> {
+    let mut facts = Vec::new();
+    for (index, formant_index, hz) in frames.iter().enumerate().flat_map(|(index, frame)| {
+        [
+            (index, 1_u8, frame.f1_hz),
+            (index, 2_u8, frame.f2_hz),
+            (index, 3_u8, frame.f3_hz),
+        ]
+    }) {
+        let plausible = match formant_index {
+            1 => formant_plausibility(hz, 180.0, 1050.0),
+            2 => formant_plausibility(hz, 700.0, 3400.0),
+            3 => formant_plausibility(hz, 1300.0, 4200.0),
+            _ => 0.0,
+        };
+        if plausible <= 0.0 {
+            continue;
+        }
+        let frame = &frames[index];
+        facts.push(CandidateFact {
+            source: CandidateSource::AcousticMeasurement,
+            kind: if formant_index == 3 && rhotic_formant_evidence(frame) > 0.55 {
+                CandidateKind::RhoticRegion
+            } else {
+                CandidateKind::FormantRegion
+            },
+            target: CandidateTarget::Any,
+            cue_id: None,
+            span: PhoneSpan {
+                start_ms: frame.start_ms,
+                end_ms: frame.end_ms,
+            },
+            frame_start: index,
+            frame_end: index + 1,
+            confidence: 0.45,
+            label: format!("F{formant_index}"),
+            token_id: None,
+            value: CandidateValue::Numeric(hz),
+        });
+    }
+    push_candidate_score_runs(
+        CandidateSource::AcousticMeasurement,
+        CandidateKind::FricationNoise,
+        "high centroid",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| positive_closeness(frame.spectral_centroid_hz, 4200.0, 2800.0))
+            .collect::<Vec<_>>(),
+        0.58,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticMeasurement,
+        CandidateKind::SibilantNoise,
+        "spectral skew",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| positive_closeness(frame.spectral_skew, 0.35, 0.9))
+            .collect::<Vec<_>>(),
+        0.58,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticMeasurement,
+        CandidateKind::NasalMurmur,
+        "nasal murmur band",
+        CandidateTarget::Any,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| positive_closeness(frame.low_band_peak_hz, 285.0, 190.0))
+            .collect::<Vec<_>>(),
+        0.56,
+        &mut facts,
+    );
+    push_candidate_score_runs(
+        CandidateSource::AcousticMeasurement,
+        CandidateKind::Boundary,
+        "silence duration",
+        CandidateTarget::Boundary,
+        None,
+        frames,
+        &frames
+            .iter()
+            .map(|frame| silence_frame_score(frame).clamp(0.0, 1.0))
+            .collect::<Vec<_>>(),
+        0.66,
+        &mut facts,
+    );
+    facts
+}
+
+fn voicing_onset_candidate_facts(frames: &[AcousticFrameFeatures]) -> Vec<CandidateFact> {
+    let mut facts = Vec::new();
+    for index in 1..frames.len() {
+        let previous = frames[index - 1].voicing;
+        let current = frames[index].voicing;
+        let confidence = (current - previous).max(0.0).clamp(0.0, 1.0);
+        if current < 0.45 || confidence < 0.34 {
+            continue;
+        }
+        let frame = &frames[index];
+        facts.push(CandidateFact {
+            source: CandidateSource::AcousticLandmark,
+            kind: CandidateKind::PeriodicVoicing,
+            target: CandidateTarget::Feature(FeatureId("phonology.voicing".into())),
+            cue_id: Some("acoustic.landmark.voicing_onset".into()),
+            span: PhoneSpan {
+                start_ms: frame.start_ms,
+                end_ms: frame.end_ms,
+            },
+            frame_start: index,
+            frame_end: index + 1,
+            confidence,
+            label: "voicing onset".into(),
+            token_id: None,
+            value: CandidateValue::Bool(true),
+        });
+    }
+    facts
+}
+
+fn push_candidate_score_runs(
+    source: CandidateSource,
+    kind: CandidateKind,
+    label: &str,
+    target: CandidateTarget,
+    cue_id: Option<String>,
+    frames: &[AcousticFrameFeatures],
+    scores: &[f32],
+    threshold: f32,
+    facts: &mut Vec<CandidateFact>,
+) {
+    if frames.is_empty() || scores.len() != frames.len() {
+        return;
+    }
+    let mut start = None;
+    for (index, score) in scores.iter().copied().enumerate() {
+        if score >= threshold {
+            start.get_or_insert(index);
+            continue;
+        }
+        if let Some(run_start) = start.take() {
+            push_candidate_score_run(
+                source, kind, label, target.clone(), cue_id.clone(), frames, scores, run_start,
+                index, facts,
+            );
+        }
+    }
+    if let Some(run_start) = start {
+        push_candidate_score_run(
+            source,
+            kind,
+            label,
+            target,
+            cue_id,
+            frames,
+            scores,
+            run_start,
+            frames.len(),
+            facts,
+        );
+    }
+}
+
+fn push_candidate_score_run(
+    source: CandidateSource,
+    kind: CandidateKind,
+    label: &str,
+    target: CandidateTarget,
+    cue_id: Option<String>,
+    frames: &[AcousticFrameFeatures],
+    scores: &[f32],
+    start: usize,
+    end: usize,
+    facts: &mut Vec<CandidateFact>,
+) {
+    if start >= end || end > frames.len() {
+        return;
+    }
+    let confidence = scores[start..end]
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .clamp(0.0, 1.0);
+    if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+        return;
+    }
+    facts.push(CandidateFact {
+        source,
+        kind,
+        target,
+        cue_id,
+        span: PhoneSpan {
+            start_ms: frames[start].start_ms,
+            end_ms: frames[end - 1].end_ms.max(frames[start].start_ms + 1),
+        },
+        frame_start: start,
+        frame_end: end,
+        confidence,
+        label: label.into(),
+        token_id: None,
+        value: CandidateValue::Bool(true),
+    });
+}
+
+fn acoustic_cue_candidate_facts(
+    cue: &AcousticCueDef,
+    context: &AlignmentAcousticContext,
+    frames: &[AcousticFrameFeatures],
+) -> Vec<CandidateFact> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let cue_id = cue.id.0.as_str();
+    let reliability = context.cue_reliability(cue_id);
+    let threshold = match cue.diagnosticity {
+        CueDiagnosticity::Robust => 0.50,
+        CueDiagnosticity::Moderate => 0.56,
+        CueDiagnosticity::Weak => 0.64,
+    };
+    let scores = frames
+        .iter()
+        .map(|frame| cue_frame_match(cue_id, frame) * reliability)
+        .collect::<Vec<_>>();
+    let mut facts = Vec::new();
+    let mut start = None;
+    for (index, score) in scores.iter().copied().enumerate() {
+        if score >= threshold {
+            start.get_or_insert(index);
+            continue;
+        }
+        if let Some(run_start) = start.take() {
+            push_acoustic_cue_fact(cue, frames, &scores, run_start, index, &mut facts);
+        }
+    }
+    if let Some(run_start) = start {
+        push_acoustic_cue_fact(cue, frames, &scores, run_start, frames.len(), &mut facts);
+    }
+    facts
+}
+
+fn push_acoustic_cue_fact(
+    cue: &AcousticCueDef,
+    frames: &[AcousticFrameFeatures],
+    scores: &[f32],
+    start: usize,
+    end: usize,
+    facts: &mut Vec<CandidateFact>,
+) {
+    if start >= end || end > frames.len() {
+        return;
+    }
+    let confidence = scores[start..end]
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .clamp(0.0, 1.0);
+    if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+        return;
+    }
+    let cue_id = cue.id.0.clone();
+    let kind = candidate_kind_for_cue(cue_id.as_str());
+    facts.push(CandidateFact {
+        source: CandidateSource::AcousticCue,
+        kind,
+        target: candidate_target_for_cue(cue),
+        cue_id: Some(cue_id.clone()),
+        span: PhoneSpan {
+            start_ms: frames[start].start_ms,
+            end_ms: frames[end - 1].end_ms.max(frames[start].start_ms + 1),
+        },
+        frame_start: start,
+        frame_end: end,
+        confidence,
+        label: cue_label(&cue_id),
+        token_id: None,
+        value: CandidateValue::Bool(true),
+    });
+}
+
+fn candidate_kind_for_cue(cue_id: &str) -> CandidateKind {
+    match cue_id {
+        "acoustic.cue.periodic_voicing" => CandidateKind::PeriodicVoicing,
+        "acoustic.cue.sonority_peak" => CandidateKind::SonorityPeak,
+        "acoustic.cue.vowel_nucleus" | "acoustic.cue.vowel_reduction" => {
+            CandidateKind::VowelNucleus
+        }
+        "acoustic.cue.frication_noise" => CandidateKind::FricationNoise,
+        "acoustic.cue.frication_spectral_shape" | "acoustic.cue.frication_spectral_skew" => {
+            CandidateKind::SibilantNoise
+        }
+        "acoustic.cue.stop_closure" => CandidateKind::StopClosure,
+        "acoustic.cue.release_burst" | "acoustic.cue.stop_burst_spectral_shape" => {
+            CandidateKind::ReleaseBurst
+        }
+        "acoustic.cue.aspiration_noise" | "acoustic.cue.voice_onset_time" => {
+            CandidateKind::Aspiration
+        }
+        "acoustic.cue.segment_boundary" | "acoustic.cue.boundary_gap" => CandidateKind::Boundary,
+        "acoustic.cue.f1_region" | "acoustic.cue.f2_region" | "acoustic.cue.rounding_resonance" => {
+            CandidateKind::FormantRegion
+        }
+        "acoustic.cue.formant_trajectory"
+        | "acoustic.cue.consonant_place_transition"
+        | "acoustic.cue.place_formant_locus"
+        | "acoustic.cue.approximant_formant_transition_detail" => {
+            CandidateKind::FormantTrajectory
+        }
+        "acoustic.cue.f3_region" => CandidateKind::RhoticRegion,
+        "acoustic.cue.nasal_murmur" => CandidateKind::NasalMurmur,
+        "acoustic.cue.nasal_antiresonance" => CandidateKind::NasalAntiresonance,
+        "acoustic.cue.nasal_place" | "acoustic.cue.nasal_place_transition" => {
+            CandidateKind::NasalPlace
+        }
+        "acoustic.cue.approximant_formants" => CandidateKind::ApproximantFormants,
+        "acoustic.cue.tap_closure" => CandidateKind::TapClosure,
+        "acoustic.cue.affricate_release"
+        | "acoustic.cue.affricate_closure_to_frication_timing" => {
+            CandidateKind::ReleaseBurst
+        }
+        _ => CandidateKind::UnknownCue,
+    }
+}
+
+fn candidate_target_for_cue(cue: &AcousticCueDef) -> CandidateTarget {
+    cue.targets
+        .first()
+        .map(|target| match target {
+            speech::CueTarget::Phone(id) => CandidateTarget::Phone(id.clone()),
+            speech::CueTarget::Phoneme(_) => CandidateTarget::Any,
+            speech::CueTarget::Feature(id) => CandidateTarget::Feature(id.clone()),
+            speech::CueTarget::Boundary => CandidateTarget::Boundary,
+            speech::CueTarget::Stress => CandidateTarget::Stress,
+            speech::CueTarget::Tone => CandidateTarget::Tone,
+            speech::CueTarget::Speaker => CandidateTarget::Speaker,
+        })
+        .unwrap_or(CandidateTarget::Any)
+}
+
+fn cue_label(cue_id: &str) -> String {
+    cue_id
+        .strip_prefix("acoustic.cue.")
+        .unwrap_or(cue_id)
+        .replace('_', " ")
+}
+
+fn syllable_nucleus_candidate_facts(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+) -> Vec<CandidateFact> {
     let nucleus_units = syllable_nucleus_unit_indices(output, units);
     let target_frames = acoustic_nucleus_target_frames(frames, nucleus_units.len());
     nucleus_units
@@ -339,18 +926,222 @@ fn syllable_nucleus_candidate_overlays(
                 .saturating_add(18)
                 .min(duration_ms)
                 .max(start_ms.saturating_add(1));
-            Some(CandidateOverlaySegment {
-                index: 0,
-                source: "syllable_nucleus".into(),
-                kind: "nucleus_candidate".into(),
-                label,
-                start_ms,
-                end_ms,
+            Some(CandidateFact {
+                source: CandidateSource::SyllableNucleus,
+                kind: CandidateKind::VowelNucleus,
+                target: CandidateTarget::Unit(unit_index),
+                cue_id: Some("acoustic.cue.vowel_nucleus".into()),
+                span: PhoneSpan { start_ms, end_ms },
+                frame_start: frame_index,
+                frame_end: frame_index.saturating_add(1),
                 confidence,
+                label,
                 token_id,
+                value: CandidateValue::Bool(true),
             })
         })
         .collect()
+}
+
+fn reverse_snipper_candidate_facts(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    reverse_spans: &[PhoneSpan],
+    final_spans: &[PhoneSpan],
+) -> Vec<CandidateFact> {
+    units
+        .iter()
+        .zip(reverse_spans.iter())
+        .enumerate()
+        .filter_map(|(index, (unit, span))| {
+            let AlignableUnit::Phone { token, .. } = unit else {
+                return None;
+            };
+            let final_span = final_spans.get(index).copied().unwrap_or(*span);
+            let confidence = reverse_candidate_confidence(unit, frames, context, *span, final_span);
+            if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+                return None;
+            }
+            let range = frame_range_for_span(frames, *span);
+            Some(CandidateFact {
+                source: CandidateSource::ReverseSnipper,
+                kind: CandidateKind::PhoneCandidate,
+                target: CandidateTarget::Unit(index),
+                cue_id: None,
+                span: PhoneSpan {
+                    start_ms: span.start_ms,
+                    end_ms: span.end_ms.max(span.start_ms.saturating_add(1)),
+                },
+                frame_start: range.start,
+                frame_end: range.end,
+                confidence,
+                label: phone_label(token),
+                token_id: Some(phone_token_id(token)),
+                value: CandidateValue::PhoneLabel(phone_label(token)),
+            })
+        })
+        .collect()
+}
+
+fn infer_candidate_fact_fixed_point(facts: &mut Vec<CandidateFact>) {
+    for _ in 0..4 {
+        let mut additions = Vec::new();
+        additions.extend(derive_pairwise_candidate_facts(
+            facts,
+            CandidateKind::FricationNoise,
+            CandidateKind::SibilantNoise,
+            CandidateKind::SibilantNoise,
+            "sibilant noise",
+        ));
+        additions.extend(derive_pairwise_candidate_facts(
+            facts,
+            CandidateKind::VowelNucleus,
+            CandidateKind::SonorityPeak,
+            CandidateKind::VowelNucleus,
+            "vowel nucleus",
+        ));
+        additions.extend(derive_pairwise_candidate_facts(
+            facts,
+            CandidateKind::StopClosure,
+            CandidateKind::ReleaseBurst,
+            CandidateKind::PhoneCandidate,
+            "stop candidate",
+        ));
+        additions.extend(derive_pairwise_candidate_facts(
+            facts,
+            CandidateKind::Boundary,
+            CandidateKind::ReleaseBurst,
+            CandidateKind::Boundary,
+            "boundary",
+        ));
+        additions.retain(|candidate| !candidate_fact_exists(facts, candidate));
+        if additions.is_empty() {
+            break;
+        }
+        facts.extend(additions);
+    }
+}
+
+fn derive_pairwise_candidate_facts(
+    facts: &[CandidateFact],
+    left_kind: CandidateKind,
+    right_kind: CandidateKind,
+    derived_kind: CandidateKind,
+    label: &str,
+) -> Vec<CandidateFact> {
+    let mut derived = Vec::new();
+    for left in facts.iter().filter(|fact| fact.kind == left_kind) {
+        for right in facts.iter().filter(|fact| fact.kind == right_kind) {
+            let overlap = span_overlap_ratio(left.span, right.span);
+            let close = left.span.end_ms.abs_diff(right.span.start_ms).min(
+                right
+                    .span
+                    .end_ms
+                    .abs_diff(left.span.start_ms),
+            ) <= 45;
+            if overlap <= 0.15 && !close {
+                continue;
+            }
+            let start_ms = left.span.start_ms.min(right.span.start_ms);
+            let end_ms = left.span.end_ms.max(right.span.end_ms);
+            let confidence = (0.35 * left.confidence + 0.35 * right.confidence + 0.30 * overlap)
+                .clamp(0.0, 1.0);
+            if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+                continue;
+            }
+            derived.push(CandidateFact {
+                source: CandidateSource::InferenceRule,
+                kind: derived_kind,
+                target: CandidateTarget::Any,
+                cue_id: None,
+                span: PhoneSpan { start_ms, end_ms },
+                frame_start: left.frame_start.min(right.frame_start),
+                frame_end: left.frame_end.max(right.frame_end),
+                confidence,
+                label: label.into(),
+                token_id: None,
+                value: CandidateValue::Bool(true),
+            });
+        }
+    }
+    derived
+}
+
+fn candidate_fact_exists(facts: &[CandidateFact], candidate: &CandidateFact) -> bool {
+    facts.iter().any(|fact| {
+        fact.source == candidate.source
+            && fact.kind == candidate.kind
+            && fact.label == candidate.label
+            && fact.span.start_ms.abs_diff(candidate.span.start_ms) <= ALIGN_HOP_MS
+            && fact.span.end_ms.abs_diff(candidate.span.end_ms) <= ALIGN_HOP_MS
+    })
+}
+
+fn candidate_facts_to_overlays(facts: &[CandidateFact]) -> Vec<CandidateOverlaySegment> {
+    let mut overlays = facts
+        .iter()
+        .filter(|fact| fact.confidence >= CANDIDATE_OVERLAY_MIN_CONFIDENCE)
+        .filter(|fact| candidate_fact_is_overlay_worthy(fact))
+        .map(|fact| CandidateOverlaySegment {
+            index: 0,
+            source: fact.source.as_str().into(),
+            kind: fact.kind.as_str().into(),
+            label: fact.label.clone(),
+            start_ms: fact.span.start_ms,
+            end_ms: fact.span.end_ms.max(fact.span.start_ms.saturating_add(1)),
+            confidence: fact.confidence.clamp(0.0, 1.0),
+            token_id: fact.token_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    overlays.sort_by(|left, right| {
+        left.start_ms
+            .cmp(&right.start_ms)
+            .then(left.end_ms.cmp(&right.end_ms))
+            .then(left.source.cmp(&right.source))
+            .then(left.kind.cmp(&right.kind))
+    });
+    for (index, overlay) in overlays.iter_mut().enumerate() {
+        overlay.index = index;
+    }
+    overlays
+}
+
+fn candidate_fact_is_overlay_worthy(fact: &CandidateFact) -> bool {
+    !matches!(
+        fact.kind,
+        CandidateKind::PeriodicVoicing | CandidateKind::FormantRegion | CandidateKind::UnknownCue
+    ) || fact.confidence >= CANDIDATE_SOFT_BIAS_CONFIDENCE
+}
+
+fn reverse_snipper_candidate_overlays(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    reverse_spans: &[PhoneSpan],
+    final_spans: &[PhoneSpan],
+) -> Vec<CandidateOverlaySegment> {
+    candidate_facts_to_overlays(&reverse_snipper_candidate_facts(
+        units,
+        frames,
+        context,
+        reverse_spans,
+        final_spans,
+    ))
+}
+
+fn syllable_nucleus_candidate_overlays(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+) -> Vec<CandidateOverlaySegment> {
+    candidate_facts_to_overlays(&syllable_nucleus_candidate_facts(
+        output,
+        units,
+        frames,
+        duration_ms,
+    ))
 }
 
 fn unit_phone_token<'a>(unit: &'a AlignableUnit<'a>) -> Option<&'a PhoneToken> {
@@ -1080,6 +1871,7 @@ fn reverse_snipper_unit_spans(
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
     context: &AlignmentAcousticContext,
+    candidate_facts: &[CandidateFact],
 ) -> Option<Vec<PhoneSpan>> {
     let (active_start, active_end) = active_frame_range_for_units(frames, units)?;
     if active_end.saturating_sub(active_start) < units.len() {
@@ -1095,6 +1887,7 @@ fn reverse_snipper_unit_spans(
         &boundary_priors,
         duration_ms,
         context,
+        candidate_facts,
         AlignmentDirection::Reverse,
     )
 }
@@ -1219,6 +2012,7 @@ fn viterbi_unit_spans(
     frames: &[AcousticFrameFeatures],
     duration_ms: u64,
     context: &AlignmentAcousticContext,
+    candidate_facts: &[CandidateFact],
 ) -> Option<Vec<PhoneSpan>> {
     let (active_start, active_end) = active_frame_range_for_units(frames, units)?;
     let active = &frames[active_start..active_end];
@@ -1241,6 +2035,7 @@ fn viterbi_unit_spans(
         &boundary_priors,
         duration_ms,
         context,
+        candidate_facts,
         AlignmentDirection::Forward,
     );
     let mut spans = if ENABLE_REVERSE_VITERBI_SCAN {
@@ -1253,6 +2048,7 @@ fn viterbi_unit_spans(
             &boundary_priors,
             duration_ms,
             context,
+            candidate_facts,
             AlignmentDirection::Reverse,
         );
         match (forward, reverse) {
@@ -1282,6 +2078,7 @@ fn directional_viterbi_unit_spans(
     boundary_priors: &[BoundaryLandmarkPrior],
     duration_ms: u64,
     context: &AlignmentAcousticContext,
+    candidate_facts: &[CandidateFact],
     direction: AlignmentDirection,
 ) -> Option<Vec<PhoneSpan>> {
     let active = &frames[active_start..active_end];
@@ -1324,8 +2121,16 @@ fn directional_viterbi_unit_spans(
         let unit = &units[original_unit_index];
         for (frame_index, frame) in directed_frames.iter().enumerate() {
             let previous_score = prefix_scores[directed_unit_index][frame_index];
-            prefix_scores[directed_unit_index][frame_index + 1] =
-                previous_score + unit_frame_score(unit, frame, context);
+            let original_frame_index =
+                directed_frame_original_index(active_start, active_end, frame_index, direction);
+            prefix_scores[directed_unit_index][frame_index + 1] = previous_score
+                + unit_frame_score(unit, frame, context)
+                + candidate_frame_score(
+                    original_unit_index,
+                    unit,
+                    original_frame_index,
+                    candidate_facts,
+                );
         }
     }
 
@@ -1364,6 +2169,14 @@ fn directional_viterbi_unit_spans(
                     &nucleus_target_prefix,
                 );
                 let segment_score = unit_segment_score(unit, segment_frames, context, expected_len);
+                let (original_start, original_end) =
+                    directed_span_frame_range(start, end, frame_count, direction);
+                let candidate_score = candidate_segment_score(
+                    original_unit_index,
+                    unit,
+                    active_start + original_start..active_start + original_end,
+                    candidate_facts,
+                );
                 let boundary_score = boundary_landmark_score(
                     &directed_boundary_priors,
                     directed_segment_end_boundary_index(original_unit_index, direction),
@@ -1376,6 +2189,7 @@ fn directional_viterbi_unit_spans(
                     + duration_score(len, expected_len)
                     + anchor
                     + segment_score
+                    + candidate_score
                     + boundary_score
                     + onset_score;
                 if candidate > dp[unit_index][end] {
@@ -1468,6 +2282,235 @@ fn directed_span_frame_range(
             frame_count.saturating_sub(directed_end),
             frame_count.saturating_sub(directed_start),
         ),
+    }
+}
+
+fn directed_frame_original_index(
+    active_start: usize,
+    active_end: usize,
+    directed_frame_index: usize,
+    direction: AlignmentDirection,
+) -> usize {
+    match direction {
+        AlignmentDirection::Forward => active_start + directed_frame_index,
+        AlignmentDirection::Reverse => active_end.saturating_sub(directed_frame_index + 1),
+    }
+}
+
+fn candidate_frame_score(
+    unit_index: usize,
+    unit: &AlignableUnit<'_>,
+    frame_index: usize,
+    facts: &[CandidateFact],
+) -> f32 {
+    facts
+        .iter()
+        .filter(|fact| frame_index >= fact.frame_start && frame_index < fact.frame_end)
+        .map(|fact| {
+            let affinity = candidate_fact_unit_affinity(fact, unit_index, unit);
+            if affinity == 0.0 {
+                0.0
+            } else {
+                0.16 * affinity * fact.confidence
+            }
+        })
+        .sum()
+}
+
+fn candidate_segment_score(
+    unit_index: usize,
+    unit: &AlignableUnit<'_>,
+    frame_range: std::ops::Range<usize>,
+    facts: &[CandidateFact],
+) -> f32 {
+    if frame_range.is_empty() {
+        return 0.0;
+    }
+    let mut score = 0.0;
+    for fact in facts {
+        let overlap = frame_range_overlap_ratio(frame_range.clone(), fact.frame_start..fact.frame_end);
+        let exact = candidate_fact_exactly_targets_unit(fact, unit_index, unit);
+        let affinity = candidate_fact_unit_affinity(fact, unit_index, unit);
+        if overlap > 0.0 {
+            let target_scale = if exact { 2.2 } else { 0.82 };
+            score += target_scale * affinity * fact.confidence * overlap;
+        } else if exact && fact.confidence >= CANDIDATE_PIN_CONFIDENCE {
+            score -= 3.4 * fact.confidence;
+        }
+    }
+    score
+}
+
+fn frame_range_overlap_ratio(
+    left: std::ops::Range<usize>,
+    right: std::ops::Range<usize>,
+) -> f32 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let start = left.start.max(right.start);
+    let end = left.end.min(right.end);
+    if end <= start {
+        return 0.0;
+    }
+    let overlap = end.saturating_sub(start) as f32;
+    let union = left.end.max(right.end).saturating_sub(left.start.min(right.start)).max(1) as f32;
+    (overlap / union).clamp(0.0, 1.0)
+}
+
+fn candidate_fact_unit_affinity(
+    fact: &CandidateFact,
+    unit_index: usize,
+    unit: &AlignableUnit<'_>,
+) -> f32 {
+    if candidate_fact_exactly_targets_unit(fact, unit_index, unit) {
+        return 1.7;
+    }
+    match &fact.target {
+        CandidateTarget::Boundary if matches!(unit, AlignableUnit::Boundary { .. }) => return 1.2,
+        CandidateTarget::Boundary => return -0.8,
+        CandidateTarget::Feature(feature) => {
+            return candidate_feature_affinity(feature, fact.kind, unit);
+        }
+        CandidateTarget::Phone(_) | CandidateTarget::Unit(_) => return -0.35,
+        CandidateTarget::Stress | CandidateTarget::Tone | CandidateTarget::Speaker => {}
+        CandidateTarget::Any => {}
+    }
+
+    let class = unit_phone_class(unit);
+    match fact.kind {
+        CandidateKind::PeriodicVoicing => match unit_expected_voicing(unit) {
+            Some(VoicingKind::Voiced) => 0.65,
+            Some(VoicingKind::Voiceless) => -0.45,
+            None => 0.0,
+        },
+        CandidateKind::VowelNucleus | CandidateKind::SonorityPeak => match class {
+            PhoneClass::Vowel => 1.35,
+            PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => 0.28,
+            PhoneClass::Stop | PhoneClass::Fricative | PhoneClass::Affricate => -0.92,
+            PhoneClass::Other => 0.0,
+        },
+        CandidateKind::FricationNoise | CandidateKind::SibilantNoise => match class {
+            PhoneClass::Fricative | PhoneClass::Affricate => 1.45,
+            PhoneClass::Stop => 0.25,
+            PhoneClass::Vowel | PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => -0.86,
+            PhoneClass::Other => 0.0,
+        },
+        CandidateKind::StopClosure | CandidateKind::ReleaseBurst | CandidateKind::Aspiration => {
+            match class {
+                PhoneClass::Stop | PhoneClass::Affricate => 1.25,
+                PhoneClass::Fricative => 0.18,
+                PhoneClass::Vowel | PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => {
+                    -0.72
+                }
+                PhoneClass::Other => 0.0,
+            }
+        }
+        CandidateKind::Boundary => {
+            if matches!(unit, AlignableUnit::Boundary { .. }) {
+                1.3
+            } else {
+                -0.35
+            }
+        }
+        CandidateKind::FormantRegion
+        | CandidateKind::FormantTrajectory
+        | CandidateKind::RhoticRegion
+        | CandidateKind::ApproximantFormants => match class {
+            PhoneClass::Vowel | PhoneClass::Liquid | PhoneClass::Glide => 0.74,
+            PhoneClass::Nasal => 0.18,
+            PhoneClass::Stop | PhoneClass::Fricative | PhoneClass::Affricate => -0.24,
+            PhoneClass::Other => 0.0,
+        },
+        CandidateKind::NasalMurmur
+        | CandidateKind::NasalAntiresonance
+        | CandidateKind::NasalPlace => match class {
+            PhoneClass::Nasal => 1.25,
+            PhoneClass::Vowel | PhoneClass::Liquid | PhoneClass::Glide => -0.24,
+            _ => 0.0,
+        },
+        CandidateKind::TapClosure => match class {
+            PhoneClass::Stop | PhoneClass::Liquid => 0.78,
+            PhoneClass::Vowel => -0.35,
+            _ => 0.0,
+        },
+        CandidateKind::PhoneCandidate => 0.18,
+        CandidateKind::UnknownCue => 0.0,
+    }
+}
+
+fn candidate_fact_exactly_targets_unit(
+    fact: &CandidateFact,
+    unit_index: usize,
+    unit: &AlignableUnit<'_>,
+) -> bool {
+    match &fact.target {
+        CandidateTarget::Unit(index) => *index == unit_index,
+        CandidateTarget::Phone(phone_id) => match unit {
+            AlignableUnit::Phone { token, .. } => {
+                matches!(&token.phone, Spec::Known(id) if id == phone_id)
+            }
+            AlignableUnit::Boundary { phone_id: id, .. } => id == phone_id,
+        },
+        CandidateTarget::Boundary => matches!(unit, AlignableUnit::Boundary { .. }),
+        _ => false,
+    }
+}
+
+fn candidate_feature_affinity(
+    feature: &FeatureId,
+    kind: CandidateKind,
+    unit: &AlignableUnit<'_>,
+) -> f32 {
+    let feature_id = feature.0.as_str();
+    match feature_id {
+        "phonology.voicing" => match unit_expected_voicing(unit) {
+            Some(VoicingKind::Voiced) if kind == CandidateKind::PeriodicVoicing => 0.78,
+            Some(VoicingKind::Voiceless) if kind == CandidateKind::PeriodicVoicing => -0.55,
+            _ => 0.0,
+        },
+        "phonology.syllabic" => match unit_phone_class(unit) {
+            PhoneClass::Vowel => 1.1,
+            PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => 0.18,
+            PhoneClass::Stop | PhoneClass::Fricative | PhoneClass::Affricate => -0.72,
+            PhoneClass::Other => 0.0,
+        },
+        "phonology.manner" => match (kind, unit_phone_class(unit)) {
+            (CandidateKind::FricationNoise | CandidateKind::SibilantNoise, PhoneClass::Fricative)
+            | (CandidateKind::FricationNoise | CandidateKind::SibilantNoise, PhoneClass::Affricate) => 1.15,
+            (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Stop)
+            | (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Affricate) => 1.0,
+            _ => 0.0,
+        },
+        "phonology.place" => match kind {
+            CandidateKind::SibilantNoise
+            | CandidateKind::NasalPlace
+            | CandidateKind::FormantTrajectory
+            | CandidateKind::ReleaseBurst => 0.45,
+            _ => 0.0,
+        },
+        "phonology.vowel_height" | "phonology.vowel_backness" | "phonology.roundedness" => {
+            if unit_phone_class(unit) == PhoneClass::Vowel {
+                0.72
+            } else {
+                -0.18
+            }
+        }
+        "phonology.rhoticity" => {
+            if matches!(unit, AlignableUnit::Phone { token, .. } if is_rhotic_phone(token)) {
+                0.92
+            } else {
+                0.0
+            }
+        }
+        "phonology.diphthong" => {
+            if unit_phone_class(unit) == PhoneClass::Vowel {
+                0.74
+            } else {
+                0.0
+            }
+        }
+        _ => 0.0,
     }
 }
 
