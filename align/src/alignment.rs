@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 use crate::{
-    ALIGN_HOP_MS, ALIGN_SAMPLE_RATE_HZ, AsrSentence, DecodedWav, FeatureTrackSegment,
-    MAX_FULL_TRAJECTORY_SAMPLES, SegmentAlignment, TimedWord, WordAlignment,
+    ALIGN_HOP_MS, ALIGN_SAMPLE_RATE_HZ, AsrSentence, CandidateOverlaySegment, DecodedWav,
+    FeatureTrackSegment, MAX_FULL_TRAJECTORY_SAMPLES, SegmentAlignment, TimedWord, WordAlignment,
 };
 use crate::{
     audio::resample_linear,
@@ -35,6 +35,8 @@ pub(crate) use timing::alignment_tracks;
 use timing::distribute_spans;
 
 const ENABLE_REVERSE_VITERBI_SCAN: bool = false;
+const CANDIDATE_OVERLAY_MIN_CONFIDENCE: f32 = 0.35;
+const CANDIDATE_SOFT_BIAS_CONFIDENCE: f32 = 0.65;
 
 #[derive(Debug, Clone, Copy)]
 struct PhoneSpan {
@@ -149,13 +151,74 @@ pub(crate) fn forced_alignment_tracks(
     if frames.len() < units.len().min(3) {
         return None;
     }
-    let spans = voicing_pattern_unit_spans(&units, &frames, decoded.duration_ms)?;
+    let mut spans = voicing_pattern_unit_spans(&units, &frames, decoded.duration_ms)?;
+    refine_spans_with_nucleus_candidates(output, &units, &frames, decoded.duration_ms, &mut spans);
+    if let Some(reverse_spans) =
+        reverse_snipper_unit_spans(output, &units, &frames, decoded.duration_ms, &context)
+    {
+        apply_reverse_candidate_soft_bias(
+            &units,
+            &frames,
+            decoded.duration_ms,
+            &context,
+            &reverse_spans,
+            &mut spans,
+        );
+    }
     let aligned_segments = aligned_segments_from_units(units, spans, output, &context);
     Some(alignment_tracks_from_segments(
         output,
         &aligned_segments,
         decoded.duration_ms,
     ))
+}
+
+pub(crate) fn alignment_candidate_overlays(
+    output: &PhonemicizeOutput,
+    decoded: &DecodedWav,
+    aligned_phones: &[SegmentAlignment],
+) -> Vec<CandidateOverlaySegment> {
+    let context = AlignmentAcousticContext::for_output(output);
+    let units = alignable_phones(output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    if units.is_empty() {
+        return Vec::new();
+    }
+    let samples = resample_linear(
+        &decoded.samples,
+        decoded.sample_rate_hz,
+        ALIGN_SAMPLE_RATE_HZ,
+    );
+    let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let final_spans = aligned_phone_spans(aligned_phones);
+    let mut overlays = Vec::new();
+    if let Some(reverse_spans) =
+        reverse_snipper_unit_spans(output, &units, &frames, decoded.duration_ms, &context)
+    {
+        overlays.extend(reverse_snipper_candidate_overlays(
+            &units,
+            &frames,
+            &context,
+            &reverse_spans,
+            &final_spans,
+        ));
+    }
+    overlays.extend(syllable_nucleus_candidate_overlays(
+        output,
+        &units,
+        &frames,
+        decoded.duration_ms,
+    ));
+    for (index, overlay) in overlays.iter_mut().enumerate() {
+        overlay.index = index;
+    }
+    overlays
 }
 
 pub(crate) fn projected_voicing_tracks(
@@ -200,6 +263,128 @@ fn projected_voicing_label(phone: &PhoneToken) -> (&'static str, &'static str) {
         Some(VoicingKind::Voiceless) => ("unvoiced", "voiceless"),
         None => ("unspecified", "unspecified"),
     }
+}
+
+fn aligned_phone_spans(phones: &[SegmentAlignment]) -> Vec<PhoneSpan> {
+    phones
+        .iter()
+        .filter(|phone| !phone.token_id.starts_with("boundary."))
+        .map(|phone| PhoneSpan {
+            start_ms: phone.start_ms,
+            end_ms: phone.end_ms,
+        })
+        .collect()
+}
+
+fn reverse_snipper_candidate_overlays(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    reverse_spans: &[PhoneSpan],
+    final_spans: &[PhoneSpan],
+) -> Vec<CandidateOverlaySegment> {
+    units
+        .iter()
+        .zip(reverse_spans.iter())
+        .enumerate()
+        .filter_map(|(index, (unit, span))| {
+            let AlignableUnit::Phone { token, .. } = unit else {
+                return None;
+            };
+            let final_span = final_spans.get(index).copied().unwrap_or(*span);
+            let confidence = reverse_candidate_confidence(unit, frames, context, *span, final_span);
+            (confidence >= CANDIDATE_OVERLAY_MIN_CONFIDENCE).then(|| CandidateOverlaySegment {
+                index: 0,
+                source: "reverse_snipper".into(),
+                kind: "phone_candidate".into(),
+                label: phone_label(token),
+                start_ms: span.start_ms,
+                end_ms: span.end_ms.max(span.start_ms.saturating_add(1)),
+                confidence,
+                token_id: Some(phone_token_id(token)),
+            })
+        })
+        .collect()
+}
+
+fn syllable_nucleus_candidate_overlays(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+) -> Vec<CandidateOverlaySegment> {
+    let nucleus_units = syllable_nucleus_unit_indices(output, units);
+    let target_frames = acoustic_nucleus_target_frames(frames, nucleus_units.len());
+    nucleus_units
+        .into_iter()
+        .zip(target_frames)
+        .filter_map(|(unit_index, frame_index)| {
+            let frame = frames.get(frame_index)?;
+            let confidence = nucleus_peak_confidence(frame);
+            if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+                return None;
+            }
+            let label = units
+                .get(unit_index)
+                .and_then(unit_phone_token)
+                .map(|token| format!("nucleus:{}", phone_label(token)))
+                .unwrap_or_else(|| "nucleus".into());
+            let token_id = units
+                .get(unit_index)
+                .and_then(unit_phone_token)
+                .map(phone_token_id);
+            let center = (frame.start_ms.saturating_add(frame.end_ms)) / 2;
+            let start_ms = center.saturating_sub(18).min(duration_ms);
+            let end_ms = center
+                .saturating_add(18)
+                .min(duration_ms)
+                .max(start_ms.saturating_add(1));
+            Some(CandidateOverlaySegment {
+                index: 0,
+                source: "syllable_nucleus".into(),
+                kind: "nucleus_candidate".into(),
+                label,
+                start_ms,
+                end_ms,
+                confidence,
+                token_id,
+            })
+        })
+        .collect()
+}
+
+fn unit_phone_token<'a>(unit: &'a AlignableUnit<'a>) -> Option<&'a PhoneToken> {
+    match unit {
+        AlignableUnit::Phone { token, .. } => Some(*token),
+        AlignableUnit::Boundary { .. } => None,
+    }
+}
+
+fn acoustic_nucleus_target_frames(
+    frames: &[AcousticFrameFeatures],
+    nucleus_count: usize,
+) -> Vec<usize> {
+    if frames.is_empty() || nucleus_count == 0 {
+        return Vec::new();
+    }
+    let Some((active_start, active_end)) = active_frame_range(frames) else {
+        return nucleus_target_frames(frames, nucleus_count);
+    };
+    if active_start >= active_end {
+        return nucleus_target_frames(frames, nucleus_count);
+    }
+    nucleus_target_frames(&frames[active_start..active_end], nucleus_count)
+        .into_iter()
+        .map(|frame_index| active_start + frame_index)
+        .collect()
+}
+
+fn nucleus_peak_confidence(frame: &AcousticFrameFeatures) -> f32 {
+    (0.36 * frame.vowel_nucleus_likelihood
+        + 0.26 * frame.energy_norm
+        + 0.22 * frame.sonority
+        + 0.16 * frame.voicing)
+        .clamp(0.0, 1.0)
 }
 
 fn alignable_phones(output: &PhonemicizeOutput) -> Vec<(&PhoneToken, usize)> {
@@ -887,6 +1072,145 @@ fn distributed_unit_spans(start_ms: u64, end_ms: u64, unit_count: usize) -> Vec<
         .into_iter()
         .map(|(start_ms, end_ms)| PhoneSpan { start_ms, end_ms })
         .collect()
+}
+
+fn reverse_snipper_unit_spans(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+    context: &AlignmentAcousticContext,
+) -> Option<Vec<PhoneSpan>> {
+    let (active_start, active_end) = active_frame_range_for_units(frames, units)?;
+    if active_end.saturating_sub(active_start) < units.len() {
+        return None;
+    }
+    let boundary_priors = boundary_landmark_priors(units, frames, active_start, active_end);
+    directional_viterbi_unit_spans(
+        output,
+        units,
+        frames,
+        active_start,
+        active_end,
+        &boundary_priors,
+        duration_ms,
+        context,
+        AlignmentDirection::Reverse,
+    )
+}
+
+fn apply_reverse_candidate_soft_bias(
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+    context: &AlignmentAcousticContext,
+    reverse_spans: &[PhoneSpan],
+    spans: &mut [PhoneSpan],
+) {
+    if spans.len() != reverse_spans.len() || spans.len() != units.len() || spans.is_empty() {
+        return;
+    }
+    let confidences = units
+        .iter()
+        .zip(reverse_spans.iter().zip(spans.iter()))
+        .map(|(unit, (reverse, current))| {
+            reverse_candidate_confidence(unit, frames, context, *reverse, *current)
+        })
+        .collect::<Vec<_>>();
+    let current_boundaries = span_boundaries(spans);
+    let reverse_boundaries = span_boundaries(reverse_spans);
+    if current_boundaries.len() != reverse_boundaries.len() {
+        return;
+    }
+
+    let mut boundaries = current_boundaries.clone();
+    for boundary_index in 1..boundaries.len().saturating_sub(1) {
+        let left_confidence = confidences
+            .get(boundary_index.saturating_sub(1))
+            .copied()
+            .unwrap_or(0.0);
+        let right_confidence = confidences.get(boundary_index).copied().unwrap_or(0.0);
+        let confidence = left_confidence.max(right_confidence);
+        if confidence < CANDIDATE_SOFT_BIAS_CONFIDENCE {
+            continue;
+        }
+        let current = current_boundaries[boundary_index];
+        let reverse = reverse_boundaries[boundary_index];
+        if current.abs_diff(reverse) > 140 {
+            continue;
+        }
+        boundaries[boundary_index] =
+            ((current as f32 * 0.72) + (reverse as f32 * 0.28)).round() as u64;
+    }
+    normalize_boundaries(&mut boundaries, duration_ms);
+    for (span, pair) in spans.iter_mut().zip(boundaries.windows(2)) {
+        span.start_ms = pair[0];
+        span.end_ms = pair[1].max(pair[0].saturating_add(1));
+    }
+}
+
+fn reverse_candidate_confidence(
+    unit: &AlignableUnit<'_>,
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    reverse_span: PhoneSpan,
+    final_span: PhoneSpan,
+) -> f32 {
+    let overlap = span_overlap_ratio(reverse_span, final_span);
+    let acoustic = average_unit_score(unit, frames, context, reverse_span);
+    (0.28 + 0.52 * overlap + 0.20 * acoustic).clamp(0.0, 1.0)
+}
+
+fn span_overlap_ratio(left: PhoneSpan, right: PhoneSpan) -> f32 {
+    let start = left.start_ms.max(right.start_ms);
+    let end = left.end_ms.min(right.end_ms);
+    if end <= start {
+        return 0.0;
+    }
+    let overlap = end.saturating_sub(start) as f32;
+    let union = left
+        .end_ms
+        .max(right.end_ms)
+        .saturating_sub(left.start_ms.min(right.start_ms))
+        .max(1) as f32;
+    (overlap / union).clamp(0.0, 1.0)
+}
+
+fn average_unit_score(
+    unit: &AlignableUnit<'_>,
+    frames: &[AcousticFrameFeatures],
+    context: &AlignmentAcousticContext,
+    span: PhoneSpan,
+) -> f32 {
+    let range = frame_range_for_span(frames, span);
+    if range.is_empty() {
+        return 0.0;
+    }
+    let average = frames[range.clone()]
+        .iter()
+        .map(|frame| unit_frame_score(unit, frame, context))
+        .sum::<f32>()
+        / range.len() as f32;
+    ((average + 1.0) / 4.0).clamp(0.0, 1.0)
+}
+
+fn frame_range_for_span(
+    frames: &[AcousticFrameFeatures],
+    span: PhoneSpan,
+) -> std::ops::Range<usize> {
+    if frames.is_empty() {
+        return 0..0;
+    }
+    let start = frames
+        .iter()
+        .position(|frame| frame.end_ms > span.start_ms)
+        .unwrap_or(frames.len());
+    let end = frames
+        .iter()
+        .position(|frame| frame.start_ms >= span.end_ms)
+        .unwrap_or(frames.len())
+        .max(start);
+    start..end
 }
 
 fn viterbi_unit_spans(
@@ -1619,6 +1943,59 @@ fn reconcile_bidirectional_spans(
         .collect()
 }
 
+fn refine_spans_with_nucleus_candidates(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+    spans: &mut [PhoneSpan],
+) {
+    if units.len() != spans.len() || frames.is_empty() {
+        return;
+    }
+    let nucleus_units = syllable_nucleus_unit_indices(output, units);
+    let target_frames = acoustic_nucleus_target_frames(frames, nucleus_units.len());
+    for (unit_index, frame_index) in nucleus_units.into_iter().zip(target_frames) {
+        if unit_index >= spans.len() {
+            continue;
+        }
+        let Some(frame) = frames.get(frame_index) else {
+            continue;
+        };
+        let confidence = nucleus_peak_confidence(frame);
+        if confidence < CANDIDATE_SOFT_BIAS_CONFIDENCE {
+            continue;
+        }
+        let target_ms = ((frame.start_ms.saturating_add(frame.end_ms)) / 2).min(duration_ms);
+        let span = spans[unit_index];
+        if target_ms >= span.start_ms && target_ms < span.end_ms {
+            continue;
+        }
+        if target_ms < span.start_ms {
+            let distance = span.start_ms.saturating_sub(target_ms);
+            if distance > 160 || unit_index == 0 {
+                continue;
+            }
+            let new_boundary = target_ms
+                .saturating_sub(ALIGN_HOP_MS / 2)
+                .max(spans[unit_index - 1].start_ms.saturating_add(1));
+            spans[unit_index - 1].end_ms = new_boundary;
+            spans[unit_index].start_ms = new_boundary;
+        } else {
+            let distance = target_ms.saturating_sub(span.end_ms);
+            if distance > 160 || unit_index + 1 >= spans.len() {
+                continue;
+            }
+            let new_boundary = target_ms
+                .saturating_add(ALIGN_HOP_MS / 2)
+                .min(spans[unit_index + 1].end_ms.saturating_sub(1));
+            spans[unit_index].end_ms = new_boundary;
+            spans[unit_index + 1].start_ms = new_boundary;
+        }
+    }
+    normalize_unit_span_sequence(spans, duration_ms);
+}
+
 fn refine_acoustic_alignment_spans(
     output: &PhonemicizeOutput,
     units: &[AlignableUnit<'_>],
@@ -1987,7 +2364,11 @@ fn nucleus_target_frames(frames: &[AcousticFrameFeatures], nucleus_count: usize)
 
 fn nucleus_candidate_score(frame: &AcousticFrameFeatures, frame_index: usize, ideal: usize) -> f32 {
     let distance = frame_index.abs_diff(ideal) as f32;
-    frame.vowel_nucleus_likelihood + 0.25 * frame.sonority - 0.015 * distance
+    0.42 * frame.vowel_nucleus_likelihood
+        + 0.24 * frame.energy_norm
+        + 0.20 * frame.sonority
+        + 0.14 * frame.voicing
+        - 0.015 * distance
 }
 
 fn nucleus_target_prefix(frame_count: usize, targets: &[usize]) -> Vec<usize> {

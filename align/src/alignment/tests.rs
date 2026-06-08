@@ -358,6 +358,245 @@ fn nucleus_targets_choose_vocalic_peaks_in_syllable_order() {
 }
 
 #[test]
+fn nucleus_candidate_overlays_emit_energy_peaks_in_syllable_order() {
+    let output = phonemicized("see do");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..50).map(test_frame).collect::<Vec<_>>();
+    for peak in [10usize, 35] {
+        frames[peak].energy_norm = 0.90;
+        frames[peak].voicing = 0.82;
+        frames[peak].sonority = 0.92;
+        frames[peak].vowel_nucleus_likelihood = 0.88;
+    }
+
+    let overlays = syllable_nucleus_candidate_overlays(&output, &units, &frames, 500);
+
+    assert_eq!(overlays.len(), 2);
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.source == "syllable_nucleus")
+    );
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.kind == "nucleus_candidate")
+    );
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.label.starts_with("nucleus:"))
+    );
+    assert!(overlays[0].start_ms <= 105 && overlays[0].end_ms >= 105);
+    assert!(overlays[1].start_ms <= 355 && overlays[1].end_ms >= 355);
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| (0.0..=1.0).contains(&overlay.confidence))
+    );
+}
+
+#[test]
+fn nucleus_soft_bias_moves_vowel_span_to_strong_peak() {
+    let output = phonemicized("see");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let nucleus_unit = syllable_nucleus_unit_indices(&output, &units)[0];
+    let mut frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    frames[6].energy_norm = 0.90;
+    frames[6].voicing = 0.82;
+    frames[6].sonority = 0.92;
+    frames[6].vowel_nucleus_likelihood = 0.88;
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 100,
+        },
+        PhoneSpan {
+            start_ms: 100,
+            end_ms: 180,
+        },
+    ];
+
+    refine_spans_with_nucleus_candidates(&output, &units, &frames, 200, &mut spans);
+
+    assert!(spans[nucleus_unit].start_ms <= 65);
+    assert!(spans[nucleus_unit].end_ms > 65);
+}
+
+#[test]
+fn low_confidence_nucleus_candidate_is_visible_but_does_not_bias_span() {
+    let output = phonemicized("see");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let mut frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    frames[6].energy_norm = 0.50;
+    frames[6].voicing = 0.30;
+    frames[6].sonority = 0.30;
+    frames[6].vowel_nucleus_likelihood = 0.30;
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 100,
+        },
+        PhoneSpan {
+            start_ms: 100,
+            end_ms: 180,
+        },
+    ];
+
+    let overlays = syllable_nucleus_candidate_overlays(&output, &units, &frames, 200);
+    refine_spans_with_nucleus_candidates(&output, &units, &frames, 200, &mut spans);
+
+    assert_eq!(overlays.len(), 1);
+    assert!(overlays[0].confidence < CANDIDATE_SOFT_BIAS_CONFIDENCE);
+    assert_eq!(spans[1].start_ms, 100);
+}
+
+#[test]
+fn reverse_snipper_candidates_include_metadata_and_bounded_confidence() {
+    let output = phonemicized("see");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    let spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 80,
+        },
+        PhoneSpan {
+            start_ms: 80,
+            end_ms: 180,
+        },
+    ];
+
+    let overlays = reverse_snipper_candidate_overlays(&units, &frames, &context, &spans, &spans);
+
+    assert_eq!(overlays.len(), units.len());
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.source == "reverse_snipper")
+    );
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.kind == "phone_candidate")
+    );
+    assert!(overlays.iter().all(|overlay| overlay.token_id.is_some()));
+    assert!(
+        overlays
+            .iter()
+            .all(|overlay| overlay.start_ms < overlay.end_ms
+                && (0.0..=1.0).contains(&overlay.confidence))
+    );
+}
+
+#[test]
+fn high_confidence_reverse_candidate_softly_moves_boundary() {
+    let output = phonemicized("see");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    let reverse = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 100,
+        },
+        PhoneSpan {
+            start_ms: 100,
+            end_ms: 180,
+        },
+    ];
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 80,
+        },
+        PhoneSpan {
+            start_ms: 80,
+            end_ms: 180,
+        },
+    ];
+
+    apply_reverse_candidate_soft_bias(&units, &frames, 200, &context, &reverse, &mut spans);
+
+    assert!(spans[0].end_ms > 80);
+    assert!(spans[0].end_ms < 100);
+    assert_eq!(spans[0].end_ms, spans[1].start_ms);
+}
+
+#[test]
+fn low_confidence_reverse_candidate_does_not_move_boundary() {
+    let output = phonemicized("see");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let frames = (0..20).map(test_frame).collect::<Vec<_>>();
+    let reverse = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 20,
+        },
+        PhoneSpan {
+            start_ms: 20,
+            end_ms: 180,
+        },
+    ];
+    let mut spans = vec![
+        PhoneSpan {
+            start_ms: 0,
+            end_ms: 80,
+        },
+        PhoneSpan {
+            start_ms: 80,
+            end_ms: 180,
+        },
+    ];
+
+    apply_reverse_candidate_soft_bias(&units, &frames, 200, &context, &reverse, &mut spans);
+
+    assert_eq!(spans[0].end_ms, 80);
+    assert_eq!(spans[1].start_ms, 80);
+}
+
+#[test]
+fn candidate_overlay_serializes_expected_wire_shape() {
+    let overlay = CandidateOverlaySegment {
+        index: 3,
+        source: "syllable_nucleus".into(),
+        kind: "nucleus_candidate".into(),
+        label: "nucleus:i".into(),
+        start_ms: 120,
+        end_ms: 156,
+        confidence: 0.75,
+        token_id: Some("ipa.phone.i".into()),
+    };
+
+    let value = serde_json::to_value(&overlay).expect("serialize overlay");
+
+    assert_eq!(value["source"], "syllable_nucleus");
+    assert_eq!(value["kind"], "nucleus_candidate");
+    assert_eq!(value["token_id"], "ipa.phone.i");
+    assert_eq!(value["confidence"], 0.75);
+}
+
+#[test]
 fn nucleus_anchor_rewards_spans_containing_target_frame() {
     let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
     frames[10].vowel_nucleus_likelihood = 0.95;

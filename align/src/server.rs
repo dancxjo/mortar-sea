@@ -24,8 +24,8 @@ use crate::{
 };
 use crate::{
     alignment::{
-        alignment_feature_tracks, alignment_tracks, forced_alignment_tracks,
-        projected_voicing_tracks,
+        alignment_candidate_overlays, alignment_feature_tracks, alignment_tracks,
+        forced_alignment_tracks, projected_voicing_tracks,
     },
     asr::transcribe_with_ear,
     audio::{
@@ -259,6 +259,7 @@ async fn align_audio(
         .unwrap_or_else(|| alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms));
     let feature_tracks = alignment_feature_tracks(&decoded);
     let projected_voicing = projected_voicing_tracks(&phonemicized.ir, &phones);
+    let candidate_overlays = alignment_candidate_overlays(&phonemicized.ir, &decoded, &phones);
 
     Ok(Json(AlignmentResponse {
         audio_url: request.audio_url,
@@ -272,6 +273,7 @@ async fn align_audio(
         phonemicization: phonemicized,
         feature_tracks,
         projected_voicing,
+        candidate_overlays,
         words,
         phonemes,
         phones,

@@ -117,6 +117,7 @@ struct AlignmentResponse {
     phonemicization: PhonemicizeResponse,
     feature_tracks: Vec<FeatureTrackSegment>,
     projected_voicing: Vec<FeatureTrackSegment>,
+    candidate_overlays: Vec<CandidateOverlaySegment>,
     words: Vec<WordAlignment>,
     phonemes: Vec<SegmentAlignment>,
     phones: Vec<SegmentAlignment>,
@@ -150,6 +151,19 @@ struct SegmentAlignment {
     token_id: String,
     start_ms: u64,
     end_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CandidateOverlaySegment {
+    index: usize,
+    source: String,
+    kind: String,
+    label: String,
+    start_ms: u64,
+    end_ms: u64,
+    confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
