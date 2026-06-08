@@ -278,18 +278,18 @@ fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
         "ipa.phone.ɪ" => "IH",
         "ipa.phone.iː" | "ipa.phone.i" => "IY",
         "ipa.phone.dʒ" => "JH",
-        "ipa.phone.k" => "K",
-        "ipa.phone.l" => "L",
+        "ipa.phone.k" | "ipa.phone.kʰ" | "ipa.phone.k˭" => "K",
+        "ipa.phone.l" | "ipa.phone.ɫ" => "L",
         "ipa.phone.m" => "M",
         "ipa.phone.n" => "N",
         "ipa.phone.ŋ" => "NG",
         "ipa.phone.oʊ" => "OW",
         "ipa.phone.ɔɪ" => "OY",
-        "ipa.phone.p" => "P",
+        "ipa.phone.p" | "ipa.phone.pʰ" | "ipa.phone.p˭" => "P",
         "ipa.phone.ɹ" => "R",
         "ipa.phone.s" => "S",
         "ipa.phone.ʃ" => "SH",
-        "ipa.phone.t" | "ipa.phone.ɾ" => "T",
+        "ipa.phone.t" | "ipa.phone.tʰ" | "ipa.phone.t˭" | "ipa.phone.ɾ" => "T",
         "ipa.phone.θ" => "TH",
         "ipa.phone.ʊ" => "UH",
         "ipa.phone.uː" | "ipa.phone.u" => "UW",
@@ -1290,6 +1290,47 @@ mod tests {
 
     fn config_from_json(json: &str) -> PiperVoiceConfig {
         PiperVoiceConfig::from_json_str(json).expect("config")
+    }
+
+    #[test]
+    fn piper_sequence_lowers_dark_l_to_regular_piper_l() {
+        assert_eq!(piper_symbol_for_phone_id("ipa.phone.ɫ"), "L");
+
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "world traveled".into(),
+                variety: VarietyId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variety: phonemicized.variety,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: phonemicized.boundaries,
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+
+        let sequence = piper_sequence_from_plan(&plan);
+
+        assert_eq!(
+            sequence.symbols,
+            vec![
+                "W", "ER", "L", "D", " ", "T", "R", "AE", "V", "ə", "L", "D", "."
+            ]
+        );
+        assert!(
+            !sequence.symbols.iter().any(|symbol| symbol == "ɫ"),
+            "Piper should receive regular L, not raw dark-L IPA"
+        );
     }
 
     #[test]

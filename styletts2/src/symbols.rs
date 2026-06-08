@@ -465,7 +465,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
-    let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ", "ɾ", "ɫ"];
+    let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ", "ɾ"];
     let stress_symbols = ["ˈ", "ˌ"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
@@ -550,7 +550,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.kʰ", "K"),
         ("ipa.phone.k˭", "K"),
         ("ipa.phone.l", "L"),
-        ("ipa.phone.ɫ", "ɫ"),
+        ("ipa.phone.ɫ", "L"),
         ("ipa.phone.m", "M"),
         ("ipa.phone.n", "N"),
         ("ipa.phone.ŋ", "NG"),
