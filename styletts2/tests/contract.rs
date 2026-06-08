@@ -337,6 +337,22 @@ fn en_us_phone_lowering_preserves_schwa_and_strut_distinction() {
 }
 
 #[test]
+fn en_us_phone_lowering_preserves_dark_l() {
+    let lowered = styletts2_en_us_symbol_set()
+        .lower_phone_tokens(&[phone_token("ipa.phone.ɫ")])
+        .expect("dark l should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+    let text = styletts2_text_for_symbols(&lowered.tokens).expect("StyleTTS2 text");
+
+    assert_eq!(symbols, ["ɫ"]);
+    assert_eq!(text, "ɫ");
+}
+
+#[test]
 fn en_us_phone_lowering_keeps_acronym_letter_boundaries() {
     let lowered = styletts2_en_us_symbol_set()
         .lower_phone_tokens(&[
@@ -394,17 +410,18 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
     for (input, expected) in [
         ("I R", "ˈaɪj ˈɑːɹ"),
+        ("world", "wˈɜːɹɫd"),
         (
             "I’ll inspect the current English rule.",
-            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl .",
+            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːɫ .",
         ),
-        ("StyleTTS2", "stˈaɪl tˈiː tˈiːj ˈɛs tˈuː"),
+        ("StyleTTS2", "stˈaɪɫ tˈiː tˈiːj ˈɛs tˈuː"),
         ("current", "kˈɜːɹənt"),
         ("derived", "dᵻɹˈaɪvd"),
         ("surface", "sˈɜːɹfəs"),
         (
             "That points to a real phonological rule.",
-            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːl fˌoʊnəlˈɑːdʒɪkəl ɹˈuːl .",
+            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːɫ fˌoʊnəlˈɑːdʒɪkəɫ ɹˈuːɫ .",
         ),
     ] {
         let actual = styletts2_text_from_english(input);
