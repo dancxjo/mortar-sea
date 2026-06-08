@@ -1153,7 +1153,28 @@ fn phone_onset_boundary_score(
                 + 0.25 * right_transition
                 + 0.28 * (right_transition - left_transition).max(0.0)
         }
-        PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => {
+        PhoneClass::Nasal => {
+            let left_nasal = left.map(nasal_frame_evidence).unwrap_or(0.0);
+            let right_nasal = nasal_frame_evidence(right);
+            let nasal_rise = (right_nasal - left_nasal).max(0.0);
+            0.45 * activity_rise
+                + 0.25 * energy_rise
+                + 0.20 * right.sonority
+                + 0.20 * flux
+                + 0.95 * nasal_rise
+                + 0.35 * right_nasal
+        }
+        PhoneClass::Liquid if is_rhotic_phone(phone) => {
+            let left_rhotic = left.map(rhotic_formant_evidence).unwrap_or(0.0);
+            let right_rhotic = rhotic_formant_evidence(right);
+            0.45 * activity_rise
+                + 0.25 * energy_rise
+                + 0.20 * right.sonority
+                + 0.20 * flux
+                + 0.55 * (right_rhotic - left_rhotic).max(0.0)
+                + 0.30 * right_rhotic
+        }
+        PhoneClass::Liquid | PhoneClass::Glide => {
             0.55 * activity_rise + 0.30 * energy_rise + 0.25 * right.sonority + 0.20 * flux
         }
         PhoneClass::Other => 0.35 * activity_rise + 0.25 * flux,

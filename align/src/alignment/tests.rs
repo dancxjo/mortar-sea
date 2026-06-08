@@ -1194,6 +1194,126 @@ fn profile_range_score_prefers_matching_vowel_formants() {
     );
 }
 
+#[test]
+fn nasal_scoring_prefers_murmur_over_clean_oral_vowel() {
+    let output = phonemicized("am");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let nasal = output
+        .phones
+        .iter()
+        .find(|phone| phone_class(phone) == PhoneClass::Nasal)
+        .expect("nasal phone");
+    let mut murmur = test_frame(0);
+    murmur.energy_norm = 0.42;
+    murmur.voicing = 0.78;
+    murmur.low_ratio = 0.76;
+    murmur.low_band_peak_hz = 285.0;
+    murmur.spectral_centroid_hz = 900.0;
+    murmur.high_ratio = 0.12;
+    murmur.zero_crossing_rate = 0.07;
+    murmur.sonority = 0.58;
+    murmur.vowel_nucleus_likelihood = 0.20;
+    let mut oral_vowel = murmur;
+    oral_vowel.energy_norm = 0.78;
+    oral_vowel.low_ratio = 0.38;
+    oral_vowel.low_band_peak_hz = 520.0;
+    oral_vowel.spectral_centroid_hz = 1800.0;
+    oral_vowel.high_ratio = 0.16;
+    oral_vowel.sonority = 0.80;
+    oral_vowel.vowel_nucleus_likelihood = 0.92;
+
+    assert!(nasal_frame_evidence(&murmur) > 0.70);
+    assert!(
+        phone_frame_score(nasal, &murmur, &context)
+            > phone_frame_score(nasal, &oral_vowel, &context) + 0.8
+    );
+}
+
+#[test]
+fn nasal_onset_score_anchors_to_murmur_rise() {
+    let output = phonemicized("are made");
+    let nasal = output
+        .phones
+        .iter()
+        .find(|phone| phone_class(phone) == PhoneClass::Nasal)
+        .expect("nasal phone");
+    let mut frames = (0..24).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_norm = 0.58;
+        frame.voicing = 0.78;
+        frame.sonority = 0.68;
+        frame.high_ratio = 0.14;
+        frame.zero_crossing_rate = 0.07;
+        frame.low_ratio = 0.42;
+        frame.low_band_peak_hz = 520.0;
+        frame.spectral_centroid_hz = 1700.0;
+        frame.vowel_nucleus_likelihood = 0.70;
+        frame.spectral_flux = 0.04;
+    }
+    frames[10].low_ratio = 0.76;
+    frames[10].low_band_peak_hz = 285.0;
+    frames[10].spectral_centroid_hz = 900.0;
+    frames[10].vowel_nucleus_likelihood = 0.20;
+    frames[10].sonority = 0.58;
+
+    let nasal_boundary = phone_onset_boundary_score(nasal, &frames, 10);
+    let oral_boundary = phone_onset_boundary_score(nasal, &frames, 9);
+
+    assert!(nasal_boundary > oral_boundary + 0.9);
+}
+
+#[test]
+fn rhotic_bool_uses_low_f3_as_alignment_evidence() {
+    let output = phonemicized("are");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let rhotic = output
+        .phones
+        .iter()
+        .find(|phone| is_rhotic_phone(phone))
+        .expect("rhotic phone");
+    let mut low_f3 = test_frame(0);
+    low_f3.energy_norm = 0.56;
+    low_f3.voicing = 0.80;
+    low_f3.sonority = 0.72;
+    low_f3.high_ratio = 0.13;
+    low_f3.zero_crossing_rate = 0.07;
+    low_f3.f2_hz = 1450.0;
+    low_f3.f3_hz = 1700.0;
+    let mut high_f3 = low_f3;
+    high_f3.f3_hz = 3100.0;
+
+    assert!(rhotic_formant_evidence(&low_f3) > 0.70);
+    assert!(
+        phone_frame_score(rhotic, &low_f3, &context)
+            > phone_frame_score(rhotic, &high_f3, &context) + 0.8
+    );
+}
+
+#[test]
+fn formant_transition_targets_score_segment_deltas() {
+    let output = phonemicized("are");
+    let context = AlignmentAcousticContext::for_output(&output);
+    let rhotic = output
+        .phones
+        .iter()
+        .find(|phone| is_rhotic_phone(phone))
+        .expect("rhotic phone");
+    let model = context.phone_token_model(rhotic).expect("rhotic model");
+    let mut falling = (0..6).map(test_frame).collect::<Vec<_>>();
+    let mut rising = falling.clone();
+    for (index, frame) in falling.iter_mut().enumerate() {
+        frame.f2_hz = 1450.0;
+        frame.f3_hz = 2800.0 - index as f32 * 220.0;
+    }
+    for (index, frame) in rising.iter_mut().enumerate() {
+        frame.f2_hz = 1450.0;
+        frame.f3_hz = 1700.0 + index as f32 * 220.0;
+    }
+
+    assert_eq!(segment_formant_transition_delta(3, &falling), Some(-1100.0));
+    assert!(duration_range_score(model, &falling) > duration_range_score(model, &rising) + 0.8);
+}
+
 fn known_phone_id(token: &PhoneToken) -> Option<&str> {
     match &token.phone {
         Spec::Known(id) => Some(id.as_str()),

@@ -46,7 +46,7 @@ pub(super) fn phone_frame_score(
             0.55 * stop_score(voicing, frame) + 0.55 * fricative_score(voicing, frame)
         }
         PhoneClass::Nasal => nasal_score(frame),
-        PhoneClass::Liquid => liquid_score(frame),
+        PhoneClass::Liquid => liquid_score(phone, frame),
         PhoneClass::Glide => glide_score(frame),
         PhoneClass::Other => neutral_score(frame),
     };
@@ -177,19 +177,28 @@ pub(super) fn fricative_score(voicing: Option<&str>, frame: &AcousticFrameFeatur
 }
 
 pub(super) fn nasal_score(frame: &AcousticFrameFeatures) -> f32 {
-    0.95 * closeness(frame.voicing, 0.75, 0.30)
-        + 0.75 * closeness(frame.low_ratio, 0.72, 0.25)
-        + 0.45 * closeness(frame.spectral_centroid_hz, 900.0, 900.0)
-        + 0.25 * closeness(frame.energy_norm, 0.38, 0.35)
+    let nasal = nasal_frame_evidence(frame);
+    let oral_vowel_competition = frame.vowel_nucleus_likelihood
+        * positive_closeness(frame.energy_norm, 0.70, 0.35)
+        * (1.0 - nasal).clamp(0.0, 1.0);
+    0.75 * closeness(frame.voicing, 0.75, 0.30)
+        + 0.45 * closeness(frame.low_ratio, 0.72, 0.25)
+        + 0.30 * closeness(frame.energy_norm, 0.38, 0.35)
         + 0.35 * frame.sonority
+        + 1.25 * nasal
+        - 0.70 * oral_vowel_competition
 }
 
-pub(super) fn liquid_score(frame: &AcousticFrameFeatures) -> f32 {
-    0.95 * closeness(frame.voicing, 0.76, 0.30)
+pub(super) fn liquid_score(phone: &PhoneToken, frame: &AcousticFrameFeatures) -> f32 {
+    let mut score = 0.95 * closeness(frame.voicing, 0.76, 0.30)
         + 0.45 * closeness(frame.energy_norm, 0.50, 0.40)
         + 0.45 * closeness(frame.zero_crossing_rate, 0.08, 0.10)
         + 0.35 * closeness(frame.spectral_centroid_hz, 1500.0, 1300.0)
-        + 0.35 * frame.sonority
+        + 0.35 * frame.sonority;
+    if is_rhotic_phone(phone) {
+        score += 1.10 * rhotic_formant_evidence(frame);
+    }
+    score
 }
 
 pub(super) fn glide_score(frame: &AcousticFrameFeatures) -> f32 {
@@ -229,13 +238,45 @@ pub(super) fn formant_region_score(phone: &PhoneToken, frame: &AcousticFrameFeat
     ) {
         score += 0.35 * closeness(frame.f2_hz, 900.0, 700.0);
     }
-    if matches!(
-        phone_feature_category(phone, "phonology.rhoticity"),
-        Some("rhotic")
-    ) {
-        score += 0.45 * closeness(frame.f3_hz, 1700.0, 550.0);
+    if is_rhotic_phone(phone) {
+        score += 1.05 * closeness(frame.f3_hz, 1700.0, 550.0);
     }
     score
+}
+
+pub(super) fn nasal_frame_evidence(frame: &AcousticFrameFeatures) -> f32 {
+    if silence_frame_score(frame) > 0.70 || breath_noise_score(frame) > 0.65 {
+        return 0.0;
+    }
+    let murmur = nasal_murmur_evidence(frame);
+    let antiresonance = nasal_antiresonance_evidence(frame);
+    let low_noise = positive_closeness(frame.zero_crossing_rate, 0.07, 0.10);
+    let periodic = positive_closeness(frame.voicing, 0.76, 0.30);
+    (0.36 * murmur + 0.27 * antiresonance + 0.22 * periodic + 0.15 * low_noise).clamp(0.0, 1.0)
+}
+
+pub(super) fn nasal_murmur_evidence(frame: &AcousticFrameFeatures) -> f32 {
+    let murmur_band = positive_closeness(frame.low_band_peak_hz, 285.0, 190.0);
+    let low_dominance = positive_closeness(frame.low_ratio, 0.72, 0.28);
+    let compact_centroid = positive_closeness(frame.spectral_centroid_hz, 900.0, 900.0);
+    (0.45 * murmur_band + 0.35 * low_dominance + 0.20 * compact_centroid).clamp(0.0, 1.0)
+}
+
+pub(super) fn nasal_antiresonance_evidence(frame: &AcousticFrameFeatures) -> f32 {
+    let compact_centroid = positive_closeness(frame.spectral_centroid_hz, 900.0, 1000.0);
+    let low_dominance = positive_closeness(frame.low_ratio, 0.72, 0.30);
+    let subdued_high = positive_closeness(frame.high_ratio, 0.16, 0.26);
+    (0.38 * compact_centroid + 0.34 * low_dominance + 0.28 * subdued_high).clamp(0.0, 1.0)
+}
+
+pub(super) fn rhotic_formant_evidence(frame: &AcousticFrameFeatures) -> f32 {
+    if silence_frame_score(frame) > 0.70 || breath_noise_score(frame) > 0.65 {
+        return 0.0;
+    }
+    let low_f3 = positive_closeness(frame.f3_hz, 1700.0, 650.0);
+    let f2_f3_proximity = positive_closeness(frame.f3_hz - frame.f2_hz, 350.0, 450.0);
+    let sonorant = positive_closeness(frame.voicing, 0.76, 0.32).max(frame.sonority);
+    (0.50 * low_f3 + 0.30 * f2_f3_proximity + 0.20 * sonorant).clamp(0.0, 1.0)
 }
 
 pub(super) fn acoustic_model_frame_score(
@@ -285,7 +326,7 @@ pub(super) fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f3
     match cue_id {
         "acoustic.cue.f1_region" => formant_plausibility(frame.f1_hz, 180.0, 1050.0),
         "acoustic.cue.f2_region" => formant_plausibility(frame.f2_hz, 700.0, 3400.0),
-        "acoustic.cue.f3_region" => formant_plausibility(frame.f3_hz, 1200.0, 4200.0),
+        "acoustic.cue.f3_region" => rhotic_formant_evidence(frame),
         "acoustic.cue.vowel_nucleus" => frame.vowel_nucleus_likelihood,
         "acoustic.cue.sonority_peak" => frame.sonority,
         "acoustic.cue.periodic_voicing" => positive_closeness(frame.voicing, 0.78, 0.35),
@@ -320,14 +361,8 @@ pub(super) fn cue_frame_match(cue_id: &str, frame: &AcousticFrameFeatures) -> f3
         "acoustic.cue.affricate_release" => {
             0.5 * frame.spectral_flux + 0.5 * positive_closeness(frame.high_ratio, 0.65, 0.35)
         }
-        "acoustic.cue.nasal_murmur" => {
-            0.55 * positive_closeness(frame.low_band_peak_hz, 260.0, 190.0)
-                + 0.45 * positive_closeness(frame.voicing, 0.76, 0.30)
-        }
-        "acoustic.cue.nasal_antiresonance" => {
-            0.5 * positive_closeness(frame.low_ratio, 0.72, 0.28)
-                + 0.5 * positive_closeness(frame.spectral_centroid_hz, 900.0, 900.0)
-        }
+        "acoustic.cue.nasal_murmur" => nasal_murmur_evidence(frame),
+        "acoustic.cue.nasal_antiresonance" => nasal_antiresonance_evidence(frame),
         "acoustic.cue.nasal_place" | "acoustic.cue.nasal_place_transition" => {
             positive_closeness(frame.f2_hz, 1500.0, 900.0)
         }
@@ -371,9 +406,7 @@ pub(super) fn frame_measurement_value(
         AcousticMeasurement::NasalMurmurBand => Some(frame.low_band_peak_hz),
         AcousticMeasurement::NasalAntiresonance => Some(frame.spectral_centroid_hz),
         AcousticMeasurement::NasalPlaceTransition => Some(frame.f2_hz),
-        AcousticMeasurement::FormantTransition { index: 1 } => Some(frame.f1_hz),
-        AcousticMeasurement::FormantTransition { index: 2 } => Some(frame.f2_hz),
-        AcousticMeasurement::FormantTransition { index: 3 } => Some(frame.f3_hz),
+        AcousticMeasurement::FormantTransition { .. } => None,
         _ => None,
     }
 }
@@ -459,7 +492,19 @@ pub(super) fn phone_segment_feature_score(
                 - 1.0 * average_silence
         }
         PhoneClass::Nasal | PhoneClass::Liquid | PhoneClass::Glide => {
+            let identity_evidence = match class {
+                PhoneClass::Nasal => frames
+                    .iter()
+                    .map(nasal_frame_evidence)
+                    .fold(0.0_f32, f32::max),
+                PhoneClass::Liquid if is_rhotic_phone(phone) => frames
+                    .iter()
+                    .map(rhotic_formant_evidence)
+                    .fold(0.0_f32, f32::max),
+                _ => 0.0,
+            };
             0.8 * positive_closeness(voiced_evidence, 0.60, 0.35)
+                + 1.0 * positive_closeness(identity_evidence, 0.55, 0.40)
                 - 1.6 * mismatch_ratio
                 - 1.1 * average_breath
                 - 0.8 * average_silence
@@ -598,6 +643,29 @@ pub(super) fn segment_measurement_value(
             Some(affricate_transition_estimate_ms(frames))
         }
         AcousticMeasurement::SilenceDuration => Some(duration),
+        AcousticMeasurement::FormantTransition { index } => {
+            segment_formant_transition_delta(*index, frames)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn segment_formant_transition_delta(
+    index: u8,
+    frames: &[AcousticFrameFeatures],
+) -> Option<f32> {
+    let first = frames.first()?;
+    let last = frames.last()?;
+    let start = frame_formant(index, first)?;
+    let end = frame_formant(index, last)?;
+    Some(end - start)
+}
+
+fn frame_formant(index: u8, frame: &AcousticFrameFeatures) -> Option<f32> {
+    match index {
+        1 => Some(frame.f1_hz),
+        2 => Some(frame.f2_hz),
+        3 => Some(frame.f3_hz),
         _ => None,
     }
 }
@@ -966,4 +1034,12 @@ pub(super) fn phone_feature_bool(phone: &PhoneToken, feature_id: &str) -> Option
         Spec::Known(FeatureValue::Bool(value)) => Some(*value),
         _ => None,
     }
+}
+
+pub(super) fn is_rhotic_phone(phone: &PhoneToken) -> bool {
+    phone_feature_bool(phone, "phonology.rhoticity").unwrap_or(false)
+        || matches!(
+            phone_feature_category(phone, "phonology.rhoticity"),
+            Some("rhotic")
+        )
 }
