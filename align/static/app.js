@@ -874,9 +874,7 @@ function drawTrack(canvas, segments, options) {
 
 function featureTrackColor(segment) {
   if (segment.kind === 'silence') return '#2c3337';
-  if (segment.kind === 'breath') return '#9fb3bd';
   if (segment.kind === 'voiced') return '#5bc6ff';
-  if (segment.kind === 'voiceless') return '#c3a4ff';
   if (segment.kind === 'unvoiced') return '#c3a4ff';
   return '#66727a';
 }

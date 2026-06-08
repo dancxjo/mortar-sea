@@ -462,7 +462,7 @@ fn active_range_ignores_low_level_leading_noise() {
 }
 
 #[test]
-fn feature_track_segments_mark_silence_voiced_and_voiceless_regions() {
+fn feature_track_segments_mark_silence_voiced_and_unvoiced_regions() {
     let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
     for frame in frames.iter_mut().take(10) {
         frame.energy_db = -80.0;
@@ -490,12 +490,12 @@ fn feature_track_segments_mark_silence_voiced_and_voiceless_regions() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["silence", "voiced", "voiceless"]
+        vec!["silence", "voiced", "unvoiced"]
     );
 }
 
 #[test]
-fn feature_track_segments_smooth_tiny_voiceless_islands_inside_voicing() {
+fn feature_track_segments_smooth_tiny_unvoiced_islands_inside_voicing() {
     let mut frames = (0..28).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {
         frame.energy_db = -22.0;
@@ -580,12 +580,12 @@ fn feature_track_segments_classify_weak_vowel_shadow_by_voicing() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["voiceless"]
+        vec!["unvoiced"]
     );
 }
 
 #[test]
-fn feature_track_segments_mark_breath_distinct_from_voiceless_speech() {
+fn feature_track_segments_mark_breath_like_region_as_unvoiced() {
     let mut frames = (0..18).map(test_frame).collect::<Vec<_>>();
     for frame in frames.iter_mut().take(9) {
         frame.energy_db = -36.0;
@@ -615,7 +615,7 @@ fn feature_track_segments_mark_breath_distinct_from_voiceless_speech() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["breath", "voiceless"]
+        vec!["unvoiced"]
     );
 }
 
@@ -642,6 +642,37 @@ fn feature_track_segments_keep_near_silent_false_voicing_silent() {
     assert_eq!(segments[0].start_ms, 0);
     assert_eq!(segments[0].end_ms, 5 * ALIGN_HOP_MS);
     assert_eq!(segments[1].kind, "voiced");
+}
+
+#[test]
+fn feature_track_segments_emit_only_voicing_or_silence_labels() {
+    let mut frames = (0..18).map(test_frame).collect::<Vec<_>>();
+    for frame in frames.iter_mut().take(6) {
+        frame.energy_db = -80.0;
+        frame.energy_norm = 0.0;
+        frame.voicing = 0.0;
+        frame.sonority = 0.0;
+    }
+    for frame in frames.iter_mut().skip(6).take(6) {
+        frame.energy_norm = 0.72;
+        frame.voicing = 0.76;
+        frame.sonority = 0.70;
+    }
+    for frame in frames.iter_mut().skip(12) {
+        frame.energy_norm = 0.70;
+        frame.voicing = 0.04;
+        frame.sonority = 0.08;
+        frame.vowel_nucleus_likelihood = 0.70;
+    }
+
+    let segments = feature_track_segments(&frames);
+
+    assert!(
+        segments
+            .iter()
+            .all(|segment| matches!(segment.kind.as_str(), "silence" | "voiced" | "unvoiced"))
+    );
+    assert!(!segments.iter().any(|segment| segment.kind == "vowel"));
 }
 
 #[test]

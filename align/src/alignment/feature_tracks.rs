@@ -78,9 +78,6 @@ fn close_short_feature_islands(
         if kind == "silence" && average_silence_score(&frames[start..end]) > 0.50 {
             continue;
         }
-        if kind == "breath" && average_breath_score(&frames[start..end]) > 0.50 {
-            continue;
-        }
         kinds[start..end].fill(left);
     }
 }
@@ -91,7 +88,7 @@ fn close_short_voicing_gaps(
     max_frames: usize,
 ) {
     for (start, end, kind) in feature_kind_runs(kinds) {
-        if kind != "voiceless" || start == 0 || end >= kinds.len() {
+        if kind != "unvoiced" || start == 0 || end >= kinds.len() {
             continue;
         }
         if end.saturating_sub(start) > max_frames {
@@ -101,7 +98,7 @@ fn close_short_voicing_gaps(
             continue;
         }
         let gap = &frames[start..end];
-        if average_breath_score(gap) > 0.46 || average_silence_score(gap) > 0.38 {
+        if average_silence_score(gap) > 0.38 {
             continue;
         }
         kinds[start..end].fill("voiced");
@@ -115,7 +112,7 @@ fn merge_adjacent_short_feature_islands(kinds: &mut [&'static str], max_frames: 
         }
         let left = kinds[start - 1];
         let right = kinds[end];
-        if left == right || kind == "silence" || kind == "breath" {
+        if left == right || kind == "silence" {
             continue;
         }
         if left == "voiced" || right == "voiced" {
@@ -143,13 +140,6 @@ fn feature_kind_runs(kinds: &[&'static str]) -> Vec<(usize, usize, &'static str)
     runs
 }
 
-fn average_breath_score(frames: &[AcousticFrameFeatures]) -> f32 {
-    if frames.is_empty() {
-        return 0.0;
-    }
-    frames.iter().map(breath_noise_score).sum::<f32>() / frames.len() as f32
-}
-
 fn average_silence_score(frames: &[AcousticFrameFeatures]) -> f32 {
     if frames.is_empty() {
         return 0.0;
@@ -162,10 +152,8 @@ fn frame_feature_kind(frame: &AcousticFrameFeatures, activity_threshold: f32) ->
         "silence"
     } else if frame.voicing > 0.42 && frame.sonority > 0.16 {
         "voiced"
-    } else if breath_noise_score(frame) > 0.58 {
-        "breath"
     } else {
-        "voiceless"
+        "unvoiced"
     }
 }
 
@@ -178,14 +166,7 @@ fn feature_track_segment(
     FeatureTrackSegment {
         index,
         kind: kind.to_string(),
-        label: match kind {
-            "silence" => "silence",
-            "breath" => "breath",
-            "voiced" => "voiced",
-            "voiceless" => "voiceless",
-            _ => kind,
-        }
-        .to_string(),
+        label: kind.to_string(),
         start_ms,
         end_ms,
     }
