@@ -288,7 +288,7 @@ async function phonemicize() {
 
 async function synthesize() {
   const synthesisInputVersion = state.inputVersion;
-  await runJsonAction('/api/synthesize', {
+  const synthesized = await runJsonAction('/api/synthesize', {
     text: elements.text.value,
     variety: elements.variety.value || 'en-US',
     backend: elements.backend.value,
@@ -302,10 +302,12 @@ async function synthesize() {
       return;
     }
     setStatus(`Synthesized with ${elements.backend.value}`);
-    await alignAudio();
   }, {
     progressControl: elements.synthesize,
   });
+  if (synthesized && synthesisInputVersion === state.inputVersion) {
+    await alignAudio();
+  }
 }
 
 async function loadStyleTts2Voices(options = {}) {
