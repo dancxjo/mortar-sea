@@ -125,6 +125,7 @@ struct AlignmentResponse {
     phonemicization: PhonemicizeResponse,
     vad_tracks: Vec<FeatureTrackSegment>,
     feature_tracks: Vec<FeatureTrackSegment>,
+    feature_lanes: Vec<FeatureLane>,
     projected_voicing: Vec<FeatureTrackSegment>,
     candidate_overlays: Vec<CandidateOverlaySegment>,
     words: Vec<WordAlignment>,
@@ -139,6 +140,23 @@ struct FeatureTrackSegment {
     label: String,
     start_ms: u64,
     end_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FeatureLane {
+    id: String,
+    label: String,
+    unit: String,
+    source: String,
+    points: Vec<FeatureLanePoint>,
+}
+
+#[derive(Debug, Serialize)]
+struct FeatureLanePoint {
+    start_ms: u64,
+    end_ms: u64,
+    value: f32,
+    confidence: f32,
 }
 
 #[derive(Debug, Serialize)]

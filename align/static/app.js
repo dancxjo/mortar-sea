@@ -16,6 +16,7 @@ const state = {
   recording: false,
   recordingTarget: '',
   irVisible: false,
+  dawFocus: false,
   currentAudioUrl: '',
   currentPhonemicization: null,
   currentAlignment: null,
@@ -55,6 +56,8 @@ const ICON_FALLBACKS = {
   'chevron-right': '\u25b8',
   circle: '\u25cf',
   maximize: '\u26f6',
+  'panel-top-close': '^',
+  'panel-top-open': 'v',
   pause: '\u23f8',
   play: '\u25b6',
   square: '\u25a0',
@@ -76,6 +79,13 @@ const TIMELINE_CANVAS_HEIGHTS = {
   'phoneme-track': 66,
   'phone-track': 54,
 };
+const FEATURE_TRACK_MAX_HEIGHT = 92;
+const FEATURE_LANE_TOP = 22;
+const FEATURE_LANE_BOTTOM = 4;
+const FEATURE_LANE_MAX_HEIGHT = 6;
+const FEATURE_LANE_MIN_HEIGHT = 3;
+const FEATURE_LANE_WIDE_GAP = 4;
+const FEATURE_LANE_DENSE_GAP = 2;
 
 window.addEventListener('DOMContentLoaded', () => {
   for (const id of [
@@ -114,6 +124,7 @@ window.addEventListener('DOMContentLoaded', () => {
     'zoom-in',
     'zoom-out',
     'fit',
+    'daw-focus-toggle',
     'timeline',
     'timeline-content',
   ]) {
@@ -173,6 +184,7 @@ window.addEventListener('DOMContentLoaded', () => {
   elements['zoom-in'].addEventListener('click', () => zoomAtCenter(1.45));
   elements['zoom-out'].addEventListener('click', () => zoomAtCenter(1 / 1.45));
   elements.fit.addEventListener('click', fitTimeline);
+  elements['daw-focus-toggle'].addEventListener('click', toggleDawFocus);
   elements['audio-play-toggle'].addEventListener('click', toggleAudioPlayback);
   elements['audio-progress'].addEventListener('pointerdown', onAudioProgressPointerDown);
   elements['audio-progress'].addEventListener('pointermove', onAudioProgressPointerMove);
@@ -215,6 +227,7 @@ window.addEventListener('DOMContentLoaded', () => {
   updateAudioTransport();
   updateRecordingControls();
   updateActionButtons();
+  updateDawFocusToggle();
   renderLucideIcons();
   drawAll();
 });
@@ -696,7 +709,7 @@ function renderAlignment(payload) {
   state.playRangeEnd = null;
   elements.asr.value =
     payload.asr_transcript || (payload.asr_segments || []).map((segment) => segment.text).join(' ');
-  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.vad_tracks || []).length} vad, ${(payload.feature_tracks || []).length} features, ${(payload.projected_voicing || []).length} projected, ${(payload.candidate_overlays || []).length} candidates`;
+  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.vad_tracks || []).length} vad, ${(payload.feature_tracks || []).length} features, ${(payload.feature_lanes || []).length} lanes, ${(payload.projected_voicing || []).length} projected, ${(payload.candidate_overlays || []).length} candidates`;
   drawAll();
 }
 
@@ -971,14 +984,7 @@ function drawAll(options = {}) {
     y: 5,
     height: 14,
   });
-  drawTrack(canvases['feature-track'], state.currentAlignment?.feature_tracks || [], {
-    kind: 'feature',
-    color: featureTrackColor,
-    text: '#f3f6f1',
-    empty: 'voicing',
-    label: voicingTrackLabel,
-    centeredLabel: true,
-  });
+  drawFeatureTrack(canvases['feature-track'], state.currentAlignment?.feature_tracks || [], state.currentAlignment?.feature_lanes || []);
   drawTrack(canvases['projected-voicing-track'], state.currentAlignment?.projected_voicing || [], {
     kind: 'projected_voicing',
     color: projectedVoicingColor,
@@ -1024,6 +1030,8 @@ function setupCanvases() {
     canvas.style.width = `${cssWidth}px`;
     const cssHeight = canvasCssHeight(canvas);
     canvas.style.height = `${cssHeight}px`;
+    canvas.style.minHeight = `${cssHeight}px`;
+    canvas.style.maxHeight = `${cssHeight}px`;
     const width = Math.max(1, Math.floor(cssWidth * pixelRatio));
     const height = Math.max(1, Math.floor(cssHeight * pixelRatio));
     if (canvas.width !== width || canvas.height !== height) {
@@ -1036,6 +1044,9 @@ function setupCanvases() {
 }
 
 function canvasCssHeight(canvas) {
+  if (canvas.id === 'feature-track') {
+    return featureTrackCssHeight();
+  }
   if (TIMELINE_CANVAS_HEIGHTS[canvas.id]) {
     return TIMELINE_CANVAS_HEIGHTS[canvas.id];
   }
@@ -1044,6 +1055,15 @@ function canvasCssHeight(canvas) {
     canvas.dataset.cssHeight = String(cssHeight);
   }
   return Number(canvas.dataset.cssHeight) || 40;
+}
+
+function featureTrackCssHeight() {
+  const laneCount = state.currentAlignment?.feature_lanes?.length || 0;
+  if (!laneCount) return TIMELINE_CANVAS_HEIGHTS['feature-track'];
+  return Math.min(
+    FEATURE_TRACK_MAX_HEIGHT,
+    Math.max(TIMELINE_CANVAS_HEIGHTS['feature-track'], 24 + laneCount * 10),
+  );
 }
 
 function syncTimelineContent({ syncScrollPosition = true } = {}) {
@@ -1294,6 +1314,145 @@ function spectrogramColor(value) {
   ];
 }
 
+function drawFeatureTrack(canvas, segments, lanes) {
+  const ctx = clearCanvas(canvas);
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const hasSegments = Boolean(segments.length);
+  const hasLanes = Boolean(lanes.length);
+
+  if (!hasSegments && !hasLanes) {
+    ctx.fillStyle = '#66727a';
+    ctx.font = '13px Inter, sans-serif';
+    ctx.fillText('voicing', 14, Math.floor(height / 2) + 4);
+    return;
+  }
+
+  if (hasSegments) {
+    drawFeatureStateStrip(ctx, width, segments);
+  }
+
+  if (hasLanes) {
+    drawFeatureLanes(ctx, width, height, lanes);
+  }
+
+  drawLaneCaption(ctx, width, 'Features');
+}
+
+function drawFeatureStateStrip(ctx, width, segments) {
+  const y = 5;
+  const h = 12;
+  for (const segment of segments) {
+    const selected = isSelectedSegment('feature', segment);
+    const x = timeToX(segment.start_ms / 1000);
+    const right = timeToX(segment.end_ms / 1000);
+    const w = Math.max(1, right - x);
+    if (right < 0 || x > width) continue;
+    ctx.fillStyle = selected ? '#f3f6f1' : featureTrackColor(segment);
+    ctx.globalAlpha = 0.92;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = selected ? '#ef8c86' : '#0b0e10';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.lineWidth = 1;
+    if (w > 18) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x + 2, y, Math.max(0, w - 4), h);
+      ctx.clip();
+      ctx.fillStyle = selected ? '#0b0e10' : '#f3f6f1';
+      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(voicingTrackLabel(segment), x + w / 2, y + 9);
+      ctx.restore();
+    }
+  }
+}
+
+function drawFeatureLanes(ctx, width, height, lanes) {
+  const { laneTop, laneHeight, laneGap, showLabels } = featureLaneLayout(height, lanes.length);
+  const visibleRange = visibleTimelineRange(width);
+  ctx.save();
+  ctx.font = '10px Inter, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (let index = 0; index < lanes.length; index += 1) {
+    const lane = lanes[index];
+    const y = laneTop + index * (laneHeight + laneGap);
+    if (y + laneHeight > height - 3) break;
+    const color = featureLaneColor(lane.id, index);
+    ctx.fillStyle = 'rgba(102, 114, 122, 0.13)';
+    ctx.fillRect(0, y, width, laneHeight);
+    drawFeatureLaneSamples(ctx, lane, color, y, laneHeight, width);
+    if (showLabels && visibleRange.width > 140) {
+      const label = featureLaneShortLabel(lane);
+      const labelWidth = Math.min(70, Math.max(20, ctx.measureText(label).width + 8));
+      const labelX = frozenLaneLabelX(labelWidth, width);
+      ctx.fillStyle = 'rgba(12, 16, 18, 0.72)';
+      ctx.fillRect(labelX, y - 1, labelWidth, laneHeight + 2);
+      ctx.fillStyle = rgba(color, 0.94);
+      ctx.fillText(label, labelX + 4, y + laneHeight / 2 + 0.5);
+    }
+  }
+  ctx.restore();
+}
+
+function featureLaneLayout(height, laneCount) {
+  if (!laneCount) {
+    return {
+      laneTop: FEATURE_LANE_TOP,
+      laneHeight: FEATURE_LANE_MAX_HEIGHT,
+      laneGap: FEATURE_LANE_WIDE_GAP,
+      showLabels: true,
+    };
+  }
+
+  const laneGap = laneCount > 8 ? FEATURE_LANE_DENSE_GAP : FEATURE_LANE_WIDE_GAP;
+  const gapsHeight = Math.max(0, laneCount - 1) * laneGap;
+  const availableHeight = Math.max(0, height - FEATURE_LANE_TOP - FEATURE_LANE_BOTTOM - gapsHeight);
+  const laneHeight = clamp(
+    Math.floor(availableHeight / laneCount),
+    FEATURE_LANE_MIN_HEIGHT,
+    FEATURE_LANE_MAX_HEIGHT,
+  );
+
+  return {
+    laneTop: FEATURE_LANE_TOP,
+    laneHeight,
+    laneGap,
+    showLabels: laneHeight >= 5,
+  };
+}
+
+function drawFeatureLaneSamples(ctx, lane, color, y, laneHeight, width) {
+  const points = lane.points || [];
+  if (!points.length) return;
+
+  ctx.beginPath();
+  let hasLine = false;
+  for (const point of points) {
+    const x = timeToX(point.start_ms / 1000);
+    const right = timeToX(point.end_ms / 1000);
+    const w = Math.max(1, right - x);
+    if (right < 0 || x > width) continue;
+    const value = clamp(Number(point.value), 0, 1);
+    const confidence = clamp(Number(point.confidence), 0, 1);
+    ctx.fillStyle = rgba(color, 0.10 + 0.62 * value * Math.max(0.25, confidence));
+    ctx.fillRect(x, y, w, laneHeight);
+    const lineY = y + laneHeight - value * laneHeight;
+    if (hasLine) ctx.lineTo(x + w / 2, lineY);
+    else {
+      ctx.moveTo(x + w / 2, lineY);
+      hasLine = true;
+    }
+  }
+  if (hasLine) {
+    ctx.strokeStyle = rgba(color, 0.88);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
 function drawTrack(canvas, segments, options) {
   const ctx = clearCanvas(canvas);
   const width = canvas.clientWidth;
@@ -1357,13 +1516,34 @@ function drawTrack(canvas, segments, options) {
 
 function drawLaneCaption(ctx, width, label) {
   if (!label) return;
+  const { end } = visibleTimelineRange(width);
   ctx.save();
   ctx.fillStyle = 'rgba(155, 166, 161, 0.7)';
   ctx.font = '11px Inter, sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'top';
-  ctx.fillText(String(label).toUpperCase(), width - 8, 7);
+  ctx.fillText(String(label).toUpperCase(), Math.max(8, end - 8), 7);
   ctx.restore();
+}
+
+function visibleTimelineRange(width) {
+  const timeline = elements.timeline;
+  const viewportWidth = Math.max(
+    1,
+    Math.floor(timeline?.clientWidth || timeline?.getBoundingClientRect?.().width || width),
+  );
+  const start = clamp(timeline?.scrollLeft || 0, 0, Math.max(0, width - 1));
+  const end = clamp(start + viewportWidth, 0, width);
+  return {
+    start,
+    end,
+    width: Math.max(1, end - start),
+  };
+}
+
+function frozenLaneLabelX(labelWidth, width) {
+  const { start } = visibleTimelineRange(width);
+  return Math.max(4, Math.min(start + 4, Math.max(4, width - labelWidth - 4)));
 }
 
 function trackSegmentLabel(segment, options) {
@@ -1701,6 +1881,45 @@ function featureTrackColor(segment) {
   return '#66727a';
 }
 
+function featureLaneColor(id, index = 0) {
+  const colors = {
+    energy: '#6fd2a4',
+    voicing: '#5bc6ff',
+    sonority: '#e8c36f',
+    nucleus: '#ef8c86',
+    zcr: '#c3a4ff',
+    high_band: '#79b8ff',
+    spectral_flux: '#f3a35c',
+    f1: '#db6d8f',
+    f2: '#54bfb5',
+    f3: '#b7ce63',
+    jaw_open: '#f0d56f',
+    tongue_high: '#75d08a',
+    tongue_front: '#59b4e8',
+    lip_round: '#d48ee8',
+  };
+  if (colors[id]) return colors[id];
+  const fallback = ['#6fd2a4', '#79b8ff', '#e8c36f', '#ef8c86', '#c3a4ff'];
+  return fallback[index % fallback.length];
+}
+
+function featureLaneShortLabel(lane) {
+  const labels = {
+    energy: 'ENG',
+    voicing: 'VOX',
+    sonority: 'SON',
+    nucleus: 'NUC',
+    zcr: 'ZCR',
+    high_band: 'HI',
+    spectral_flux: 'FLX',
+    jaw_open: 'JAW',
+    tongue_high: 'HIGH',
+    tongue_front: 'FRONT',
+    lip_round: 'ROUND',
+  };
+  return labels[lane.id] || String(lane.label || lane.id || '').slice(0, 6).toUpperCase();
+}
+
 function vadTrackColor(segment) {
   if (segment.kind === 'speech') return '#6fd2a4';
   if (segment.kind === 'silence') return '#3f4950';
@@ -1941,6 +2160,26 @@ function toggleIr() {
     state.irVisible ? 'chevron-down' : 'chevron-right',
     state.irVisible ? 'Hide Speech IR' : 'Show Speech IR',
   );
+}
+
+function toggleDawFocus() {
+  state.dawFocus = !state.dawFocus;
+  document.body.classList.toggle('daw-focus', state.dawFocus);
+  if (state.dawFocus) window.scrollTo({ top: 0, left: 0 });
+  updateDawFocusToggle();
+  requestAnimationFrame(() => drawAll());
+}
+
+function updateDawFocusToggle() {
+  const button = elements['daw-focus-toggle'];
+  if (!button) return;
+  const focused = state.dawFocus;
+  setButtonIcon(
+    button,
+    focused ? 'panel-top-open' : 'panel-top-close',
+    focused ? 'Exit DAW focus' : 'Focus DAW',
+  );
+  button.setAttribute('aria-pressed', focused ? 'true' : 'false');
 }
 
 function setControlProgress(control, inProgress) {

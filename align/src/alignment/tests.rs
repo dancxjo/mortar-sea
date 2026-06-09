@@ -1376,6 +1376,44 @@ fn feature_track_segments_emit_only_voicing_or_silence_labels() {
 }
 
 #[test]
+fn feature_lanes_include_measured_and_vocal_tract_proxy_values() {
+    let mut frames = (0..3).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_norm = 0.72;
+        frame.voicing = 0.82;
+        frame.sonority = 0.76;
+        frame.vowel_nucleus_likelihood = 0.84;
+        frame.zero_crossing_rate = 0.07;
+        frame.high_ratio = 0.12;
+        frame.spectral_flux = 0.18;
+        frame.f1_hz = 300.0;
+        frame.f2_hz = 2500.0;
+        frame.f3_hz = 3300.0;
+    }
+
+    let lanes = feature_lanes(&frames);
+
+    assert!(
+        lanes
+            .iter()
+            .any(|lane| lane.id == "energy" && lane.source == "measured")
+    );
+    assert!(
+        lanes
+            .iter()
+            .any(|lane| lane.id == "jaw_open" && lane.source == "calculated")
+    );
+    assert!(
+        lanes
+            .iter()
+            .find(|lane| lane.id == "tongue_front")
+            .and_then(|lane| lane.points.first())
+            .is_some_and(|point| point.value > 0.75 && point.confidence > 0.5)
+    );
+    assert!(lanes.iter().all(|lane| lane.points.len() == frames.len()));
+}
+
+#[test]
 fn voicing_pattern_stage_aligns_phone_runs_to_voicing_lane() {
     let output = phonemicized("see do");
     let units = alignable_phones(&output)

@@ -33,6 +33,10 @@ body {
     sans-serif;
 }
 
+body.daw-focus {
+  overflow: hidden;
+}
+
 button,
 input,
 select,
@@ -191,6 +195,19 @@ textarea:focus-visible,
   width: min(1840px, calc(100vw - 24px));
   margin: 0 auto;
   padding: 12px 0 28px;
+}
+
+.daw-focus .shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: calc(100vw - 24px);
+  height: 100vh;
+  padding: 8px 0;
+}
+
+.daw-focus .top-section,
+.daw-focus .secondary-grid {
+  display: none;
 }
 
 .topbar,
@@ -604,7 +621,8 @@ canvas {
 }
 
 .timeline-controls,
-.playback-controls {
+.playback-controls,
+.daw-view-controls {
   display: inline-grid;
   gap: 4px;
   padding: 3px;
@@ -621,8 +639,14 @@ canvas {
   grid-template-columns: 42px;
 }
 
+.daw-view-controls {
+  grid-template-columns: 42px;
+  margin-left: auto;
+}
+
 .timeline-controls button,
-.playback-controls button {
+.playback-controls button,
+.daw-view-controls button {
   min-width: 0;
   min-height: 32px;
   padding: 4px 9px;
@@ -641,6 +665,18 @@ canvas {
 
 #audio-play-toggle[data-state="playing"] {
   background: var(--yellow);
+}
+
+.daw-focus .daw-toolbar {
+  margin-bottom: 8px;
+}
+
+.daw-focus .daw {
+  min-height: 0;
+}
+
+.daw-focus .timeline {
+  height: 100%;
 }
 
 .secondary-grid {
@@ -841,6 +877,11 @@ pre {
   }
 
   .playback-controls {
+    grid-template-columns: minmax(42px, 1fr);
+    flex: 0 0 54px;
+  }
+
+  .daw-view-controls {
     grid-template-columns: minmax(42px, 1fr);
     flex: 0 0 54px;
   }

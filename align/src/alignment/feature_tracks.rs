@@ -1,4 +1,20 @@
 use super::*;
+use speech::{
+    AcousticFrame as SpeechAcousticFrame, Formant, Spec, TimeSpan, VocalTractEstimate,
+    VocalTractEstimateConfig,
+};
+
+const FORMANT_CONFIG: VocalTractEstimateConfig = VocalTractEstimateConfig {
+    f1_min_hz: 250.0,
+    f1_max_hz: 900.0,
+    f2_min_hz: 600.0,
+    f2_max_hz: 3000.0,
+    f3_min_hz: 1400.0,
+    f3_max_hz: 3600.0,
+    f1_frontness_coupling: 0.35,
+    spectral_tilt_rounding_min_db_per_octave: -3.0,
+    spectral_tilt_rounding_max_db_per_octave: -18.0,
+};
 
 pub(crate) fn alignment_feature_tracks(decoded: &DecodedWav) -> Vec<FeatureTrackSegment> {
     let samples = resample_linear(
@@ -20,6 +36,16 @@ pub(crate) fn alignment_vad_tracks(decoded: &DecodedWav) -> Vec<FeatureTrackSegm
     vad_track_segments(&frames)
 }
 
+pub(crate) fn alignment_feature_lanes(decoded: &DecodedWav) -> Vec<FeatureLane> {
+    let samples = resample_linear(
+        &decoded.samples,
+        decoded.sample_rate_hz,
+        ALIGN_SAMPLE_RATE_HZ,
+    );
+    let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
+    feature_lanes(&frames)
+}
+
 pub(super) fn vad_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
     let kinds = vad_feature_kinds(frames);
     feature_track_segments_from_kinds(frames, &kinds)
@@ -28,6 +54,179 @@ pub(super) fn vad_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<Featur
 pub(super) fn feature_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
     let kinds = voicing_feature_kinds(frames);
     feature_track_segments_from_kinds(frames, &kinds)
+}
+
+pub(super) fn feature_lanes(frames: &[AcousticFrameFeatures]) -> Vec<FeatureLane> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let postures = frames
+        .iter()
+        .map(estimate_frame_vocal_tract)
+        .collect::<Vec<_>>();
+
+    let mut lanes = vec![
+        measured_lane(frames, "energy", "Energy", "norm", |frame| {
+            frame.energy_norm
+        }),
+        measured_lane(frames, "voicing", "Voicing", "prob", |frame| frame.voicing),
+        measured_lane(frames, "sonority", "Sonority", "score", |frame| {
+            frame.sonority
+        }),
+        measured_lane(frames, "nucleus", "Nucleus", "score", |frame| {
+            frame.vowel_nucleus_likelihood
+        }),
+        measured_lane(frames, "zcr", "ZCR", "rate", |frame| {
+            normalize(frame.zero_crossing_rate, 0.0, 0.35)
+        }),
+        measured_lane(frames, "high_band", "High band", "ratio", |frame| {
+            frame.high_ratio
+        }),
+        measured_lane(frames, "spectral_flux", "Flux", "delta", |frame| {
+            frame.spectral_flux
+        }),
+        measured_lane(frames, "f1", "F1", "hz", |frame| {
+            normalize(
+                frame.f1_hz,
+                FORMANT_CONFIG.f1_min_hz,
+                FORMANT_CONFIG.f1_max_hz,
+            )
+        }),
+        measured_lane(frames, "f2", "F2", "hz", |frame| {
+            normalize(
+                frame.f2_hz,
+                FORMANT_CONFIG.f2_min_hz,
+                FORMANT_CONFIG.f2_max_hz,
+            )
+        }),
+        measured_lane(frames, "f3", "F3", "hz", |frame| {
+            normalize(
+                frame.f3_hz,
+                FORMANT_CONFIG.f3_min_hz,
+                FORMANT_CONFIG.f3_max_hz,
+            )
+        }),
+    ];
+
+    lanes.extend([
+        posture_lane(frames, &postures, "jaw_open", "Jaw", |posture| {
+            posture.jaw_open
+        }),
+        posture_lane(frames, &postures, "tongue_high", "High", |posture| {
+            posture.tongue_high
+        }),
+        posture_lane(frames, &postures, "tongue_front", "Front", |posture| {
+            posture.tongue_front
+        }),
+        posture_lane(frames, &postures, "lip_round", "Round", |posture| {
+            posture.lip_round
+        }),
+    ]);
+
+    lanes
+}
+
+fn measured_lane(
+    frames: &[AcousticFrameFeatures],
+    id: &str,
+    label: &str,
+    unit: &str,
+    value: impl Fn(&AcousticFrameFeatures) -> f32,
+) -> FeatureLane {
+    FeatureLane {
+        id: id.into(),
+        label: label.into(),
+        unit: unit.into(),
+        source: "measured".into(),
+        points: frames
+            .iter()
+            .map(|frame| FeatureLanePoint {
+                start_ms: frame.start_ms,
+                end_ms: frame.end_ms,
+                value: clamp01(value(frame)),
+                confidence: frame_confidence(frame),
+            })
+            .collect(),
+    }
+}
+
+fn posture_lane(
+    frames: &[AcousticFrameFeatures],
+    postures: &[Option<VocalTractEstimate>],
+    id: &str,
+    label: &str,
+    value: impl Fn(VocalTractEstimate) -> f32,
+) -> FeatureLane {
+    FeatureLane {
+        id: id.into(),
+        label: label.into(),
+        unit: "proxy".into(),
+        source: "calculated".into(),
+        points: frames
+            .iter()
+            .zip(postures.iter().copied())
+            .map(|(frame, posture)| {
+                let posture = posture.unwrap_or(VocalTractEstimate {
+                    jaw_open: 0.0,
+                    tongue_high: 0.0,
+                    tongue_front: 0.0,
+                    lip_round: 0.0,
+                    confidence: 0.0,
+                });
+                FeatureLanePoint {
+                    start_ms: frame.start_ms,
+                    end_ms: frame.end_ms,
+                    value: clamp01(value(posture)),
+                    confidence: clamp01(posture.confidence * frame_confidence(frame)),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn estimate_frame_vocal_tract(frame: &AcousticFrameFeatures) -> Option<VocalTractEstimate> {
+    let acoustic = SpeechAcousticFrame {
+        span: TimeSpan {
+            start_s: frame.start_ms as f64 / 1000.0,
+            end_s: frame.end_ms as f64 / 1000.0,
+        },
+        f0_hz: Spec::Unspecified,
+        energy_db: Spec::Known(frame.energy_db),
+        voicing_probability: Spec::Known(frame.voicing),
+        periodicity: Spec::Unspecified,
+        harmonicity: Spec::Unspecified,
+        formants: vec![
+            Formant {
+                index: 1,
+                hz: Spec::Known(frame.f1_hz),
+                bandwidth_hz: Spec::Unspecified,
+            },
+            Formant {
+                index: 2,
+                hz: Spec::Known(frame.f2_hz),
+                bandwidth_hz: Spec::Unspecified,
+            },
+            Formant {
+                index: 3,
+                hz: Spec::Known(frame.f3_hz),
+                bandwidth_hz: Spec::Unspecified,
+            },
+        ],
+        spectral_centroid_hz: Spec::Known(frame.spectral_centroid_hz),
+        spectral_tilt_db_per_octave: Spec::Unspecified,
+        zero_crossing_rate: Spec::Known(frame.zero_crossing_rate),
+        vectors: Vec::new(),
+    };
+
+    match speech::estimate_vocal_tract_posture(&acoustic, &FORMANT_CONFIG) {
+        Spec::Known(posture) => Some(posture),
+        _ => None,
+    }
+}
+
+fn frame_confidence(frame: &AcousticFrameFeatures) -> f32 {
+    (0.25 + 0.55 * frame.energy_norm + 0.20 * frame.sonority).clamp(0.0, 1.0)
 }
 
 fn feature_track_segments_from_kinds(
@@ -282,5 +481,20 @@ fn feature_track_segment(
         label: kind.to_string(),
         start_ms,
         end_ms,
+    }
+}
+
+fn normalize(value: f32, min: f32, max: f32) -> f32 {
+    if !value.is_finite() || min >= max {
+        return 0.0;
+    }
+    ((value - min) / (max - min)).clamp(0.0, 1.0)
+}
+
+fn clamp01(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }

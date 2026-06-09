@@ -29,6 +29,9 @@ use crate::piper::{
     PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
 };
 
+const DEFAULT_STYLE_ALPHA: f32 = 0.3;
+const DEFAULT_STYLE_BETA: f32 = 0.1;
+
 #[derive(Debug, Args)]
 pub struct SpeakCommand {
     #[arg(default_value = "hello world")]
@@ -49,9 +52,9 @@ pub struct SpeakCommand {
     pub quality: SpeakQuality,
     #[arg(long)]
     pub diffusion_steps: Option<usize>,
-    #[arg(long, default_value_t = 0.3)]
+    #[arg(long, default_value_t = DEFAULT_STYLE_ALPHA)]
     pub style_alpha: f32,
-    #[arg(long, default_value_t = 0.7)]
+    #[arg(long, default_value_t = DEFAULT_STYLE_BETA)]
     pub style_beta: f32,
     #[arg(long, default_value_t = 1.0)]
     pub embedding_scale: f64,
@@ -137,8 +140,8 @@ impl Default for SpeechSynthesisOptions {
             voice_wav: None,
             style_wav: None,
             diffusion_steps: 5,
-            style_alpha: 0.3,
-            style_beta: 0.7,
+            style_alpha: DEFAULT_STYLE_ALPHA,
+            style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
@@ -947,8 +950,8 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Balanced,
             diffusion_steps: None,
-            style_alpha: 0.3,
-            style_beta: 0.7,
+            style_alpha: DEFAULT_STYLE_ALPHA,
+            style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,
@@ -974,8 +977,8 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Fast,
             diffusion_steps: None,
-            style_alpha: 0.3,
-            style_beta: 0.7,
+            style_alpha: DEFAULT_STYLE_ALPHA,
+            style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,
@@ -990,6 +993,12 @@ mod tests {
     }
 
     #[test]
+    fn default_style_beta_keeps_reference_prosody_audible() {
+        assert_eq!(SpeechSynthesisOptions::default().style_alpha, 0.3);
+        assert_eq!(SpeechSynthesisOptions::default().style_beta, 0.1);
+    }
+
+    #[test]
     fn explicit_diffusion_steps_override_quality_preset() {
         let command = SpeakCommand {
             text: "hello world".into(),
@@ -1001,8 +1010,8 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Fast,
             diffusion_steps: Some(4),
-            style_alpha: 0.3,
-            style_beta: 0.7,
+            style_alpha: DEFAULT_STYLE_ALPHA,
+            style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
             debug_pronunciation: false,

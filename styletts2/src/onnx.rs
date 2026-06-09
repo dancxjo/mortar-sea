@@ -71,7 +71,7 @@ impl Default for StyleTts2DiffusionOptions {
         Self {
             diffusion_steps: 5,
             alpha: 0.3,
-            beta: 0.7,
+            beta: 0.1,
             embedding_scale: 1.0,
             seed: 0,
         }
@@ -1342,6 +1342,16 @@ mod tests {
         options.alpha = 0.0;
         options.beta = f32::MIN_POSITIVE;
         assert!(should_sample_diffusion_style(&options));
+    }
+
+    #[test]
+    fn style_blend_uses_alpha_for_timbre_and_beta_for_prosody() {
+        let predicted = vec![1.0; STYLE_VECTOR_DIMS];
+        let reference = vec![0.0; STYLE_VECTOR_DIMS];
+        let blended = blend_predicted_and_reference_style(&predicted, &reference, 0.3, 0.1);
+
+        assert_eq!(&blended[..STYLE_HALF_DIMS], vec![0.3; STYLE_HALF_DIMS]);
+        assert_eq!(&blended[STYLE_HALF_DIMS..], vec![0.1; STYLE_HALF_DIMS]);
     }
 
     #[test]

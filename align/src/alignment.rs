@@ -2,7 +2,8 @@
 
 use crate::{
     ALIGN_HOP_MS, ALIGN_SAMPLE_RATE_HZ, AsrSentence, CandidateOverlaySegment, DecodedWav,
-    FeatureTrackSegment, MAX_FULL_TRAJECTORY_SAMPLES, SegmentAlignment, TimedWord, WordAlignment,
+    FeatureLane, FeatureLanePoint, FeatureTrackSegment, MAX_FULL_TRAJECTORY_SAMPLES,
+    SegmentAlignment, TimedWord, WordAlignment,
 };
 use crate::{
     audio::resample_linear,
@@ -27,9 +28,11 @@ use acoustic::{AcousticFrameFeatures, closeness, extract_acoustic_features, posi
 #[cfg(test)]
 use acoustic::{SpectrumPlan, analyze_frame};
 use feature_tracks::voicing_feature_kinds;
-pub(crate) use feature_tracks::{alignment_feature_tracks, alignment_vad_tracks};
+pub(crate) use feature_tracks::{
+    alignment_feature_lanes, alignment_feature_tracks, alignment_vad_tracks,
+};
 #[cfg(test)]
-use feature_tracks::{feature_track_segments, vad_track_segments};
+use feature_tracks::{feature_lanes, feature_track_segments, vad_track_segments};
 use scoring::*;
 pub(crate) use timing::alignment_tracks;
 use timing::distribute_spans;
