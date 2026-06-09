@@ -304,14 +304,15 @@ pub(crate) fn alignment_candidate_overlays(
     }
 
     let final_spans = aligned_phone_spans(aligned_phones);
-    candidate_facts_to_overlays(&alignment_candidate_facts(
+    let facts = alignment_candidate_facts(
         output,
         &units,
         &frames,
         decoded.duration_ms,
         &context,
         Some(&final_spans),
-    ))
+    );
+    candidate_facts_to_contextual_overlays(&facts, &units, &final_spans)
 }
 
 pub(crate) fn projected_voicing_tracks(
@@ -384,6 +385,13 @@ fn alignment_candidate_facts(
         units,
         frames,
         duration_ms,
+    ));
+    facts.extend(weak_reduced_vowel_candidate_facts(
+        output,
+        units,
+        frames,
+        duration_ms,
+        final_spans,
     ));
     infer_candidate_fact_fixed_point(&mut facts);
 
@@ -956,6 +964,113 @@ fn syllable_nucleus_candidate_facts(
         .collect()
 }
 
+fn weak_reduced_vowel_candidate_facts(
+    output: &PhonemicizeOutput,
+    units: &[AlignableUnit<'_>],
+    frames: &[AcousticFrameFeatures],
+    duration_ms: u64,
+    final_spans: Option<&[PhoneSpan]>,
+) -> Vec<CandidateFact> {
+    if frames.is_empty() || units.is_empty() {
+        return Vec::new();
+    }
+    let word_phone_counts = word_phone_counts(units, output.graphemes.len());
+    units
+        .iter()
+        .enumerate()
+        .filter_map(|(unit_index, unit)| {
+            let AlignableUnit::Phone { token, word_index } = unit else {
+                return None;
+            };
+            if phone_class(token) != PhoneClass::Vowel
+                || !is_weak_alignment_word(output, *word_index, &word_phone_counts)
+            {
+                return None;
+            }
+            let range = weak_reduced_vowel_search_range(
+                frames,
+                unit_index,
+                units.len(),
+                final_spans.and_then(|spans| spans.get(unit_index).copied()),
+            );
+            if range.is_empty() {
+                return None;
+            }
+            let frame_index = range
+                .max_by(|left, right| {
+                    weak_reduced_vowel_candidate_confidence(&frames[*left])
+                        .total_cmp(&weak_reduced_vowel_candidate_confidence(&frames[*right]))
+                })
+                .unwrap_or(0);
+            let frame = frames.get(frame_index)?;
+            let confidence = weak_reduced_vowel_candidate_confidence(frame);
+            if confidence < CANDIDATE_OVERLAY_MIN_CONFIDENCE {
+                return None;
+            }
+            let center = (frame.start_ms.saturating_add(frame.end_ms)) / 2;
+            let start_ms = center.saturating_sub(18).min(duration_ms);
+            let end_ms = center
+                .saturating_add(18)
+                .min(duration_ms)
+                .max(start_ms.saturating_add(1));
+            Some(CandidateFact {
+                source: CandidateSource::SyllableNucleus,
+                kind: CandidateKind::VowelNucleus,
+                target: CandidateTarget::Unit(unit_index),
+                cue_id: Some("acoustic.cue.vowel_reduction".into()),
+                span: PhoneSpan { start_ms, end_ms },
+                frame_start: frame_index,
+                frame_end: frame_index.saturating_add(1),
+                confidence,
+                label: "reduced vowel".into(),
+                token_id: None,
+                value: CandidateValue::Bool(true),
+            })
+        })
+        .collect()
+}
+
+fn weak_reduced_vowel_search_range(
+    frames: &[AcousticFrameFeatures],
+    unit_index: usize,
+    unit_count: usize,
+    final_span: Option<PhoneSpan>,
+) -> std::ops::Range<usize> {
+    if frames.is_empty() {
+        return 0..0;
+    }
+    if let Some(span) = final_span {
+        let range = frame_range_for_span(frames, span);
+        let start = range.start.saturating_sub(1);
+        let end = range.end.saturating_add(1).min(frames.len()).max(start);
+        return start..end;
+    }
+
+    let (active_start, active_end) = active_frame_range(frames).unwrap_or((0, frames.len()));
+    if active_start >= active_end {
+        return 0..frames.len();
+    }
+    let active_len = active_end.saturating_sub(active_start).max(1);
+    let center = active_start
+        + active_len.saturating_mul(unit_index.saturating_mul(2).saturating_add(1))
+            / unit_count.max(1).saturating_mul(2);
+    let radius = (active_len / unit_count.max(1)).max(ms_to_frames(80.0));
+    let start = center.saturating_sub(radius).max(active_start);
+    let end = center
+        .saturating_add(radius)
+        .saturating_add(1)
+        .min(active_end)
+        .max(start);
+    start..end
+}
+
+fn weak_reduced_vowel_candidate_confidence(frame: &AcousticFrameFeatures) -> f32 {
+    (0.58 * reduced_vowel_shadow_score(frame)
+        + 0.24 * nucleus_peak_confidence(frame)
+        + 0.18 * vowel_transition_onset_evidence(frame))
+    .clamp(0.0, 1.0)
+}
+
 fn reverse_snipper_candidate_facts(
     units: &[AlignableUnit<'_>],
     frames: &[AcousticFrameFeatures],
@@ -1092,10 +1207,27 @@ fn candidate_fact_exists(facts: &[CandidateFact], candidate: &CandidateFact) -> 
 }
 
 fn candidate_facts_to_overlays(facts: &[CandidateFact]) -> Vec<CandidateOverlaySegment> {
+    candidate_facts_to_filtered_overlays(facts, candidate_fact_is_overlay_worthy)
+}
+
+fn candidate_facts_to_contextual_overlays(
+    facts: &[CandidateFact],
+    units: &[AlignableUnit<'_>],
+    final_spans: &[PhoneSpan],
+) -> Vec<CandidateOverlaySegment> {
+    candidate_facts_to_filtered_overlays(facts, |fact| {
+        candidate_fact_is_contextually_overlay_worthy(fact, units, final_spans)
+    })
+}
+
+fn candidate_facts_to_filtered_overlays(
+    facts: &[CandidateFact],
+    overlay_worthy: impl Fn(&CandidateFact) -> bool,
+) -> Vec<CandidateOverlaySegment> {
     let mut overlays = facts
         .iter()
         .filter(|fact| fact.confidence >= CANDIDATE_OVERLAY_MIN_CONFIDENCE)
-        .filter(|fact| candidate_fact_is_overlay_worthy(fact))
+        .filter(|fact| overlay_worthy(fact))
         .map(|fact| CandidateOverlaySegment {
             index: 0,
             source: fact.source.as_str().into(),
@@ -1118,6 +1250,32 @@ fn candidate_facts_to_overlays(facts: &[CandidateFact]) -> Vec<CandidateOverlayS
         overlay.index = index;
     }
     overlays
+}
+
+fn candidate_fact_is_contextually_overlay_worthy(
+    fact: &CandidateFact,
+    units: &[AlignableUnit<'_>],
+    final_spans: &[PhoneSpan],
+) -> bool {
+    candidate_fact_is_overlay_worthy(fact)
+        && (fact.kind != CandidateKind::RhoticRegion
+            || candidate_overlaps_expected_rhotic(fact, units, final_spans))
+}
+
+fn candidate_overlaps_expected_rhotic(
+    fact: &CandidateFact,
+    units: &[AlignableUnit<'_>],
+    final_spans: &[PhoneSpan],
+) -> bool {
+    units
+        .iter()
+        .zip(final_spans.iter())
+        .any(|(unit, span)| match unit {
+            AlignableUnit::Phone { token, .. } if is_rhotic_phone(token) => {
+                span_overlap_ratio(fact.span, *span) > 0.05
+            }
+            _ => false,
+        })
 }
 
 fn candidate_fact_is_overlay_worthy(fact: &CandidateFact) -> bool {
@@ -2516,6 +2674,8 @@ fn candidate_feature_affinity(
             | (CandidateKind::StopClosure | CandidateKind::ReleaseBurst, PhoneClass::Affricate) => {
                 1.0
             }
+            (CandidateKind::Aspiration, PhoneClass::Stop)
+            | (CandidateKind::Aspiration, PhoneClass::Affricate) => 1.25,
             _ => 0.0,
         },
         "phonology.place" => match kind {
@@ -2859,6 +3019,7 @@ fn phone_onset_boundary_score(
                 phone_feature_category(phone, "phonology.voicing"),
                 Some("voiceless")
             ) {
+                score += 0.95 * aspiration_frame_score(right);
                 score -= 1.75 * voiceless_obstruent_vocalic_mismatch(right);
             }
             score

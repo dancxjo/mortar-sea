@@ -347,6 +347,43 @@ fn voiceless_stop_onset_rejects_voiced_diphthong_tail() {
 }
 
 #[test]
+fn voiceless_stop_onset_rewards_audible_aspiration_landmark() {
+    let output = phonemicized("tires");
+    let stop = output
+        .phones
+        .iter()
+        .find(|phone| phone_class(phone) == PhoneClass::Stop)
+        .expect("stop phone");
+    let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_norm = 0.18;
+        frame.voicing = 0.10;
+        frame.high_ratio = 0.14;
+        frame.sonority = 0.08;
+        frame.vowel_nucleus_likelihood = 0.06;
+        frame.spectral_flux = 0.04;
+    }
+    frames[13].energy_norm = 0.62;
+    frames[13].voicing = 0.78;
+    frames[13].high_ratio = 0.12;
+    frames[13].sonority = 0.72;
+    frames[13].vowel_nucleus_likelihood = 0.78;
+    frames[13].spectral_flux = 0.06;
+    frames[14].energy_norm = 0.42;
+    frames[14].voicing = 0.05;
+    frames[14].high_ratio = 0.84;
+    frames[14].sonority = 0.08;
+    frames[14].vowel_nucleus_likelihood = 0.05;
+    frames[14].spectral_flux = 0.08;
+
+    let aspirated_onset = phone_onset_boundary_score(stop, &frames, 14);
+    let voiced_tail = phone_onset_boundary_score(stop, &frames, 13);
+
+    assert!(aspirated_onset > 1.8);
+    assert!(aspirated_onset > voiced_tail + 1.0);
+}
+
+#[test]
 fn nucleus_targets_choose_vocalic_peaks_in_syllable_order() {
     let mut frames = (0..90).map(test_frame).collect::<Vec<_>>();
     for peak in [12usize, 44, 75] {
@@ -646,6 +683,156 @@ fn acoustic_types_emit_candidate_facts_and_inferred_sibilants() {
 }
 
 #[test]
+fn weak_the_schwa_emits_reduced_vowel_candidate() {
+    let output = phonemicized("the tires");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let the_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "the")
+        .expect("the word");
+    let schwa_unit = units
+        .iter()
+        .position(|unit| {
+            unit_word_index(unit) == Some(the_index)
+                && matches!(unit, AlignableUnit::Phone { token, .. } if phone_class(token) == PhoneClass::Vowel)
+        })
+        .expect("the vowel unit");
+    let mut spans = (0..units.len())
+        .map(|index| PhoneSpan {
+            start_ms: index as u64 * 50,
+            end_ms: index as u64 * 50 + 50,
+        })
+        .collect::<Vec<_>>();
+    spans[schwa_unit] = PhoneSpan {
+        start_ms: 100,
+        end_ms: 150,
+    };
+    let mut frames = (0..40).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -48.0;
+        frame.energy_norm = 0.06;
+        frame.voicing = 0.03;
+        frame.sonority = 0.03;
+        frame.vowel_nucleus_likelihood = 0.02;
+        frame.high_ratio = 0.22;
+        frame.zero_crossing_rate = 0.12;
+    }
+    for frame in frames.iter_mut().take(14).skip(10) {
+        frame.energy_db = -25.0;
+        frame.energy_norm = 0.58;
+        frame.voicing = 0.78;
+        frame.sonority = 0.70;
+        frame.vowel_nucleus_likelihood = 0.62;
+        frame.high_ratio = 0.12;
+        frame.zero_crossing_rate = 0.07;
+        frame.f1_hz = 520.0;
+        frame.f2_hz = 1500.0;
+        frame.f3_hz = 2600.0;
+    }
+
+    let facts = weak_reduced_vowel_candidate_facts(
+        &output,
+        &units,
+        &frames,
+        frames.last().map(|frame| frame.end_ms).unwrap_or(0),
+        Some(&spans),
+    );
+
+    assert!(facts.iter().any(|fact| {
+        fact.source == CandidateSource::SyllableNucleus
+            && fact.kind == CandidateKind::VowelNucleus
+            && fact.target == CandidateTarget::Unit(schwa_unit)
+            && fact.label == "reduced vowel"
+            && fact.confidence >= CANDIDATE_OVERLAY_MIN_CONFIDENCE
+    }));
+}
+
+#[test]
+fn contextual_overlays_hide_rhotic_f3_outside_expected_rhotic_span() {
+    let output = phonemicized("the tires");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let the_index = output
+        .graphemes
+        .iter()
+        .position(|word| normalized_alignment_word(&word.text) == "the")
+        .expect("the word");
+    let the_vowel_unit = units
+        .iter()
+        .position(|unit| {
+            unit_word_index(unit) == Some(the_index)
+                && matches!(unit, AlignableUnit::Phone { token, .. } if phone_class(token) == PhoneClass::Vowel)
+        })
+        .expect("the vowel unit");
+    let rhotic_unit = units
+        .iter()
+        .position(
+            |unit| matches!(unit, AlignableUnit::Phone { token, .. } if is_rhotic_phone(token)),
+        )
+        .expect("rhotic unit");
+    let mut spans = (0..units.len())
+        .map(|index| PhoneSpan {
+            start_ms: index as u64 * 60,
+            end_ms: index as u64 * 60 + 50,
+        })
+        .collect::<Vec<_>>();
+    spans[the_vowel_unit] = PhoneSpan {
+        start_ms: 100,
+        end_ms: 150,
+    };
+    spans[rhotic_unit] = PhoneSpan {
+        start_ms: 320,
+        end_ms: 380,
+    };
+    let facts = vec![
+        CandidateFact {
+            source: CandidateSource::AcousticCue,
+            kind: CandidateKind::RhoticRegion,
+            target: CandidateTarget::Feature(FeatureId("phonology.rhoticity".into())),
+            cue_id: Some("acoustic.cue.f3_region".into()),
+            span: PhoneSpan {
+                start_ms: 110,
+                end_ms: 140,
+            },
+            frame_start: 11,
+            frame_end: 14,
+            confidence: 0.90,
+            label: "third formant region".into(),
+            token_id: None,
+            value: CandidateValue::Bool(true),
+        },
+        CandidateFact {
+            source: CandidateSource::AcousticCue,
+            kind: CandidateKind::RhoticRegion,
+            target: CandidateTarget::Feature(FeatureId("phonology.rhoticity".into())),
+            cue_id: Some("acoustic.cue.f3_region".into()),
+            span: PhoneSpan {
+                start_ms: 330,
+                end_ms: 360,
+            },
+            frame_start: 33,
+            frame_end: 36,
+            confidence: 0.90,
+            label: "third formant region".into(),
+            token_id: None,
+            value: CandidateValue::Bool(true),
+        },
+    ];
+
+    let overlays = candidate_facts_to_contextual_overlays(&facts, &units, &spans);
+
+    assert_eq!(overlays.len(), 1);
+    assert_eq!(overlays[0].kind, "rhotic_region");
+    assert_eq!(overlays[0].start_ms, 330);
+}
+
+#[test]
 fn fixed_point_rules_derive_sibilant_from_overlapping_frication_facts() {
     let mut facts = vec![
         CandidateFact {
@@ -721,6 +908,50 @@ fn candidate_facts_reward_matching_viterbi_segments_and_penalize_missed_pins() {
 
     assert!(matching > competing_vowel + 2.0);
     assert!(missed_pin < -2.0);
+}
+
+#[test]
+fn aspiration_manner_cues_reward_stop_segments() {
+    let output = phonemicized("tires are");
+    let units = alignable_phones(&output)
+        .into_iter()
+        .map(|(token, word_index)| AlignableUnit::Phone { token, word_index })
+        .collect::<Vec<_>>();
+    let stop_index = units
+        .iter()
+        .position(|unit| unit_phone_class(unit) == PhoneClass::Stop)
+        .expect("stop unit");
+    let vowel_index = units
+        .iter()
+        .position(|unit| unit_phone_class(unit) == PhoneClass::Vowel)
+        .expect("vowel unit");
+    let fact = CandidateFact {
+        source: CandidateSource::AcousticCue,
+        kind: CandidateKind::Aspiration,
+        target: CandidateTarget::Feature(FeatureId("phonology.manner".into())),
+        cue_id: Some("acoustic.cue.aspiration_noise".into()),
+        span: PhoneSpan {
+            start_ms: 80,
+            end_ms: 120,
+        },
+        frame_start: 8,
+        frame_end: 12,
+        confidence: 0.88,
+        label: "aspiration noise".into(),
+        token_id: None,
+        value: CandidateValue::Bool(true),
+    };
+
+    let stop_score = candidate_segment_score(
+        stop_index,
+        &units[stop_index],
+        8..12,
+        std::slice::from_ref(&fact),
+    );
+    let vowel_score = candidate_segment_score(vowel_index, &units[vowel_index], 8..12, &[fact]);
+
+    assert!(stop_score > 0.7);
+    assert!(stop_score > vowel_score + 0.7);
 }
 
 #[test]
@@ -896,6 +1127,39 @@ fn vad_track_segments_mark_speech_activity_above_voicing_regions() {
 }
 
 #[test]
+fn vad_track_segments_use_activity_for_weak_aperiodic_speech() {
+    let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -80.0;
+        frame.energy_norm = 0.0;
+        frame.voicing = 0.0;
+        frame.sonority = 0.0;
+        frame.high_ratio = 0.0;
+        frame.vowel_nucleus_likelihood = 0.0;
+    }
+    for frame in frames.iter_mut().take(20).skip(10) {
+        frame.energy_db = -34.0;
+        frame.energy_norm = 0.18;
+        frame.voicing = 0.04;
+        frame.sonority = 0.04;
+        frame.high_ratio = 0.72;
+        frame.zero_crossing_rate = 0.22;
+    }
+
+    let segments = vad_track_segments(&frames);
+
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["silence", "speech", "silence"]
+    );
+    assert_eq!(segments[1].start_ms, 10 * ALIGN_HOP_MS);
+    assert_eq!(segments[1].end_ms, 20 * ALIGN_HOP_MS);
+}
+
+#[test]
 fn feature_track_segments_smooth_tiny_unvoiced_islands_inside_voicing() {
     let mut frames = (0..28).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {
@@ -923,6 +1187,41 @@ fn feature_track_segments_smooth_tiny_unvoiced_islands_inside_voicing() {
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
         vec!["voiced"]
+    );
+}
+
+#[test]
+fn feature_track_segments_preserve_short_aspirated_stop_islands_inside_voicing() {
+    let mut frames = (0..28).map(test_frame).collect::<Vec<_>>();
+    for frame in &mut frames {
+        frame.energy_db = -22.0;
+        frame.energy_norm = 0.72;
+        frame.voicing = 0.72;
+        frame.sonority = 0.64;
+        frame.vowel_nucleus_likelihood = 0.48;
+        frame.high_ratio = 0.18;
+        frame.zero_crossing_rate = 0.08;
+        frame.spectral_flux = 0.03;
+    }
+    for frame in frames.iter_mut().skip(12).take(3) {
+        frame.energy_db = -28.0;
+        frame.energy_norm = 0.44;
+        frame.voicing = 0.05;
+        frame.sonority = 0.08;
+        frame.vowel_nucleus_likelihood = 0.05;
+        frame.high_ratio = 0.82;
+        frame.zero_crossing_rate = 0.22;
+        frame.spectral_flux = 0.76;
+    }
+
+    let segments = feature_track_segments(&frames);
+
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["voiced", "unvoiced", "voiced"]
     );
 }
 

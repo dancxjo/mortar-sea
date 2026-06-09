@@ -21,16 +21,7 @@ pub(crate) fn alignment_vad_tracks(decoded: &DecodedWav) -> Vec<FeatureTrackSegm
 }
 
 pub(super) fn vad_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
-    let kinds = voicing_feature_kinds(frames)
-        .into_iter()
-        .map(|kind| {
-            if kind == "silence" {
-                "silence"
-            } else {
-                "speech"
-            }
-        })
-        .collect::<Vec<_>>();
+    let kinds = vad_feature_kinds(frames);
     feature_track_segments_from_kinds(frames, &kinds)
 }
 
@@ -81,6 +72,61 @@ pub(super) fn voicing_feature_kinds(frames: &[AcousticFrameFeatures]) -> Vec<&'s
     smoothed_feature_kinds(frames, activity_threshold)
 }
 
+fn vad_feature_kinds(frames: &[AcousticFrameFeatures]) -> Vec<&'static str> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let activity_threshold = speech_activity_threshold(frames);
+    let mut kinds = frames
+        .iter()
+        .map(|frame| {
+            if frame_is_speech_active(frame, activity_threshold) {
+                "speech"
+            } else {
+                "silence"
+            }
+        })
+        .collect::<Vec<_>>();
+    smooth_vad_kinds(&mut kinds);
+    kinds
+}
+
+fn smooth_vad_kinds(kinds: &mut [&'static str]) {
+    if kinds.len() < 3 {
+        return;
+    }
+    close_short_vad_gaps(kinds, ms_to_frames(60.0));
+    remove_short_vad_islands(kinds, ms_to_frames(25.0));
+}
+
+fn close_short_vad_gaps(kinds: &mut [&'static str], max_frames: usize) {
+    for (start, end, kind) in feature_kind_runs(kinds) {
+        if kind != "silence" || start == 0 || end >= kinds.len() {
+            continue;
+        }
+        if end.saturating_sub(start) > max_frames {
+            continue;
+        }
+        if kinds[start - 1] == "speech" && kinds[end] == "speech" {
+            kinds[start..end].fill("speech");
+        }
+    }
+}
+
+fn remove_short_vad_islands(kinds: &mut [&'static str], max_frames: usize) {
+    for (start, end, kind) in feature_kind_runs(kinds) {
+        if kind != "speech" || start == 0 || end >= kinds.len() {
+            continue;
+        }
+        if end.saturating_sub(start) <= max_frames
+            && kinds[start - 1] == "silence"
+            && kinds[end] == "silence"
+        {
+            kinds[start..end].fill("silence");
+        }
+    }
+}
+
 fn smoothed_feature_kinds(
     frames: &[AcousticFrameFeatures],
     activity_threshold: f32,
@@ -113,6 +159,13 @@ fn close_short_feature_islands(
         if left != right || kind == left {
             continue;
         }
+        if kind == "unvoiced"
+            && frames[start..end]
+                .iter()
+                .any(is_stop_like_unvoiced_landmark)
+        {
+            continue;
+        }
         if kind == "silence" && average_silence_score(&frames[start..end]) > 0.50 {
             continue;
         }
@@ -136,11 +189,22 @@ fn close_short_voicing_gaps(
             continue;
         }
         let gap = &frames[start..end];
+        if gap.iter().any(is_stop_like_unvoiced_landmark) {
+            continue;
+        }
         if average_silence_score(gap) > 0.38 {
             continue;
         }
         kinds[start..end].fill("voiced");
     }
+}
+
+fn is_stop_like_unvoiced_landmark(frame: &AcousticFrameFeatures) -> bool {
+    let breathy_release = super::aspiration_frame_score(frame) > 0.58
+        && frame.voicing < 0.32
+        && frame.sonority < 0.30;
+    let burst = frame.spectral_flux > 0.68 && frame.high_ratio > 0.38 && frame.voicing < 0.38;
+    breathy_release || burst
 }
 
 fn merge_adjacent_short_feature_islands(kinds: &mut [&'static str], max_frames: usize) {

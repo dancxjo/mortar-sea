@@ -64,6 +64,18 @@ const ICON_FALLBACKS = {
   'zoom-out': '-',
   'refresh-cw': '\u21bb',
 };
+const TIMELINE_CANVAS_HEIGHTS = {
+  ruler: 34,
+  waveform: 176,
+  spectrogram: 150,
+  'vad-track': 24,
+  'feature-track': 42,
+  'projected-voicing-track': 42,
+  'candidate-overlay-track': 54,
+  'word-track': 54,
+  'phoneme-track': 66,
+  'phone-track': 54,
+};
 
 window.addEventListener('DOMContentLoaded', () => {
   for (const id of [
@@ -956,6 +968,8 @@ function drawAll(options = {}) {
     empty: 'VAD',
     label: vadTrackLabel,
     centeredLabel: true,
+    y: 5,
+    height: 14,
   });
   drawTrack(canvases['feature-track'], state.currentAlignment?.feature_tracks || [], {
     kind: 'feature',
@@ -1008,7 +1022,8 @@ function setupCanvases() {
   const cssWidth = contentWidth();
   for (const canvas of Object.values(canvases)) {
     canvas.style.width = `${cssWidth}px`;
-    const cssHeight = Number(canvas.getAttribute('height')) || canvas.clientHeight || 40;
+    const cssHeight = canvasCssHeight(canvas);
+    canvas.style.height = `${cssHeight}px`;
     const width = Math.max(1, Math.floor(cssWidth * pixelRatio));
     const height = Math.max(1, Math.floor(cssHeight * pixelRatio));
     if (canvas.width !== width || canvas.height !== height) {
@@ -1018,6 +1033,17 @@ function setupCanvases() {
     const ctx = canvas.getContext('2d');
     ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   }
+}
+
+function canvasCssHeight(canvas) {
+  if (TIMELINE_CANVAS_HEIGHTS[canvas.id]) {
+    return TIMELINE_CANVAS_HEIGHTS[canvas.id];
+  }
+  if (!canvas.dataset.cssHeight) {
+    const cssHeight = Number(canvas.getAttribute('height')) || canvas.clientHeight || 40;
+    canvas.dataset.cssHeight = String(cssHeight);
+  }
+  return Number(canvas.dataset.cssHeight) || 40;
 }
 
 function syncTimelineContent({ syncScrollPosition = true } = {}) {
@@ -1299,8 +1325,8 @@ function drawTrack(canvas, segments, options) {
     if (right < 0 || x > width) continue;
     const fillColor = typeof options.color === 'function' ? options.color(segment) : options.color;
     const alpha = typeof options.alpha === 'function' ? options.alpha(segment) : 0.92;
-    const y = 8;
-    const h = height - 16;
+    const y = options.y ?? 8;
+    const h = options.height ?? height - 16;
     ctx.fillStyle = selected ? '#f3f6f1' : fillColor;
     ctx.globalAlpha = alpha;
     ctx.fillRect(x, y, w, h);
@@ -1677,7 +1703,7 @@ function featureTrackColor(segment) {
 
 function vadTrackColor(segment) {
   if (segment.kind === 'speech') return '#6fd2a4';
-  if (segment.kind === 'silence') return '#2c3337';
+  if (segment.kind === 'silence') return '#3f4950';
   return '#66727a';
 }
 
