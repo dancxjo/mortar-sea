@@ -36,6 +36,7 @@ const state = {
   selection: null,
   playRangeEnd: null,
   animationFrame: null,
+  audioSeeking: false,
 };
 
 const elements = {};
@@ -57,6 +58,12 @@ window.addEventListener('DOMContentLoaded', () => {
     'record',
     'stop-recording',
     'audio',
+    'audio-play-toggle',
+    'audio-position',
+    'audio-progress',
+    'audio-progress-fill',
+    'audio-progress-thumb',
+    'audio-duration',
     'audio-detail',
     'phoneme-detail',
     'alignment-detail',
@@ -111,13 +118,33 @@ window.addEventListener('DOMContentLoaded', () => {
   elements['zoom-in'].addEventListener('click', () => zoomAtCenter(1.45));
   elements['zoom-out'].addEventListener('click', () => zoomAtCenter(1 / 1.45));
   elements.fit.addEventListener('click', fitTimeline);
+  elements['audio-play-toggle'].addEventListener('click', toggleAudioPlayback);
+  elements['audio-progress'].addEventListener('pointerdown', onAudioProgressPointerDown);
+  elements['audio-progress'].addEventListener('pointermove', onAudioProgressPointerMove);
+  elements['audio-progress'].addEventListener('pointerup', onAudioProgressPointerUp);
+  elements['audio-progress'].addEventListener('pointercancel', onAudioProgressPointerUp);
+  elements['audio-progress'].addEventListener('keydown', onAudioProgressKeyDown);
   elements.audio.addEventListener('loadedmetadata', updateAudioDuration);
-  elements.audio.addEventListener('play', startPlaybackLoop);
-  elements.audio.addEventListener('pause', drawAll);
-  elements.audio.addEventListener('seeked', drawAll);
-  elements.audio.addEventListener('timeupdate', enforcePlaybackRange);
+  elements.audio.addEventListener('play', () => {
+    updateAudioTransport();
+    startPlaybackLoop();
+  });
+  elements.audio.addEventListener('pause', () => {
+    updateAudioTransport();
+    drawAll();
+  });
+  elements.audio.addEventListener('seeked', () => {
+    updateAudioTransport();
+    drawAll();
+  });
+  elements.audio.addEventListener('timeupdate', () => {
+    enforcePlaybackRange();
+    updateAudioTransport();
+  });
   elements.audio.addEventListener('ended', () => {
     state.playRangeEnd = null;
+    updateAudioTransport();
+    drawAll();
   });
   elements.timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
   elements.timeline.addEventListener('pointerdown', onTimelinePointerDown);
@@ -130,6 +157,7 @@ window.addEventListener('DOMContentLoaded', () => {
   applyPreferences();
   loadStyleTts2Voices();
   syncVoiceSelector();
+  updateAudioTransport();
   drawAll();
 });
 
@@ -461,9 +489,11 @@ async function setAudio(url, detail) {
   state.currentAlignment = null;
   state.selection = null;
   state.playRangeEnd = null;
+  state.audioSeeking = false;
   elements.audio.src = url;
   elements.audio.load();
   elements['audio-detail'].textContent = detail || 'Audio ready';
+  updateAudioTransport();
   await loadWaveform(url);
 }
 
@@ -478,6 +508,7 @@ async function loadWaveform(url) {
     state.spectrogramMeta = null;
     state.duration = state.audioBuffer.duration || 1;
     fitTimeline();
+    updateAudioTransport();
   } catch (error) {
     state.audioBuffer = null;
     state.spectrogramCanvas = null;
@@ -491,6 +522,99 @@ async function loadWaveform(url) {
 function updateAudioDuration() {
   if (!Number.isFinite(elements.audio.duration)) return;
   elements['audio-detail'].textContent = `${elements.audio.duration.toFixed(2)} s`;
+  updateAudioTransport();
+}
+
+async function toggleAudioPlayback() {
+  if (!elements.audio.src) {
+    setStatus('Load or synthesize audio before playback', 'error');
+    return;
+  }
+  if (!elements.audio.paused && !elements.audio.ended) {
+    elements.audio.pause();
+    return;
+  }
+
+  state.playRangeEnd = null;
+  const duration = audioDuration();
+  if (duration > 0 && elements.audio.currentTime >= duration - 0.01) {
+    elements.audio.currentTime = 0;
+  }
+  try {
+    await elements.audio.play();
+  } catch (error) {
+    setStatus(error.message || String(error), 'error');
+  }
+}
+
+function onAudioProgressPointerDown(event) {
+  if (!elements.audio.src) return;
+  event.preventDefault();
+  state.audioSeeking = true;
+  elements['audio-progress'].setPointerCapture?.(event.pointerId);
+  seekAudioFromProgressEvent(event);
+}
+
+function onAudioProgressPointerMove(event) {
+  if (!state.audioSeeking) return;
+  event.preventDefault();
+  seekAudioFromProgressEvent(event);
+}
+
+function onAudioProgressPointerUp(event) {
+  if (!state.audioSeeking) return;
+  event.preventDefault();
+  state.audioSeeking = false;
+  elements['audio-progress'].releasePointerCapture?.(event.pointerId);
+}
+
+function onAudioProgressKeyDown(event) {
+  if (!elements.audio.src) return;
+  const duration = audioDuration();
+  if (duration <= 0) return;
+  const smallStep = event.shiftKey ? 0.25 : 1;
+  const largeStep = Math.max(1, duration * 0.1);
+  let nextTime = elements.audio.currentTime || 0;
+  if (event.key === 'ArrowLeft') nextTime -= smallStep;
+  else if (event.key === 'ArrowRight') nextTime += smallStep;
+  else if (event.key === 'PageDown') nextTime -= largeStep;
+  else if (event.key === 'PageUp') nextTime += largeStep;
+  else if (event.key === 'Home') nextTime = 0;
+  else if (event.key === 'End') nextTime = duration;
+  else return;
+
+  event.preventDefault();
+  seekAudioToTime(nextTime);
+}
+
+function seekAudioFromProgressEvent(event) {
+  const rect = elements['audio-progress'].getBoundingClientRect();
+  const fraction = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  seekAudioToTime(fraction * audioDuration());
+}
+
+function seekAudioToTime(time) {
+  const duration = audioDuration();
+  if (duration <= 0) return;
+  state.playRangeEnd = null;
+  elements.audio.currentTime = clamp(time, 0, duration);
+  updateAudioTransport();
+  drawAll();
+}
+
+function updateAudioTransport() {
+  const duration = audioDuration();
+  const current = duration > 0 ? clamp(elements.audio.currentTime || 0, 0, duration) : 0;
+  const percent = duration > 0 ? (current / duration) * 100 : 0;
+
+  elements['audio-position'].textContent = formatSeconds(current);
+  elements['audio-duration'].textContent = formatSeconds(duration);
+  elements['audio-progress-fill'].style.width = `${percent}%`;
+  elements['audio-progress-thumb'].style.left = `${percent}%`;
+  elements['audio-progress'].setAttribute('aria-valuenow', Math.round(percent).toString());
+  elements['audio-progress'].setAttribute('aria-valuetext', `${formatSeconds(current)} of ${formatSeconds(duration)}`);
+  elements['audio-play-toggle'].textContent =
+    !elements.audio.paused && !elements.audio.ended ? 'Pause' : 'Play';
 }
 
 function fitTimeline() {
@@ -591,6 +715,7 @@ function startPlaybackLoop() {
   cancelAnimationFrame(state.animationFrame);
   const tick = () => {
     enforcePlaybackRange();
+    updateAudioTransport();
     drawAll();
     if (!elements.audio.paused && !elements.audio.ended) {
       state.animationFrame = requestAnimationFrame(tick);
@@ -1566,6 +1691,14 @@ function setStatus(message, tone = '') {
 
 function viewDuration() {
   return Math.max(0.05, state.duration / state.zoom);
+}
+
+function audioDuration() {
+  if (Number.isFinite(elements.audio.duration) && elements.audio.duration > 0) {
+    return elements.audio.duration;
+  }
+  if (state.audioBuffer?.duration > 0) return state.audioBuffer.duration;
+  return 0;
 }
 
 function maxViewStart() {
