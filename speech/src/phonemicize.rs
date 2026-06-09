@@ -138,7 +138,7 @@ pub trait PronunciationPipeline {
         let normalized_text = self.text_normalizer(&input.text);
         let words = self.orthographic_tokenizer(&normalized_text);
         let boundaries = self.boundary_extractor(&normalized_text, &words);
-        let prosody = prosody_from_boundaries(&boundaries);
+        let prosody = prosody_from_boundaries(&boundaries, &words);
         let mut graphemes = Vec::with_capacity(words.len());
         let mut phonemes = Vec::new();
         let mut phones = Vec::new();
@@ -661,10 +661,18 @@ fn boundary_tokens(text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> 
     boundaries
 }
 
-fn prosody_from_boundaries(boundaries: &[SpeechBoundaryToken]) -> ProsodyTrack {
+fn prosody_from_boundaries(
+    boundaries: &[SpeechBoundaryToken],
+    words: &[WordToken],
+) -> ProsodyTrack {
     let mut prosody = ProsodyTrack::default();
+    let mut sentence_start_word_index = 0;
     for boundary in boundaries {
-        let Some(kind) = prosodic_label_for_boundary(boundary) else {
+        let Some(kind) = prosodic_label_for_boundary(boundary, words, sentence_start_word_index)
+        else {
+            if boundary.terminal.is_some() {
+                sentence_start_word_index = boundary.after_grapheme_index.saturating_add(1);
+            }
             continue;
         };
         prosody.labels.push(ProsodicLabel {
@@ -675,19 +683,155 @@ fn prosody_from_boundaries(boundaries: &[SpeechBoundaryToken]) -> ProsodyTrack {
             kind,
             confidence: if boundary.span.is_some() { 0.9 } else { 0.55 },
         });
+        if boundary.terminal.is_some() {
+            sentence_start_word_index = boundary.after_grapheme_index.saturating_add(1);
+        }
     }
     prosody
 }
 
-fn prosodic_label_for_boundary(boundary: &SpeechBoundaryToken) -> Option<ProsodicLabelKind> {
+fn prosodic_label_for_boundary(
+    boundary: &SpeechBoundaryToken,
+    words: &[WordToken],
+    sentence_start_word_index: usize,
+) -> Option<ProsodicLabelKind> {
     match (boundary.terminal, boundary.pause) {
-        (Some(TerminalPunctuation::Question), _) => Some(ProsodicLabelKind::QuestionRise),
+        (Some(TerminalPunctuation::Question), _) => {
+            let sentence_words = words_in_sentence(words, sentence_start_word_index, boundary);
+            Some(prosodic_label_for_english_question(sentence_words))
+        }
         (Some(TerminalPunctuation::Period | TerminalPunctuation::Exclamation), _) => {
             Some(ProsodicLabelKind::FinalFall)
         }
         (None, Some(PauseKind::Comma)) => Some(ProsodicLabelKind::ContinuationRise),
         _ => None,
     }
+}
+
+fn words_in_sentence<'a>(
+    words: &'a [WordToken],
+    sentence_start_word_index: usize,
+    boundary: &SpeechBoundaryToken,
+) -> &'a [WordToken] {
+    let start = sentence_start_word_index.min(words.len());
+    let end = boundary
+        .after_grapheme_index
+        .saturating_add(1)
+        .min(words.len());
+    if start >= end {
+        &[]
+    } else {
+        &words[start..end]
+    }
+}
+
+fn prosodic_label_for_english_question(words: &[WordToken]) -> ProsodicLabelKind {
+    match english_question_contour(words) {
+        EnglishQuestionContour::Rising => ProsodicLabelKind::QuestionRise,
+        EnglishQuestionContour::AlternativeFall => ProsodicLabelKind::AlternativeQuestionFall,
+        EnglishQuestionContour::FinalFall => ProsodicLabelKind::FinalFall,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnglishQuestionContour {
+    Rising,
+    AlternativeFall,
+    FinalFall,
+}
+
+fn english_question_contour(words: &[WordToken]) -> EnglishQuestionContour {
+    let Some(first) = words.first().map(|word| word.normalized.as_str()) else {
+        return EnglishQuestionContour::Rising;
+    };
+
+    if has_alternative_question_coordination(words) {
+        return EnglishQuestionContour::AlternativeFall;
+    }
+    if is_wh_question_opener(first) {
+        return EnglishQuestionContour::FinalFall;
+    }
+
+    EnglishQuestionContour::Rising
+}
+
+fn has_alternative_question_coordination(words: &[WordToken]) -> bool {
+    if has_either_or_coordination(words) {
+        return true;
+    }
+    if !words
+        .first()
+        .is_some_and(|word| is_yes_no_question_opener(&word.normalized))
+    {
+        return false;
+    }
+
+    words
+        .iter()
+        .enumerate()
+        .skip(1)
+        .any(|(index, word)| word.normalized == "or" && index + 1 < words.len())
+}
+
+fn has_either_or_coordination(words: &[WordToken]) -> bool {
+    let Some(either_index) = words.iter().position(|word| word.normalized == "either") else {
+        return false;
+    };
+    words
+        .iter()
+        .skip(either_index + 1)
+        .any(|word| word.normalized == "or")
+}
+
+fn is_yes_no_question_opener(word: &str) -> bool {
+    matches!(
+        word,
+        "am" | "are"
+            | "aren't"
+            | "is"
+            | "isn't"
+            | "was"
+            | "wasn't"
+            | "were"
+            | "weren't"
+            | "do"
+            | "don't"
+            | "does"
+            | "doesn't"
+            | "did"
+            | "didn't"
+            | "have"
+            | "haven't"
+            | "has"
+            | "hasn't"
+            | "had"
+            | "hadn't"
+            | "can"
+            | "can't"
+            | "could"
+            | "couldn't"
+            | "will"
+            | "won't"
+            | "would"
+            | "wouldn't"
+            | "shall"
+            | "shan't"
+            | "should"
+            | "shouldn't"
+            | "may"
+            | "might"
+            | "must"
+            | "ought"
+            | "need"
+            | "dare"
+    )
+}
+
+fn is_wh_question_opener(word: &str) -> bool {
+    matches!(
+        word,
+        "what" | "when" | "where" | "why" | "who" | "whom" | "whose" | "which" | "how"
+    )
 }
 
 fn punctuation_boundary_after_word(
@@ -1851,5 +1995,65 @@ mod tests {
         assert!(output.prosody.labels.iter().any(|label| {
             label.kind == ProsodicLabelKind::QuestionRise && label.confidence > 0.0
         }));
+    }
+
+    #[test]
+    fn yes_no_questions_get_rising_prosody() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("Are you coming?", "en-US"))
+            .expect("yes/no question should phonemicize");
+
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::QuestionRise && label.confidence > 0.0
+        }));
+        assert!(
+            !output
+                .prosody
+                .labels
+                .iter()
+                .any(|label| label.kind == ProsodicLabelKind::AlternativeQuestionFall)
+        );
+    }
+
+    #[test]
+    fn wh_questions_do_not_get_yes_no_question_rise() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("What did you choose?", "en-US"))
+            .expect("wh question should phonemicize");
+
+        assert!(
+            output.prosody.labels.iter().any(|label| {
+                label.kind == ProsodicLabelKind::FinalFall && label.confidence > 0.0
+            })
+        );
+        assert!(
+            !output
+                .prosody
+                .labels
+                .iter()
+                .any(|label| label.kind == ProsodicLabelKind::QuestionRise)
+        );
+    }
+
+    #[test]
+    fn either_or_questions_get_alternative_question_fall() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("Do you want either tea or coffee?", "en-US"))
+            .expect("alternative question should phonemicize");
+
+        assert!(output.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::Phrase
+                && boundary.terminal == Some(TerminalPunctuation::Question)
+        }));
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::AlternativeQuestionFall && label.confidence > 0.0
+        }));
+        assert!(
+            !output
+                .prosody
+                .labels
+                .iter()
+                .any(|label| label.kind == ProsodicLabelKind::QuestionRise)
+        );
     }
 }

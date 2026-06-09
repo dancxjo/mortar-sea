@@ -728,8 +728,9 @@ impl IntonationMarker {
     fn compatible_with(&self, punctuation: &str) -> bool {
         match &self.contour {
             ProsodicLabelKind::QuestionRise => punctuation == "?",
+            ProsodicLabelKind::AlternativeQuestionFall => punctuation == "?",
             ProsodicLabelKind::ContinuationRise => matches!(punctuation, "," | ";" | ":"),
-            ProsodicLabelKind::FinalFall => matches!(punctuation, "." | "!"),
+            ProsodicLabelKind::FinalFall => matches!(punctuation, "." | "!" | "?"),
             _ => false,
         }
     }
@@ -738,6 +739,7 @@ impl IntonationMarker {
 fn intonation_marker_for_label(kind: &ProsodicLabelKind) -> Option<IntonationMarker> {
     let symbol = match kind {
         ProsodicLabelKind::QuestionRise => "↗",
+        ProsodicLabelKind::AlternativeQuestionFall => "↘",
         ProsodicLabelKind::ContinuationRise => "→",
         ProsodicLabelKind::FinalFall => "↘",
         _ => return None,

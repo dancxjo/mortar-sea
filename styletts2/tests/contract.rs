@@ -178,6 +178,51 @@ fn lower_plan_tokens_marks_question_rise_from_target_prosody() {
 }
 
 #[test]
+fn lower_plan_tokens_marks_alternative_question_fall_from_target_prosody() {
+    let symbol_set = SymbolSet::new(["alpha", "?", "↘"]).with_alias("variety.phone.a", "alpha");
+    let mut plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![phone_token("variety.phone.a")],
+        vec![terminal_boundary(0, TerminalPunctuation::Question)],
+        Some("a?".into()),
+    );
+    plan.target_prosody.labels.push(ProsodicLabel {
+        span: TimeSpan {
+            start_s: 0.0,
+            end_s: 0.0,
+        },
+        kind: ProsodicLabelKind::AlternativeQuestionFall,
+        confidence: 0.9,
+    });
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+    let sources = lowered
+        .tokens
+        .iter()
+        .map(|token| token.source)
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["alpha", "↘", "?"]);
+    assert_eq!(
+        sources,
+        [
+            StyleTts2SymbolSource::Phone,
+            StyleTts2SymbolSource::Prosody,
+            StyleTts2SymbolSource::BoundaryPunctuation
+        ]
+    );
+}
+
+#[test]
 fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
     let symbol_set = SymbolSet::new(["alpha", "|", ",", "."])
         .with_alias("variety.phone.a", "alpha")
@@ -486,6 +531,20 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
             );
         }
     }
+}
+
+#[test]
+fn english_either_or_question_lowers_with_falling_final_contour() {
+    let actual = styletts2_text_from_english("Do you want either tea or coffee?");
+
+    assert!(
+        actual.contains("↘ ?"),
+        "either/or question should lower to a falling final question contour: {actual}"
+    );
+    assert!(
+        !actual.contains("↗ ?"),
+        "either/or question should not lower to a yes/no rise: {actual}"
+    );
 }
 
 #[test]
