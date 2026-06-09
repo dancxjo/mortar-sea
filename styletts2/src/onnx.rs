@@ -1364,8 +1364,7 @@ mod tests {
         assert_eq!(ids[0], 0);
         assert!(ids.iter().all(|id| (0..178).contains(id)));
         assert!(ids.len() > 9);
-        assert!(ids.contains(&styletts2_character_id('ɜ').expect("rhotic vowel id")));
-        assert!(ids.contains(&styletts2_character_id('ɹ').expect("codaic r id")));
+        assert!(ids.contains(&styletts2_character_id('ɝ').expect("rhotic vowel id")));
     }
 
     #[test]

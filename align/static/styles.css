@@ -119,7 +119,8 @@ button:disabled {
   cursor: not-allowed;
 }
 
-button:disabled[data-progress="true"] {
+button:disabled[data-progress="true"],
+.file-button[aria-busy="true"] {
   opacity: 1;
   cursor: progress;
 }
@@ -135,11 +136,13 @@ button[data-state="recording"] {
   border-color: transparent;
 }
 
-button[data-progress="true"] {
+button[data-progress="true"],
+.file-button[data-progress="true"] {
   overflow: hidden;
 }
 
-button[data-progress="true"]::after {
+button[data-progress="true"]::after,
+.file-button[data-progress="true"]::after {
   content: "";
   position: absolute;
   right: 0;
@@ -168,7 +171,8 @@ button[data-progress="true"]::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  button[data-progress="true"]::after {
+  button[data-progress="true"]::after,
+  .file-button[data-progress="true"]::after {
     animation: none;
   }
 }

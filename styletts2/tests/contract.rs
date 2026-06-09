@@ -537,34 +537,39 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 }
 
 #[test]
-fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
+fn speech_spine_lowers_to_ipa_text_without_lexical_stress_for_styletts2() {
     for (input, expected) in [
-        ("I R", "ˈaɪj ˈɑːɹ"),
-        ("city", "sˈɪtiː"),
-        ("world", "wˈɜːɹld"),
+        ("I R", "aɪj ɑːɹ"),
+        ("city", "sɪtiː"),
+        ("world", "wɝld"),
         (
             "I’ll inspect the current English rule.",
-            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl↘ .",
+            "aɪl ɪnspɛkt ðə kɝənt ɪŋɡlɪʃ ɹuːl↘ .",
         ),
-        ("StyleTTS2", "stˈaɪl tˈiː tˈiːj ˈɛs tˈuː"),
+        ("StyleTTS2", "staɪl tiː tiːj ɛs tuː"),
         (
             "I've traveled the world and the seven seas.",
-            "ˈaɪv tɹˈævəld ðə wˈɜːɹld ənd ðə sˈɛvən sˈiːz↘ .",
+            "aɪv tɹævəld ðə wɝld ənd ðə sɛvən siːz↘ .",
         ),
-        ("current", "kˈɜːɹənt"),
-        ("derived", "dᵻɹˈaɪvd"),
-        ("surface", "sˈɜːɹfəs"),
+        ("current", "kɝənt"),
+        ("derived", "dɚaɪvd"),
+        ("surface", "sɝfəs"),
         (
             "That points to a real phonological rule.",
-            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːl fˌoʊnəlˈɑːdʒɪkəl ɹˈuːl↘ .",
+            "ðæt pɔɪnts tuː ə ɹiːl foʊnəlɑːdʒɪkəl ɹuːl↘ .",
         ),
+        ("What is your name?", "wʌt ɪz jɔːɹ neɪm↘ ?"),
         (
             "Want to see hundreds of baby herons? Go to King County's busiest dog park.",
-            "wˈɑːnt tə sˈiː hˈʌndɹədz əv bˈeɪbiː hˈɛɹənz↗ ?  || ɡˈoʊ tə kˈɪŋ kˈaʊntiːz bˈɪziːəst dˈɔːɡ pˈɑːɹk↘ .",
+            "wɑːnt tə siː hʌndɹədz əv beɪbiː hɛɹənz↗ ?  || ɡoʊ tə kɪŋ kaʊntiːz bɪziːəst dɔːɡ pɑːɹk↘ .",
         ),
     ] {
         let actual = styletts2_text_from_english(input);
         assert_eq!(actual, expected, "{input}");
+        assert!(
+            !actual.contains('ˈ') && !actual.contains('ˌ'),
+            "{input} should not lower lexical stress markers for StyleTTS2: {actual}"
+        );
         for arpabet in ["AY", "ER", "DH"] {
             assert!(
                 !actual.contains(arpabet),
@@ -572,6 +577,26 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
             );
         }
     }
+}
+
+#[test]
+fn english_er_lowers_as_r_colored_vowel_for_styletts2() {
+    let actual = styletts2_text_from_english(
+        "I come from the water my pulse beats harder so far from the water.",
+    );
+
+    assert!(
+        actual.contains("wɔːtɚ"),
+        "water should retain r-colored unstressed ER for StyleTTS2: {actual}"
+    );
+    assert!(
+        actual.contains("hɑːɹdɚ"),
+        "harder should retain r-colored unstressed ER for StyleTTS2: {actual}"
+    );
+    assert!(
+        !actual.contains("ᵻɹ"),
+        "unstressed ER should not lower as decomposed ᵻɹ for StyleTTS2: {actual}"
+    );
 }
 
 #[test]

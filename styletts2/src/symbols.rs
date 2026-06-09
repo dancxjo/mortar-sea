@@ -5,7 +5,7 @@ use serde_json::Value;
 use speech::{
     BoundaryKind, FeatureId, FeatureValue, LinguisticVariety, PauseKind, PhoneInventory,
     PhoneToken, PhonemeInventory, PhonemeToken, ProsodicLabelKind, ProsodyTrack, Spec,
-    SpeechBoundaryToken, Stress, Syllable, TerminalPunctuation, UtterancePlan, data::arpabet,
+    SpeechBoundaryToken, Syllable, TerminalPunctuation, UtterancePlan, data::arpabet,
     epenthetic_phones_after, variety_by_code,
 };
 use thiserror::Error;
@@ -350,13 +350,16 @@ impl SymbolSet {
         let mut phoneme_symbols = PhoneBackedPhonemeSymbols::new(self, phonemes)?;
 
         for syllable in syllables {
-            let stress_marker = stress_marker(syllable_stress(syllable));
-            let nucleus_index = syllable.nucleus_index;
-            for (phone_index, phone) in syllable.phones.iter().enumerate() {
+            let mut previous_was_r_colored_vowel = false;
+            for phone in &syllable.phones {
                 let Some(token_id) = spec_token_id(&phone.phone) else {
                     continue;
                 };
                 if token_id.starts_with("boundary.") {
+                    continue;
+                }
+                if previous_was_r_colored_vowel && is_syllabified_rhotic_coda(phone) {
+                    previous_was_r_colored_vowel = false;
                     continue;
                 }
                 let word_index = phone_usize_feature(phone, "orthography.word_index");
@@ -366,21 +369,13 @@ impl SymbolSet {
                 {
                     self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
                 }
-                if nucleus_index == Some(phone_index)
-                    && let Some(marker) = stress_marker
-                {
-                    self.push_boundary_symbol(
-                        &mut lowered,
-                        marker,
-                        StyleTts2SymbolSource::Boundary,
-                    );
-                }
                 if let Some(symbol) = phoneme_symbols.symbol_for_phone(phone) {
                     lowered.push(StyleTts2SymbolToken {
                         symbol,
                         source: StyleTts2SymbolSource::Phoneme,
                     });
                     previous_word_index = word_index.or(previous_word_index);
+                    previous_was_r_colored_vowel = is_r_colored_vowel_phone(phone);
                     continue;
                 }
                 lowered.push(StyleTts2SymbolToken {
@@ -388,6 +383,7 @@ impl SymbolSet {
                     source: StyleTts2SymbolSource::Phone,
                 });
                 previous_word_index = word_index.or(previous_word_index);
+                previous_was_r_colored_vowel = is_r_colored_vowel_phone(phone);
             }
         }
 
@@ -587,6 +583,15 @@ fn phone_should_lower_as_underlying_phoneme(phone: &PhoneToken) -> bool {
     matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɾ")
 }
 
+fn is_r_colored_vowel_phone(phone: &PhoneToken) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if matches!(id.as_str(), "ipa.phone.ɚ" | "ipa.phone.ɝ"))
+}
+
+fn is_syllabified_rhotic_coda(phone: &PhoneToken) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɹ")
+        && phone.provenance.method == "rhotic vowel coda r from syllabification"
+}
+
 pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     let arpabet_symbols = [
         "AA", "AE", "AH", "AO", "AW", "AY", "B", "CH", "D", "DH", "EH", "ER", "EY", "F", "G", "HH",
@@ -594,14 +599,12 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
     let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ"];
-    let stress_symbols = ["ˈ", "ˌ"];
     let intonation_symbols = ["↗", "↘", "→"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
         arpabet_symbols
             .into_iter()
             .chain(ipa_phone_symbols.into_iter())
-            .chain(stress_symbols.into_iter())
             .chain(intonation_symbols.into_iter())
             .chain(punctuation_symbols.into_iter()),
     );
@@ -788,24 +791,6 @@ fn phone_usize_feature(token: &PhoneToken, feature_id: &str) -> Option<usize> {
     let value = token.features.values.get(&FeatureId(feature_id.into()))?;
     match value {
         Spec::Known(FeatureValue::Number(index)) if *index >= 0.0 => Some(*index as usize),
-        _ => None,
-    }
-}
-
-fn syllable_stress(syllable: &Syllable) -> Option<Stress> {
-    match syllable.stress {
-        Spec::Known(Stress::Primary) => Some(Stress::Primary),
-        Spec::Known(Stress::Secondary) => Some(Stress::Secondary),
-        Spec::Known(Stress::Unstressed) => Some(Stress::Unstressed),
-        Spec::Known(Stress::Reduced) => Some(Stress::Reduced),
-        _ => None,
-    }
-}
-
-fn stress_marker(stress: Option<Stress>) -> Option<&'static str> {
-    match stress {
-        Some(Stress::Primary) => Some("ˈ"),
-        Some(Stress::Secondary) => Some("ˌ"),
         _ => None,
     }
 }

@@ -26,7 +26,7 @@
 
       <section class="transcript-panel" aria-labelledby="transcript-heading">
         <header>
-          <h2 id="transcript-heading">Transcript</h2>
+          <h2 id="transcript-heading">Transcribe</h2>
           <div class="transcript-controls">
             <span id="phoneme-detail">Waiting</span>
             <span id="alignment-detail">No alignment</span>
@@ -87,7 +87,7 @@
           <details class="voice-details">
             <summary>Add speaker WAV</summary>
             <div class="voice-actions">
-              <label class="file-button labeled-icon-button" for="styletts2-voice-file" title="Upload voice WAV" aria-label="Upload voice WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
+              <label id="styletts2-voice-upload-control" class="file-button labeled-icon-button" for="styletts2-voice-file" title="Upload voice WAV" aria-label="Upload voice WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
               <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
               <button type="button" id="record-styletts2-voice" class="labeled-icon-button" title="Record voice sample" aria-label="Start recording voice sample" aria-pressed="false" data-state="idle"><i data-lucide="circle" aria-hidden="true">&#9679;</i><span>Record</span></button>
             </div>
@@ -100,7 +100,7 @@
             <span>Add source WAV</span>
           </header>
           <div class="audio-source-controls" aria-label="Add audio">
-            <label class="file-button labeled-icon-button" for="wav-file" title="Upload WAV" aria-label="Upload WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
+            <label id="wav-upload-control" class="file-button labeled-icon-button" for="wav-file" title="Upload WAV" aria-label="Upload WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
             <input id="wav-file" type="file" accept="audio/wav,.wav" />
             <button type="button" id="record" class="labeled-icon-button" title="Record audio" aria-label="Start recording audio" aria-pressed="false" data-state="idle"><i data-lucide="circle" aria-hidden="true">&#9679;</i><span>Record</span></button>
           </div>

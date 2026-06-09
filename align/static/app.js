@@ -74,12 +74,14 @@ window.addEventListener('DOMContentLoaded', () => {
     'styletts2-voice',
     'styletts2-style',
     'refresh-voices',
+    'styletts2-voice-upload-control',
     'styletts2-voice-file',
     'record-styletts2-voice',
     'voice-detail',
     'phonemicize',
     'synthesize',
     'align',
+    'wav-upload-control',
     'wav-file',
     'record',
     'audio',
@@ -147,7 +149,9 @@ window.addEventListener('DOMContentLoaded', () => {
     savePreferences();
     markActionInputsChanged();
   });
-  elements['refresh-voices'].addEventListener('click', loadStyleTts2Voices);
+  elements['refresh-voices'].addEventListener('click', () => {
+    loadStyleTts2Voices({ progressControl: elements['refresh-voices'] });
+  });
   elements['styletts2-voice-file'].addEventListener('change', uploadSelectedStyleTts2VoiceFile);
   elements['wav-file'].addEventListener('change', uploadSelectedFile);
   elements.record.addEventListener('click', () => toggleRecording('audio'));
@@ -277,6 +281,8 @@ async function phonemicize() {
     renderPhonemicization(payload);
     clearAlignment();
     setStatus('Phonemicized');
+  }, {
+    progressControl: elements.phonemicize,
   });
 }
 
@@ -297,10 +303,13 @@ async function synthesize() {
     }
     setStatus(`Synthesized with ${elements.backend.value}`);
     await alignAudio();
+  }, {
+    progressControl: elements.synthesize,
   });
 }
 
-async function loadStyleTts2Voices() {
+async function loadStyleTts2Voices(options = {}) {
+  setControlProgress(options.progressControl, true);
   try {
     const selectedVoice = state.pendingStyletts2Voice || elements['styletts2-voice'].value;
     const selectedStyle = state.pendingStyletts2Style || elements['styletts2-style'].value;
@@ -328,6 +337,7 @@ async function loadStyleTts2Voices() {
   } catch (error) {
     elements['voice-detail'].textContent = error.message || String(error);
   } finally {
+    setControlProgress(options.progressControl, false);
     syncVoiceSelector();
   }
 }
@@ -382,6 +392,7 @@ async function runJsonAction(url, body, onSuccess, options = {}) {
   state.nextActionId = actionId;
   state.latestActionId = actionId;
   const requestInputVersion = state.inputVersion;
+  setControlProgress(options.progressControl, true);
   setBusy(true);
   setStatus(options.status || 'Working');
   try {
@@ -402,6 +413,7 @@ async function runJsonAction(url, body, onSuccess, options = {}) {
     if (actionId === state.latestActionId) setStatus(error.message || String(error), 'error');
     return false;
   } finally {
+    setControlProgress(options.progressControl, false);
     setBusy(false);
   }
 }
@@ -409,18 +421,21 @@ async function runJsonAction(url, body, onSuccess, options = {}) {
 async function uploadSelectedFile(event) {
   const [file] = event.target.files || [];
   if (!file) return;
-  await uploadWav(file, file.name);
+  await uploadWav(file, file.name, { progressControl: elements['wav-upload-control'] });
   event.target.value = '';
 }
 
 async function uploadSelectedStyleTts2VoiceFile(event) {
   const [file] = event.target.files || [];
   if (!file) return;
-  await uploadStyleTts2Voice(file, file.name);
+  await uploadStyleTts2Voice(file, file.name, {
+    progressControl: elements['styletts2-voice-upload-control'],
+  });
   event.target.value = '';
 }
 
-async function uploadWav(blob, filename) {
+async function uploadWav(blob, filename, options = {}) {
+  setControlProgress(options.progressControl, true);
   setBusy(true);
   setStatus('Uploading');
   try {
@@ -438,11 +453,13 @@ async function uploadWav(blob, filename) {
   } catch (error) {
     setStatus(error.message || String(error), 'error');
   } finally {
+    setControlProgress(options.progressControl, false);
     setBusy(false);
   }
 }
 
-async function uploadStyleTts2Voice(blob, filename) {
+async function uploadStyleTts2Voice(blob, filename, options = {}) {
+  setControlProgress(options.progressControl, true);
   setBusy(true);
   setStatus('Saving StyleTTS2 voice sample');
   try {
@@ -472,6 +489,7 @@ async function uploadStyleTts2Voice(blob, filename) {
   } catch (error) {
     setStatus(error.message || String(error), 'error');
   } finally {
+    setControlProgress(options.progressControl, false);
     setBusy(false);
   }
 }
@@ -538,9 +556,11 @@ async function stopRecording() {
   const wav = encodeWav(flattenChunks(state.recordingChunks), state.recordingSampleRate || 48000);
   state.recordingChunks = [];
   if (target === 'styletts2Voice') {
-    await uploadStyleTts2Voice(wav, `voice-sample-${Date.now()}.wav`);
+    await uploadStyleTts2Voice(wav, `voice-sample-${Date.now()}.wav`, {
+      progressControl: elements['record-styletts2-voice'],
+    });
   } else {
-    await uploadWav(wav, `recording-${Date.now()}.wav`);
+    await uploadWav(wav, `recording-${Date.now()}.wav`, { progressControl: elements.record });
   }
 }
 
@@ -1874,6 +1894,17 @@ function toggleIr() {
   );
 }
 
+function setControlProgress(control, inProgress) {
+  if (!control) return;
+  if (inProgress) {
+    control.setAttribute('aria-busy', 'true');
+    control.dataset.progress = 'true';
+  } else {
+    control.removeAttribute('aria-busy');
+    delete control.dataset.progress;
+  }
+}
+
 function setBusy(busy) {
   state.activeActionCount = Math.max(0, state.activeActionCount + (busy ? 1 : -1));
   if (busy) state.inputsChangedDuringAction = false;
@@ -1898,13 +1929,7 @@ function updateActionButtons() {
 function setAlignProgress(inProgress) {
   state.alignInProgress = inProgress;
   elements.align.textContent = inProgress ? 'Aligning...' : 'Align ASR';
-  if (inProgress) {
-    elements.align.setAttribute('aria-busy', 'true');
-    elements.align.dataset.progress = 'true';
-  } else {
-    elements.align.removeAttribute('aria-busy');
-    delete elements.align.dataset.progress;
-  }
+  setControlProgress(elements.align, inProgress);
   updateActionButtons();
 }
 
