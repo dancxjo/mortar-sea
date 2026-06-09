@@ -199,15 +199,35 @@ textarea:focus-visible,
 
 .daw-focus .shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   width: calc(100vw - 24px);
   height: 100vh;
   padding: 8px 0;
 }
 
-.daw-focus .top-section,
 .daw-focus .secondary-grid {
   display: none;
+}
+
+.top-section {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  overflow: hidden;
+  transition:
+    grid-template-rows 220ms ease,
+    opacity 160ms ease;
+}
+
+.top-section-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.daw-focus .top-section {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .topbar,
