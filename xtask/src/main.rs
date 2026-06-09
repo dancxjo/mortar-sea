@@ -68,6 +68,7 @@ fn prepare_llama_cpp_sys() -> Result<(), Box<dyn std::error::Error>> {
             .current_dir(&patched_dir),
     )?;
     verify_llama_cpp_sys_patch(&patched_dir)?;
+    verify_bindgen_prerequisites()?;
 
     println!(
         "prepared patched {CRATE_NAME} {CRATE_VERSION} at {}",
@@ -116,6 +117,83 @@ fn verify_llama_cpp_sys_patch(patched_dir: &Path) -> Result<(), Box<dyn std::err
             clip_cpp.display()
         )
         .into())
+    }
+}
+
+fn verify_bindgen_prerequisites() -> Result<(), Box<dyn std::error::Error>> {
+    if clang_resource_header_exists("stdbool.h") {
+        return Ok(());
+    }
+
+    Err(concat!(
+        "bindgen cannot find clang's builtin C headers; llama-cpp-sys will fail ",
+        "with errors like `fatal error: 'stdbool.h' file not found`.\n",
+        "Install clang's development/resource headers and rerun this task.\n",
+        "On Ubuntu 24.04, run: sudo apt install clang-18 libclang-18-dev\n",
+        "Generic Debian/Ubuntu fallback: sudo apt install clang libclang-dev"
+    )
+    .into())
+}
+
+fn clang_resource_header_exists(header: &str) -> bool {
+    clang_print_resource_dir()
+        .into_iter()
+        .chain(clang_resource_dir_candidates())
+        .any(|dir| dir.join("include").join(header).exists())
+}
+
+fn clang_print_resource_dir() -> Option<PathBuf> {
+    let output = Command::new("clang")
+        .arg("-print-resource-dir")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let path = stdout.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn clang_resource_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    collect_child_dirs(Path::new("/usr/lib/clang"), &mut dirs);
+    collect_llvm_clang_dirs(Path::new("/usr/lib"), &mut dirs);
+    dirs
+}
+
+fn collect_child_dirs(parent: &Path, dirs: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            dirs.push(entry.path());
+        }
+    }
+}
+
+fn collect_llvm_clang_dirs(parent: &Path, dirs: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("llvm-")
+            || !entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+        {
+            continue;
+        }
+        collect_child_dirs(&entry.path().join("lib/clang"), dirs);
     }
 }
 
