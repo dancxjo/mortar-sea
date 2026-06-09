@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::{
     ASR_SAMPLE_RATE_HZ, AlignBackend, AlignRequestBody, AlignmentResponse, AppError, AppState,
     DEFAULT_ALIGN_ADDR, PhonemicizeRequestBody, PhonemicizeResponse, StyleTts2Voice,
-    StyleTts2VoicesResponse, SynthesizeRequestBody, SynthesizeResponse, UploadResponse,
+    StyleTts2VoiceUploadResponse, StyleTts2VoicesResponse, SynthesizeRequestBody,
+    SynthesizeResponse, UploadResponse,
 };
 use crate::{
     alignment::{
@@ -59,6 +60,7 @@ pub async fn run() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/styletts2/voices", get(styletts2_voices))
+        .route("/api/styletts2/voices/upload", post(upload_styletts2_voice))
         .route("/api/phonemicize", post(phonemicize))
         .route("/api/synthesize", post(synthesize))
         .route("/api/audio/upload", post(upload_audio))
@@ -163,15 +165,96 @@ async fn list_styletts2_voices(dir: &Path) -> Result<Vec<StyleTts2Voice>, AppErr
         if !is_wav_filename(&name) {
             continue;
         }
-        let label = Path::new(&name)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(&name)
-            .replace(['_', '-'], " ");
-        voices.push(StyleTts2Voice { id: name, label });
+        voices.push(styletts2_voice_from_filename(name));
     }
     voices.sort_by(|left, right| left.label.cmp(&right.label).then(left.id.cmp(&right.id)));
     Ok(voices)
+}
+
+async fn upload_styletts2_voice(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<StyleTts2VoiceUploadResponse>, AppError> {
+    while let Some(field) = multipart.next_field().await? {
+        if field.name() != Some("file") {
+            continue;
+        }
+
+        let original_name = field
+            .file_name()
+            .map(safe_filename)
+            .filter(|name| is_wav_filename(name));
+        let bytes = field.bytes().await?;
+        validate_wav(&bytes)?;
+        let decoded = decode_wav(&bytes)?;
+        if decoded.duration_ms < 1000 {
+            return Err(AppError::bad_request(
+                "StyleTTS2 voice WAV must be at least 1 second",
+            ));
+        }
+
+        let filename = available_styletts2_voice_filename(
+            &state.styletts2_voice_dir,
+            original_name.as_deref().unwrap_or("voice-sample.wav"),
+        )
+        .await?;
+        let output_path = state.styletts2_voice_dir.join(&filename);
+        fs::write(&output_path, &bytes)
+            .await
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+
+        return Ok(Json(StyleTts2VoiceUploadResponse {
+            voice: styletts2_voice_from_filename(filename),
+            bytes: bytes.len(),
+        }));
+    }
+
+    Err(AppError::bad_request(
+        "StyleTTS2 voice upload must include a multipart `file` field",
+    ))
+}
+
+async fn available_styletts2_voice_filename(
+    dir: &Path,
+    requested_name: &str,
+) -> Result<String, AppError> {
+    let safe_name = safe_filename(requested_name);
+    let base_name = if is_wav_filename(&safe_name) {
+        safe_name
+    } else {
+        format!("{safe_name}.wav")
+    };
+    if !dir.join(&base_name).exists() {
+        return Ok(base_name);
+    }
+
+    let stem = Path::new(&base_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("voice-sample");
+    for _ in 0..32 {
+        let suffix = Uuid::new_v4().to_string();
+        let candidate = format!("{stem}-{}.wav", &suffix[..8]);
+        if !dir.join(&candidate).exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(AppError::bad_request(
+        "could not allocate a StyleTTS2 voice filename",
+    ))
+}
+
+fn styletts2_voice_from_filename(filename: String) -> StyleTts2Voice {
+    let label = Path::new(&filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&filename)
+        .replace(['_', '-'], " ");
+    StyleTts2Voice {
+        id: filename,
+        label,
+    }
 }
 
 fn selected_styletts2_voice_path(

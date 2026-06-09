@@ -856,6 +856,42 @@ mod tests {
     }
 
     #[test]
+    fn er_defaults_to_r_colored_schwa_and_uses_stressed_rhotic_vowel_in_stressed_syllables() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let default = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "ER")],
+            &RealizationOptions::default(),
+        );
+        let primary = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "ER1")],
+            &RealizationOptions::default(),
+        );
+        let secondary = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "ER2")],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&default), ["ɚ"]);
+        assert_eq!(symbols(&primary), ["ɝ"]);
+        assert!(
+            primary[0]
+                .provenance
+                .method
+                .contains("stressed_er_primary_stressed_rhotic_allophone")
+        );
+        assert_eq!(symbols(&secondary), ["ɝ"]);
+        assert!(
+            secondary[0]
+                .provenance
+                .method
+                .contains("stressed_er_secondary_stressed_rhotic_allophone")
+        );
+    }
+
+    #[test]
     fn nasal_assimilation_applies_before_velar_stops() {
         let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(

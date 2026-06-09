@@ -142,10 +142,8 @@ pub trait PronunciationPipeline {
         let mut phonemes = Vec::new();
         let mut phones = Vec::new();
         let mut warnings = Vec::new();
-        let careful_style = input
-            .style
-            .as_ref()
-            .is_some_and(|style| style.careful_style);
+        let style = input.style.clone().unwrap_or_default();
+        let careful_style = style.careful_style;
 
         for (word_index, word) in words.iter().enumerate() {
             graphemes.push(GraphemeToken {
@@ -242,9 +240,18 @@ pub struct PhonemicizeRequest {
     pub style: Option<PhonemicizeStyle>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhonemicizeStyle {
+    #[serde(default)]
     pub careful_style: bool,
+}
+
+impl Default for PhonemicizeStyle {
+    fn default() -> Self {
+        Self {
+            careful_style: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,7 +368,7 @@ impl PronunciationPipeline for EnglishPhonemicizer {
             .weak_forms
             .iter()
             .find(|rule| weak_form_rule_applies(rule, &word.normalized, context))
-            .map(|rule| weak_form_pronunciation(rule, word.text.as_str()))
+            .map(weak_form_pronunciation)
     }
 
     fn token_classifier(
@@ -858,7 +865,7 @@ fn weak_form_rule_applies(
     }
 }
 
-fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciation {
+fn weak_form_pronunciation(rule: &WeakFormRule) -> WordPronunciation {
     let candidate = if rule.cmudict_pronunciation.is_empty() {
         rule.pronunciation
             .iter()
@@ -867,10 +874,6 @@ fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciat
     } else {
         rule.cmudict_pronunciation.clone()
     };
-    let symbols = candidate
-        .iter()
-        .map(CmuPhoneme::raw_symbol)
-        .collect::<Vec<_>>();
     let method = format!("variety weak form: {}", rule.id.replace('_', " "));
     WordPronunciation {
         candidates: vec![candidate],
@@ -880,11 +883,7 @@ fn weak_form_pronunciation(rule: &WeakFormRule, surface: &str) -> WordPronunciat
             method: method.clone(),
             version: Some("0.1".into()),
         },
-        warnings: vec![PronunciationWarning {
-            token: surface.into(),
-            kind: PronunciationWarningKind::WeakFormApplied,
-            message: format!("{method}: {surface} -> {}", symbols.join(" ")),
-        }],
+        warnings: Vec::new(),
         letter_break_offsets: Vec::new(),
         letter_indices: Vec::new(),
     }
@@ -1337,6 +1336,95 @@ pub fn phone_display_symbol(id: &PhoneId) -> &str {
     id.as_str().rsplit('.').next().unwrap_or(id.as_str())
 }
 
+fn color_postvocalic_r_as_schwa(
+    variety: &LinguisticVariety,
+    phonemes: &[PhonemeToken],
+    phones: &mut [PhoneToken],
+) {
+    for index in 0..phonemes.len().min(phones.len()) {
+        if phoneme_base_symbol_for_token(&phonemes[index]) != Some("R") {
+            continue;
+        }
+        if !index
+            .checked_sub(1)
+            .and_then(|previous| phoneme_feature_category(&phonemes[previous], "major"))
+            .is_some_and(|major| major == "vowel")
+        {
+            continue;
+        }
+        if phonemes
+            .get(index + 1)
+            .and_then(|next| phoneme_feature_category(next, "major"))
+            .is_some_and(|major| major == "vowel")
+        {
+            continue;
+        }
+
+        phones[index] = r_colored_schwa_for_postvocalic_r(variety, &phones[index]);
+    }
+}
+
+fn phoneme_base_symbol_for_token(token: &PhonemeToken) -> Option<&str> {
+    phoneme_feature_category(token, "base_symbol").or_else(|| {
+        let Spec::Known(id) = &token.phoneme else {
+            return None;
+        };
+        Some(phoneme_base_symbol(id))
+    })
+}
+
+fn phoneme_feature_category<'a>(token: &'a PhonemeToken, name: &str) -> Option<&'a str> {
+    let value = token
+        .features
+        .values
+        .get(&FeatureId(format!("phonology.{name}")))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn r_colored_schwa_for_postvocalic_r(
+    variety: &LinguisticVariety,
+    source: &PhoneToken,
+) -> PhoneToken {
+    let phone = arpabet::phone_id_for_ipa("ɚ");
+    let mut features = variety
+        .phones
+        .phones
+        .get(&phone)
+        .map(|phone| phone.features.clone())
+        .unwrap_or_default();
+    for (id, value) in &source.features.values {
+        if id.0.starts_with("orthography.") {
+            features.values.insert(id.clone(), value.clone());
+        }
+    }
+    features.values.insert(
+        FeatureId("phonology.postvocalic_r_coloring".into()),
+        Spec::Known(FeatureValue::Bool(true)),
+    );
+    features.values.insert(
+        FeatureId("phonology.syllabic".into()),
+        Spec::Known(FeatureValue::Bool(false)),
+    );
+
+    PhoneToken {
+        phone: Spec::Known(phone),
+        span: source.span,
+        features,
+        acoustic_evidence: Vec::new(),
+        confidence: source.confidence,
+        provenance: EvidenceProvenance {
+            source: EvidenceSource::Rule,
+            method: "postvocalic r colored as schwa in non-r-ful style".into(),
+            version: Some("0.1".into()),
+        },
+    }
+}
+
 pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {
     let symbol = phoneme_display_symbol(id);
     split_stress(symbol).0
@@ -1352,6 +1440,18 @@ mod tests {
             text: text.into(),
             variety: VarietyId(variety.into()),
             style: None,
+        }
+    }
+
+    fn request_with_style(
+        text: &str,
+        variety: &str,
+        style: PhonemicizeStyle,
+    ) -> PhonemicizeRequest {
+        PhonemicizeRequest {
+            text: text.into(),
+            variety: VarietyId(variety.into()),
+            style: Some(style),
         }
     }
 
@@ -1529,10 +1629,13 @@ mod tests {
             .expect("the cat");
         assert_eq!(&phone_symbols(&the_cat)[..2], ["ð", "ə"]);
         assert!(!phone_symbols(&the_cat)[..2].contains(&"ʌ".into()));
-        assert!(the_cat.warnings.iter().any(|warning| {
-            warning.kind == PronunciationWarningKind::WeakFormApplied
-                && warning.message.contains("the before consonant")
-        }));
+        assert!(the_cat.warnings.is_empty());
+        assert!(
+            the_cat.phonemes[0]
+                .provenance
+                .method
+                .contains("the before consonant")
+        );
 
         let the_apple = EnglishPhonemicizer
             .phonemicize(&request("the apple", "en-US"))
@@ -1571,6 +1674,48 @@ mod tests {
             .phonemicize(&request("strut", "en-US"))
             .expect("strut");
         assert!(phone_symbols(&strut).contains(&"ʌ".into()));
+    }
+
+    #[test]
+    fn non_r_ful_style_colors_postvocalic_r_as_schwa() {
+        let compared = EnglishPhonemicizer
+            .phonemicize(&request_with_style(
+                "compared",
+                "en-US",
+                PhonemicizeStyle {
+                    r_fullness: false,
+                    ..PhonemicizeStyle::default()
+                },
+            ))
+            .expect("compared");
+        assert_eq!(
+            phone_symbols(&compared),
+            ["k", "ə", "m", "pʰ", "ɛ", "ɚ", "d"]
+        );
+        assert_eq!(compared.syllables[1].phones.len(), 4);
+        assert_eq!(
+            compared.syllables[1]
+                .phones
+                .iter()
+                .filter_map(|phone| match &phone.phone {
+                    Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["pʰ", "ɛ", "ɚ", "d"]
+        );
+
+        let fairy = EnglishPhonemicizer
+            .phonemicize(&request_with_style(
+                "fairy",
+                "en-US",
+                PhonemicizeStyle {
+                    r_fullness: false,
+                    ..PhonemicizeStyle::default()
+                },
+            ))
+            .expect("fairy");
+        assert!(phone_symbols(&fairy).contains(&"ɹ".into()));
     }
 
     #[test]
@@ -1652,6 +1797,7 @@ mod tests {
                 variety: VarietyId("en-US-GA".into()),
                 style: Some(PhonemicizeStyle {
                     careful_style: true,
+                    ..PhonemicizeStyle::default()
                 }),
             })
             .expect("water careful");

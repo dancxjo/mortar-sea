@@ -97,6 +97,12 @@ struct UploadResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct StyleTts2VoiceUploadResponse {
+    voice: StyleTts2Voice,
+    bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct StyleTts2VoicesResponse {
     directory: String,
     voices: Vec<StyleTts2Voice>,

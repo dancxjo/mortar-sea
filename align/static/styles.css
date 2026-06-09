@@ -75,9 +75,9 @@ textarea:focus-visible,
 }
 
 .shell {
-  width: min(1500px, calc(100vw - 28px));
+  width: min(1840px, calc(100vw - 24px));
   margin: 0 auto;
-  padding: 18px 0 28px;
+  padding: 14px 0 28px;
 }
 
 .topbar,
@@ -147,12 +147,15 @@ h2 {
 }
 
 .control-strip {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(120px, 0.24fr) minmax(420px, 0.9fr) minmax(132px, 0.24fr);
   align-items: stretch;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 #audio {
@@ -161,7 +164,7 @@ h2 {
 
 .audio-strip {
   display: grid;
-  grid-template-columns: 68px 58px minmax(180px, 1fr) 58px minmax(180px, 0.6fr);
+  grid-template-columns: 58px minmax(180px, 1fr) 58px minmax(180px, 0.6fr);
   align-items: center;
   gap: 10px;
   min-height: 44px;
@@ -223,28 +226,29 @@ h2 {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  min-width: 0;
 }
 
 .text-field {
-  flex: 1 1 auto;
-  min-width: 360px;
+  min-width: 0;
 }
 
 .compact-field {
-  width: 118px;
+  min-width: 0;
 }
 
 .voice-field {
-  width: 250px;
+  min-width: 0;
 }
 
-.inline-select {
+.field-group {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
 }
 
-.inline-select button {
+.renderer-grid button {
   min-height: 34px;
   padding-inline: 9px;
   background: #14191c;
@@ -252,11 +256,35 @@ h2 {
   border-color: var(--line);
 }
 
+.renderer-grid {
+  display: grid;
+  grid-template-columns: minmax(94px, 0.45fr) minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
 #voice-detail {
   min-height: 16px;
   color: var(--muted);
   font-size: 11px;
   overflow-wrap: anywhere;
+}
+
+.voice-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 58px;
+  gap: 6px;
+}
+
+.voice-actions button,
+.voice-actions .file-button {
+  min-height: 30px;
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
+.control-actions button,
+.control-actions .file-button {
+  min-height: 34px;
 }
 
 label {
@@ -272,17 +300,18 @@ select {
 }
 
 textarea {
-  min-height: 76px;
+  min-height: 92px;
   resize: vertical;
 }
 
 .button-stack {
-  width: 132px;
+  min-width: 0;
   flex-direction: column;
   align-items: stretch;
 }
 
-#wav-file {
+#wav-file,
+#styletts2-voice-file {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -292,35 +321,12 @@ textarea {
 
 .daw {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 18px;
-  margin-top: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #0b0e10;
   overflow: hidden;
-}
-
-.track-labels {
-  display: grid;
-  grid-template-rows: 34px 176px 150px 42px 42px 54px 54px 66px 54px;
-  border-right: 1px solid var(--line);
-  background: #12171a;
-}
-
-.track-labels div {
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-.track-labels div:last-child {
-  border-bottom: 0;
 }
 
 .timeline {
@@ -331,12 +337,6 @@ textarea {
 
 .timeline:active {
   cursor: crosshair;
-}
-
-.scrollbar-gutter {
-  border-top: 1px solid var(--line);
-  border-right: 1px solid var(--line);
-  background: #12171a;
 }
 
 .timeline-scrollbar {
@@ -363,10 +363,26 @@ canvas {
   border-bottom: 0;
 }
 
-.detail-grid {
+.transcription-panel {
+  margin-bottom: 12px;
+}
+
+.daw-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.daw-toolbar button {
+  min-width: 112px;
+}
+
+.secondary-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(320px, 0.75fr);
+  grid-template-columns: minmax(360px, 0.75fr) minmax(520px, 1fr);
   gap: 12px;
+  margin-top: 12px;
 }
 
 article {
@@ -376,8 +392,8 @@ article {
   padding: 12px;
 }
 
-.ir-grid {
-  margin-top: 12px;
+.transcription-card {
+  padding: 10px 12px 12px;
 }
 
 article header {
@@ -385,21 +401,28 @@ article header {
   margin-bottom: 8px;
 }
 
+article header button {
+  min-height: 28px;
+  padding: 4px 9px;
+}
+
 article header span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.compact-readout {
+.transcription-readout {
   margin: 0;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
-.compact-readout div {
+.transcription-readout div {
   display: grid;
-  grid-template-columns: 86px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 dt {
@@ -410,6 +433,28 @@ dt {
 dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.transcription-readout dd {
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0d1012;
+  color: var(--ink);
+  font: 20px/1.25 "Charis SIL", "Doulos SIL", "Noto Sans", Inter, sans-serif;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  scrollbar-color: var(--accent) #151a1d;
+}
+
+#warnings {
+  color: var(--muted);
+  font: 13px/1.35 Inter, ui-sans-serif, system-ui, sans-serif;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 
 pre {
@@ -432,6 +477,31 @@ pre {
   color: var(--muted);
 }
 
+@media (max-width: 1320px) {
+  .control-strip {
+    grid-template-columns: minmax(420px, 1fr) minmax(360px, 0.85fr) minmax(126px, 0.24fr);
+  }
+
+  .control-settings {
+    grid-column: 1;
+    grid-template-columns: minmax(120px, 180px) auto;
+    align-items: end;
+  }
+
+  .control-voice {
+    grid-column: 2;
+  }
+
+  .control-actions {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+
+  .control-primary {
+    grid-column: 1 / span 2;
+  }
+}
+
 @media (max-width: 980px) {
   .shell {
     width: min(100vw - 18px, 860px);
@@ -440,8 +510,9 @@ pre {
 
   .topbar,
   .control-strip,
-  .detail-grid,
-  .audio-strip {
+  .secondary-grid,
+  .audio-strip,
+  .control-settings {
     display: block;
   }
 
@@ -468,13 +539,26 @@ pre {
     min-width: 0;
   }
 
-  .daw {
-    grid-template-columns: 82px minmax(0, 1fr);
+  .renderer-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .track-labels div {
-    padding: 0 8px;
-    font-size: 11px;
+  .transcription-readout div {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .transcription-readout dd {
+    font-size: 18px;
+  }
+
+  .daw-toolbar {
+    justify-content: stretch;
+  }
+
+  .daw-toolbar button {
+    flex: 1 1 0;
+    min-width: 0;
   }
 
 }

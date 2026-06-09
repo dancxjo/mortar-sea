@@ -22,39 +22,39 @@
         </div>
       </header>
 
-      <section class="control-strip">
-        <div class="field text-field">
+      <section class="control-strip" aria-label="Alignment controls">
+        <div class="field text-field control-primary">
           <label for="text">Text</label>
           <textarea id="text" spellcheck="true">hello world</textarea>
         </div>
-        <div class="field compact-field">
-          <label for="variety">Variety</label>
-          <input id="variety" name="variety" value="en-US" autocomplete="off" />
+        <div class="field-group control-settings">
+          <div class="field compact-field">
+            <label for="variety">Variety</label>
+            <input id="variety" name="variety" value="en-US" autocomplete="off" />
+          </div>
         </div>
-        <div class="field compact-field">
+        <div class="field voice-field control-voice">
           <label for="backend">Renderer</label>
-          <select id="backend" aria-label="Renderer">
-            <option value="mock">mock</option>
-            <option value="piper">piper</option>
-            <option value="styletts2" selected>styletts2</option>
-          </select>
-        </div>
-        <div class="field voice-field">
-          <label for="styletts2-voice">StyleTTS2 voice</label>
-          <div class="inline-select">
+          <div class="renderer-grid">
+            <select id="backend" aria-label="Renderer">
+              <option value="mock">mock</option>
+              <option value="piper">piper</option>
+              <option value="styletts2" selected>styletts2</option>
+            </select>
             <select id="styletts2-voice" aria-label="StyleTTS2 voice">
               <option value="">default reference</option>
             </select>
             <button type="button" id="refresh-voices" title="Refresh voices">Refresh</button>
           </div>
+          <div class="voice-actions">
+            <label class="file-button" for="styletts2-voice-file">Upload sample</label>
+            <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
+            <button type="button" id="record-styletts2-voice">Record sample</button>
+            <button type="button" id="stop-styletts2-voice-recording" disabled>Stop</button>
+          </div>
           <span id="voice-detail">Drop WAVs in voices/styletts2</span>
         </div>
-        <div class="button-stack">
-          <button type="button" id="phonemicize">Phonemicize</button>
-          <button type="button" id="synthesize">Synthesize</button>
-          <button type="button" id="align">Align ASR</button>
-        </div>
-        <div class="button-stack">
+        <div class="button-stack control-actions">
           <label class="file-button" for="wav-file">Upload WAV</label>
           <input id="wav-file" type="file" accept="audio/wav,.wav" />
           <button type="button" id="record">Record</button>
@@ -64,7 +64,6 @@
 
       <audio id="audio" preload="metadata"></audio>
       <section class="audio-strip" aria-label="Audio playback">
-        <button type="button" id="audio-play-toggle" title="Play audio">Play</button>
         <div class="audio-time" id="audio-position">0.00s</div>
         <div class="audio-progress" id="audio-progress" role="slider" aria-label="Audio position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
           <div class="audio-progress-fill" id="audio-progress-fill"></div>
@@ -74,41 +73,28 @@
         <div class="audio-detail" id="audio-detail">No audio loaded</div>
       </section>
 
-      <section class="detail-grid">
-        <article>
+      <section class="transcription-panel" aria-label="IPA transcription">
+        <article class="transcription-card">
           <header>
-            <h2>Phonemicization</h2>
+            <h2>IPA transcription</h2>
             <span id="phoneme-detail">Waiting</span>
+            <button type="button" id="phonemicize">Phonemicize</button>
           </header>
-          <dl class="compact-readout">
+          <dl class="transcription-readout">
             <div><dt>Phonemes</dt><dd id="phonemes"></dd></div>
             <div><dt>Phones</dt><dd id="phones"></dd></div>
             <div><dt>Syllables</dt><dd id="syllables"></dd></div>
             <div><dt>Warnings</dt><dd id="warnings"></dd></div>
           </dl>
         </article>
+      </section>
 
-        <article>
-          <header>
-            <h2>ASR</h2>
-            <span id="alignment-detail">No alignment</span>
-          </header>
-          <pre id="asr"></pre>
-        </article>
+      <section class="daw-toolbar" aria-label="DAW actions">
+        <button type="button" id="synthesize">Synthesize</button>
+        <button type="button" id="audio-play-toggle" title="Play audio">Play</button>
       </section>
 
       <section class="daw">
-        <aside class="track-labels" aria-hidden="true">
-          <div class="corner-label">Time</div>
-          <div>Wave</div>
-          <div>Spectrum</div>
-          <div>voicing</div>
-          <div>Projected</div>
-          <div>Candidates</div>
-          <div>Words</div>
-          <div>Phonemes</div>
-          <div>Phones</div>
-        </aside>
         <section class="timeline" id="timeline">
           <canvas id="ruler" height="34"></canvas>
           <canvas id="waveform" height="176"></canvas>
@@ -120,13 +106,20 @@
           <canvas id="phoneme-track" height="66"></canvas>
           <canvas id="phone-track" height="54"></canvas>
         </section>
-        <div class="scrollbar-gutter" aria-hidden="true"></div>
         <div class="timeline-scrollbar" id="timeline-scrollbar" aria-label="Timeline horizontal scroll">
           <div class="timeline-scrollbar-spacer" id="timeline-scrollbar-spacer"></div>
         </div>
       </section>
 
-      <section class="ir-grid">
+      <section class="secondary-grid">
+        <article>
+          <header>
+            <h2>ASR</h2>
+            <span id="alignment-detail">No alignment</span>
+            <button type="button" id="align">Align ASR</button>
+          </header>
+          <pre id="asr"></pre>
+        </article>
         <article>
           <header>
             <h2>Speech IR</h2>

@@ -29,3 +29,4 @@ qdrant_data/
 .env
 qdrant_data/
 neo4j_data/
+voices/styletts2/*

@@ -13,10 +13,16 @@ const state = {
   recordingChunks: [],
   recordingSampleRate: 0,
   recording: false,
+  recordingTarget: '',
   irVisible: false,
   currentAudioUrl: '',
   currentPhonemicization: null,
   currentAlignment: null,
+  inputVersion: 0,
+  activeActionCount: 0,
+  inputsChangedDuringAction: false,
+  nextActionId: 0,
+  latestActionId: 0,
   styletts2VoiceDir: 'voices/styletts2',
   pendingStyletts2Voice: '',
   audioBuffer: null,
@@ -50,6 +56,9 @@ window.addEventListener('DOMContentLoaded', () => {
     'backend',
     'styletts2-voice',
     'refresh-voices',
+    'styletts2-voice-file',
+    'record-styletts2-voice',
+    'stop-styletts2-voice-recording',
     'voice-detail',
     'phonemicize',
     'synthesize',
@@ -98,22 +107,35 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   elements.phonemicize.addEventListener('click', phonemicize);
+  elements.text.addEventListener('input', markActionInputsChanged);
+  elements.text.addEventListener('change', markActionInputsChanged);
   elements.synthesize.addEventListener('click', synthesize);
   elements.align.addEventListener('click', alignAudio);
   elements.backend.addEventListener('change', () => {
     syncVoiceSelector();
     savePreferences();
+    markActionInputsChanged();
   });
   elements['styletts2-voice'].addEventListener('change', () => {
     state.pendingStyletts2Voice = elements['styletts2-voice'].value;
     savePreferences();
+    markActionInputsChanged();
   });
-  elements.variety.addEventListener('change', savePreferences);
-  elements.variety.addEventListener('input', savePreferences);
+  elements.variety.addEventListener('change', () => {
+    savePreferences();
+    markActionInputsChanged();
+  });
+  elements.variety.addEventListener('input', () => {
+    savePreferences();
+    markActionInputsChanged();
+  });
   elements['refresh-voices'].addEventListener('click', loadStyleTts2Voices);
+  elements['styletts2-voice-file'].addEventListener('change', uploadSelectedStyleTts2VoiceFile);
   elements['wav-file'].addEventListener('change', uploadSelectedFile);
-  elements.record.addEventListener('click', startRecording);
+  elements.record.addEventListener('click', () => startRecording('audio'));
   elements['stop-recording'].addEventListener('click', stopRecording);
+  elements['record-styletts2-voice'].addEventListener('click', () => startRecording('styletts2Voice'));
+  elements['stop-styletts2-voice-recording'].addEventListener('click', stopRecording);
   elements['toggle-ir'].addEventListener('click', toggleIr);
   elements['zoom-in'].addEventListener('click', () => zoomAtCenter(1.45));
   elements['zoom-out'].addEventListener('click', () => zoomAtCenter(1 / 1.45));
@@ -158,6 +180,7 @@ window.addEventListener('DOMContentLoaded', () => {
   loadStyleTts2Voices();
   syncVoiceSelector();
   updateAudioTransport();
+  updateRecordingControls();
   drawAll();
 });
 
@@ -206,6 +229,7 @@ async function phonemicize() {
 }
 
 async function synthesize() {
+  const synthesisInputVersion = state.inputVersion;
   await runJsonAction('/api/synthesize', {
     text: elements.text.value,
     variety: elements.variety.value || 'en-US',
@@ -214,6 +238,10 @@ async function synthesize() {
   }, async (payload) => {
     renderPhonemicization(payload.phonemicization);
     await setAudio(payload.audio_url, `${payload.duration_ms} ms, ${payload.samples} samples`);
+    if (synthesisInputVersion !== state.inputVersion) {
+      setStatus('Inputs changed; run again');
+      return;
+    }
     setStatus(`Synthesized with ${elements.backend.value}`);
     await alignAudio();
   });
@@ -258,6 +286,8 @@ function syncVoiceSelector() {
   const enabled = elements.backend.value === 'styletts2';
   elements['styletts2-voice'].disabled = !enabled;
   elements['refresh-voices'].disabled = false;
+  elements['styletts2-voice-file'].disabled = !enabled;
+  updateRecordingControls();
 }
 
 async function alignAudio() {
@@ -277,6 +307,10 @@ async function alignAudio() {
 }
 
 async function runJsonAction(url, body, onSuccess) {
+  const actionId = state.nextActionId + 1;
+  state.nextActionId = actionId;
+  state.latestActionId = actionId;
+  const requestInputVersion = state.inputVersion;
   setBusy(true);
   setStatus('Working');
   try {
@@ -287,9 +321,13 @@ async function runJsonAction(url, body, onSuccess) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || response.statusText);
+    if (requestInputVersion !== state.inputVersion) {
+      if (actionId === state.latestActionId) setStatus('Inputs changed; run again');
+      return;
+    }
     await onSuccess(payload);
   } catch (error) {
-    setStatus(error.message || String(error), 'error');
+    if (actionId === state.latestActionId) setStatus(error.message || String(error), 'error');
   } finally {
     setBusy(false);
   }
@@ -299,6 +337,13 @@ async function uploadSelectedFile(event) {
   const [file] = event.target.files || [];
   if (!file) return;
   await uploadWav(file, file.name);
+  event.target.value = '';
+}
+
+async function uploadSelectedStyleTts2VoiceFile(event) {
+  const [file] = event.target.files || [];
+  if (!file) return;
+  await uploadStyleTts2Voice(file, file.name);
   event.target.value = '';
 }
 
@@ -324,7 +369,35 @@ async function uploadWav(blob, filename) {
   }
 }
 
-async function startRecording() {
+async function uploadStyleTts2Voice(blob, filename) {
+  setBusy(true);
+  setStatus('Saving StyleTTS2 voice sample');
+  try {
+    const form = new FormData();
+    form.append('file', blob, filename || 'voice-sample.wav');
+    const response = await fetch('/api/styletts2/voices/upload', {
+      method: 'POST',
+      body: form,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || response.statusText);
+    state.pendingStyletts2Voice = payload.voice?.id || '';
+    await loadStyleTts2Voices();
+    if (state.pendingStyletts2Voice && selectHasValue(elements['styletts2-voice'], state.pendingStyletts2Voice)) {
+      elements['styletts2-voice'].value = state.pendingStyletts2Voice;
+    }
+    savePreferences();
+    markActionInputsChanged();
+    syncVoiceSelector();
+    setStatus(`Saved StyleTTS2 voice sample ${payload.voice?.label || payload.voice?.id || ''}`.trim());
+  } catch (error) {
+    setStatus(error.message || String(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function startRecording(target) {
   if (state.recording) return;
   try {
     state.mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -347,20 +420,44 @@ async function startRecording() {
     state.source.connect(state.processor);
     state.processor.connect(state.audioContext.destination);
     state.recording = true;
-    elements.record.disabled = true;
-    elements['stop-recording'].disabled = false;
-    setStatus('Recording');
+    state.recordingTarget = target;
+    updateRecordingControls();
+    setStatus(target === 'styletts2Voice' ? 'Recording StyleTTS2 voice sample' : 'Recording');
   } catch (error) {
+    stopMediaCapture();
+    if (state.audioContext) {
+      await state.audioContext.close();
+      state.audioContext = null;
+    }
+    state.recording = false;
+    state.recordingTarget = '';
+    updateRecordingControls();
     setStatus(error.message || String(error), 'error');
   }
 }
 
 async function stopRecording() {
   if (!state.recording) return;
+  const target = state.recordingTarget;
   state.recording = false;
-  elements.record.disabled = false;
-  elements['stop-recording'].disabled = true;
+  state.recordingTarget = '';
+  updateRecordingControls();
+  stopMediaCapture();
+  if (state.audioContext) {
+    await state.audioContext.close();
+    state.audioContext = null;
+  }
 
+  const wav = encodeWav(flattenChunks(state.recordingChunks), state.recordingSampleRate || 48000);
+  state.recordingChunks = [];
+  if (target === 'styletts2Voice') {
+    await uploadStyleTts2Voice(wav, `voice-sample-${Date.now()}.wav`);
+  } else {
+    await uploadWav(wav, `recording-${Date.now()}.wav`);
+  }
+}
+
+function stopMediaCapture() {
   if (state.processor) {
     state.processor.disconnect();
     state.processor.onaudioprocess = null;
@@ -374,14 +471,16 @@ async function stopRecording() {
     state.mediaStream.getTracks().forEach((track) => track.stop());
     state.mediaStream = null;
   }
-  if (state.audioContext) {
-    await state.audioContext.close();
-    state.audioContext = null;
-  }
+}
 
-  const wav = encodeWav(flattenChunks(state.recordingChunks), state.recordingSampleRate || 48000);
-  state.recordingChunks = [];
-  await uploadWav(wav, `recording-${Date.now()}.wav`);
+function updateRecordingControls() {
+  const recordingAudio = state.recording && state.recordingTarget === 'audio';
+  const recordingVoice = state.recording && state.recordingTarget === 'styletts2Voice';
+  const voiceEnabled = elements.backend.value === 'styletts2';
+  elements.record.disabled = state.recording;
+  elements['stop-recording'].disabled = !recordingAudio;
+  elements['record-styletts2-voice'].disabled = state.recording || !voiceEnabled;
+  elements['stop-styletts2-voice-recording'].disabled = !recordingVoice;
 }
 
 function flattenChunks(chunks) {
@@ -854,6 +953,7 @@ function drawRuler() {
     ctx.stroke();
     ctx.fillText(formatSeconds(time), x + 4, 14);
   }
+  drawLaneCaption(ctx, width, 'Time');
 }
 
 function drawWaveform() {
@@ -1067,11 +1167,13 @@ function drawTrack(canvas, segments, options) {
 
   if (options.candidateSummary) {
     drawCandidateSummaryTrack(ctx, width, height, segments, options);
+    drawLaneCaption(ctx, width, options.empty);
     return;
   }
 
   if (options.blendedChips) {
     drawBlendedTrack(ctx, width, height, segments, options);
+    drawLaneCaption(ctx, width, options.empty);
     return;
   }
 
@@ -1110,6 +1212,18 @@ function drawTrack(canvas, segments, options) {
       ctx.restore();
     }
   }
+  drawLaneCaption(ctx, width, options.empty);
+}
+
+function drawLaneCaption(ctx, width, label) {
+  if (!label) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(155, 166, 161, 0.7)';
+  ctx.font = '11px Inter, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText(String(label).toUpperCase(), width - 8, 7);
+  ctx.restore();
 }
 
 function trackSegmentLabel(segment, options) {
@@ -1675,8 +1789,23 @@ function toggleIr() {
 }
 
 function setBusy(busy) {
+  state.activeActionCount = Math.max(0, state.activeActionCount + (busy ? 1 : -1));
+  if (busy) state.inputsChangedDuringAction = false;
+  updateActionButtons();
+}
+
+function markActionInputsChanged() {
+  state.inputVersion += 1;
+  if (state.activeActionCount > 0) {
+    state.inputsChangedDuringAction = true;
+  }
+  updateActionButtons();
+}
+
+function updateActionButtons() {
+  const disabled = state.activeActionCount > 0 && !state.inputsChangedDuringAction;
   for (const id of ['phonemicize', 'synthesize', 'align']) {
-    elements[id].disabled = busy;
+    elements[id].disabled = disabled;
   }
 }
 

@@ -9,10 +9,29 @@ use crate::segment::{SegmentMatcher, SyllablePosition};
 use crate::spec::Spec;
 use crate::variety::LinguisticVariety;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyllabificationOptions {
+    pub r_fullness: bool,
+}
+
+impl Default for SyllabificationOptions {
+    fn default() -> Self {
+        Self { r_fullness: true }
+    }
+}
+
 pub fn syllabify_phones(phones: &[PhoneToken], variety: &LinguisticVariety) -> Vec<Syllable> {
+    syllabify_phones_with_options(phones, variety, SyllabificationOptions::default())
+}
+
+pub fn syllabify_phones_with_options(
+    phones: &[PhoneToken],
+    variety: &LinguisticVariety,
+    options: SyllabificationOptions,
+) -> Vec<Syllable> {
     let mut syllables = Vec::new();
     for word in phone_words(phones) {
-        syllables.extend(syllabify_word(word, variety));
+        syllables.extend(syllabify_word(word, variety, options));
     }
     syllables
 }
@@ -39,7 +58,11 @@ fn phone_words(phones: &[PhoneToken]) -> Vec<&[PhoneToken]> {
     words
 }
 
-fn syllabify_word(phones: &[PhoneToken], variety: &LinguisticVariety) -> Vec<Syllable> {
+fn syllabify_word(
+    phones: &[PhoneToken],
+    variety: &LinguisticVariety,
+    options: SyllabificationOptions,
+) -> Vec<Syllable> {
     let phones = phones
         .iter()
         .filter(|phone| !is_boundary_phone(phone))
@@ -103,7 +126,9 @@ fn syllabify_word(phones: &[PhoneToken], variety: &LinguisticVariety) -> Vec<Syl
         ));
     }
 
-    add_rhotic_coda_phones(&mut syllables, variety);
+    if options.r_fullness {
+        add_rhotic_coda_phones(&mut syllables, variety);
+    }
 
     syllables
 }
@@ -383,6 +408,10 @@ mod tests {
     };
 
     fn syllables_for(text: &str) -> Vec<Syllable> {
+        syllables_for_with_options(text, SyllabificationOptions::default())
+    }
+
+    fn syllables_for_with_options(text: &str, options: SyllabificationOptions) -> Vec<Syllable> {
         let output = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: text.into(),
@@ -390,7 +419,7 @@ mod tests {
                 style: None,
             })
             .expect("phonemicize");
-        syllabify_phones(&output.phones, &variety("en-US-GA"))
+        syllabify_phones_with_options(&output.phones, &variety("en-US-GA"), options)
     }
 
     #[test]
@@ -418,6 +447,20 @@ mod tests {
                 SyllablePosition::Nucleus,
                 SyllablePosition::Coda
             ]
+        );
+    }
+
+    #[test]
+    fn r_colored_vowels_can_remain_coda_less_when_r_fullness_is_off() {
+        let options = SyllabificationOptions { r_fullness: false };
+
+        assert_eq!(
+            syllables_to_ipa(&syllables_for_with_options("current", options)),
+            "ˈkʰɝ.ənt"
+        );
+        assert_eq!(
+            syllables_to_ipa(&syllables_for_with_options("derived", options)),
+            "dɚ.ˈaɪvd"
         );
     }
 
