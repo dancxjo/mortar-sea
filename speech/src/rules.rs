@@ -5,6 +5,7 @@ use crate::ids::{FeatureId, PhoneId, PhonemeId};
 use crate::prosody::Stress;
 use crate::segment::{Environment, SegmentMatcher};
 use crate::spec::Spec;
+use crate::syntax::{SyntacticLinkKind, SyntaxRuleContext};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AllophoneRule {
@@ -53,7 +54,23 @@ pub enum RuleCondition {
     PreviousStressIn(Vec<Stress>),
     NextStress(Stress),
     NextStressIn(Vec<Stress>),
+    CurrentWordHasSyntacticLink(SyntacticLinkKind),
+    PreviousWordHasSyntacticLink(SyntacticLinkKind),
+    NextWordHasSyntacticLink(SyntacticLinkKind),
     NotCarefulStyle,
+}
+
+impl RuleCondition {
+    pub fn matches_syntax(&self, syntax: &SyntaxRuleContext, word_index: usize) -> bool {
+        match self {
+            Self::CurrentWordHasSyntacticLink(kind) => syntax.word_has_link(word_index, *kind),
+            Self::PreviousWordHasSyntacticLink(kind) => word_index
+                .checked_sub(1)
+                .is_some_and(|previous| syntax.word_has_link(previous, *kind)),
+            Self::NextWordHasSyntacticLink(kind) => syntax.word_has_link(word_index + 1, *kind),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

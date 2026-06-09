@@ -90,7 +90,7 @@ button,
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-width: 96px;
+  min-width: 112px;
   height: 32px;
   min-height: 32px;
   padding: 0 10px;
@@ -426,7 +426,7 @@ h2 {
 
 .voice-grid {
   display: grid;
-  grid-template-columns: minmax(120px, 0.35fr) minmax(180px, 1fr) minmax(180px, 1fr) 36px 36px;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(180px, 1fr) minmax(180px, 1fr) 36px minmax(112px, auto);
   align-items: end;
   gap: 8px;
 }
@@ -459,7 +459,7 @@ h2 {
 
 .voice-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(96px, 1fr));
+  grid-template-columns: repeat(2, minmax(112px, 1fr));
   gap: 6px;
   margin-top: 8px;
 }
@@ -478,8 +478,9 @@ h2 {
 
 .audio-input-panel .audio-source-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(96px, 1fr));
+  grid-template-columns: repeat(2, minmax(112px, 1fr));
   border-right: 0;
+  margin-top: 21px;
   padding: 3px;
 }
 
@@ -798,6 +799,10 @@ pre {
 
   .voice-grid {
     grid-template-columns: 1fr;
+  }
+
+  .audio-input-panel .audio-source-controls {
+    margin-top: 10px;
   }
 
   .transcription-field {

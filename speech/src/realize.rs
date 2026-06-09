@@ -8,12 +8,14 @@ use crate::prosody::Stress;
 use crate::rules::{AllophoneRule, EpenthesisRule, RuleCondition};
 use crate::segment::{SegmentMatcher, SyllablePosition, WordPosition};
 use crate::spec::Spec;
+use crate::syntax::SyntaxRuleContext;
 use crate::variety::LinguisticVariety;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RealizationOptions {
     pub careful_style: bool,
     pub phone_decomposition: PhoneDecompositionPolicy,
+    pub syntax: SyntaxRuleContext,
 }
 
 impl Default for RealizationOptions {
@@ -21,6 +23,7 @@ impl Default for RealizationOptions {
         Self {
             careful_style: false,
             phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+            syntax: SyntaxRuleContext::default(),
         }
     }
 }
@@ -299,6 +302,12 @@ fn condition_matches(
             .get(index + 1)
             .and_then(token_stress)
             .is_some_and(|actual| stresses.contains(&actual)),
+        RuleCondition::CurrentWordHasSyntacticLink(_)
+        | RuleCondition::PreviousWordHasSyntacticLink(_)
+        | RuleCondition::NextWordHasSyntacticLink(_) => phonemes
+            .get(index)
+            .and_then(token_word_index)
+            .is_some_and(|word_index| condition.matches_syntax(&options.syntax, word_index)),
         RuleCondition::NotCarefulStyle => !options.careful_style,
     }
 }

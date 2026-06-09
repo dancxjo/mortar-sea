@@ -17,6 +17,7 @@ use crate::realize::{
 };
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
+use crate::syntax::{HeuristicLinkGrammarParser, LinkGrammarParser, SentenceSyntaxAnalysis};
 use crate::syllabify::syllabify_phones;
 use crate::time::{TextSpan, TimeSpan};
 use crate::variety::{
@@ -106,6 +107,7 @@ pub trait PronunciationPipeline {
         variety: &LinguisticVariety,
         phonemes: &[PhonemeToken],
         careful_style: bool,
+        syntax: &SentenceSyntaxAnalysis,
     ) -> Vec<PhoneToken> {
         realize_phonemes(
             variety,
@@ -113,6 +115,7 @@ pub trait PronunciationPipeline {
             &RealizationOptions {
                 careful_style,
                 phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+                syntax: syntax.rule_context(),
             },
         )
     }
@@ -138,6 +141,13 @@ pub trait PronunciationPipeline {
         let normalized_text = self.text_normalizer(&input.text);
         let words = self.orthographic_tokenizer(&normalized_text);
         let boundaries = self.boundary_extractor(&normalized_text, &words);
+        let syntax = HeuristicLinkGrammarParser.parse(
+            &words
+                .iter()
+                .map(|word| word.normalized.clone())
+                .collect::<Vec<_>>(),
+            final_terminal(&boundaries),
+        );
         let prosody = prosody_from_boundaries(&boundaries, &words);
         let mut graphemes = Vec::with_capacity(words.len());
         let mut phonemes = Vec::new();
@@ -167,7 +177,8 @@ pub trait PronunciationPipeline {
             warnings.extend(pronunciation.warnings.clone());
             let mut word_phonemes =
                 self.phoneme_planner(&canonical_variety, word_index, &pronunciation);
-            let mut word_phones = self.phone_realizer(&variety, &word_phonemes, careful_style);
+            let mut word_phones =
+                self.phone_realizer(&variety, &word_phonemes, careful_style, &syntax);
 
             assign_realized_phones(&mut word_phonemes, &word_phones);
             if word_index > 0 {
@@ -206,6 +217,7 @@ pub trait PronunciationPipeline {
             syllables,
             boundaries,
             prosody,
+            syntax,
             warnings,
             provenance: self.output_provenance(&canonical_variety),
         })
@@ -268,6 +280,8 @@ pub struct PhonemicizeOutput {
     pub boundaries: Vec<SpeechBoundaryToken>,
     #[serde(default)]
     pub prosody: ProsodyTrack,
+    #[serde(default)]
+    pub syntax: SentenceSyntaxAnalysis,
     #[serde(default)]
     pub warnings: Vec<PronunciationWarning>,
     pub provenance: EvidenceProvenance,
@@ -661,6 +675,10 @@ fn boundary_tokens(text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> 
     boundaries
 }
 
+fn final_terminal(boundaries: &[SpeechBoundaryToken]) -> Option<TerminalPunctuation> {
+    boundaries.iter().rev().find_map(|boundary| boundary.terminal)
+}
+
 fn prosody_from_boundaries(
     boundaries: &[SpeechBoundaryToken],
     words: &[WordToken],
@@ -759,9 +777,27 @@ fn has_alternative_question_coordination(words: &[WordToken]) -> bool {
     if has_either_or_coordination(words) {
         return true;
     }
+    let normalized_words = words
+        .iter()
+        .map(|word| word.normalized.clone())
+        .collect::<Vec<_>>();
+    let syntax =
+        HeuristicLinkGrammarParser.parse(&normalized_words, Some(TerminalPunctuation::Question));
+    let has_coordination_parse = syntax.primary_parse().is_some_and(|parse| {
+        parse.links.iter().any(|link| {
+            link.kind == crate::syntax::SyntacticLinkKind::Coordination
+                && (normalized_words
+                    .get(link.left)
+                    .is_some_and(|word| word == "or")
+                    || normalized_words
+                        .get(link.right)
+                        .is_some_and(|word| word == "or"))
+        })
+    });
     if !words
         .first()
         .is_some_and(|word| is_yes_no_question_opener(&word.normalized))
+        || !has_coordination_parse
     {
         return false;
     }
@@ -1383,6 +1419,7 @@ fn realize_connected_allophone_before_word(
         &RealizationOptions {
             careful_style,
             phone_decomposition: PhoneDecompositionPolicy::KeepPhonemic,
+            ..Default::default()
         },
     );
     let Some(phone_index) = phones.iter().rposition(|phone| {
@@ -2054,6 +2091,25 @@ mod tests {
                 .labels
                 .iter()
                 .any(|label| label.kind == ProsodicLabelKind::QuestionRise)
+        );
+    }
+
+    #[test]
+    fn phonemicize_output_exposes_link_grammar_parse_for_rule_matching() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("Do you want either tea or coffee?", "en-US"))
+            .expect("sentence should phonemicize");
+        let rule_context = output.syntax.rule_context();
+
+        assert!(output.syntax.word_has_link(0, SyntacticLinkKind::Auxiliary));
+        assert!(output.syntax.word_has_link(5, SyntacticLinkKind::Coordination));
+        assert!(
+            RuleCondition::CurrentWordHasSyntacticLink(SyntacticLinkKind::Auxiliary)
+                .matches_syntax(&rule_context, 0)
+        );
+        assert!(
+            RuleCondition::PreviousWordHasSyntacticLink(SyntacticLinkKind::Coordination)
+                .matches_syntax(&rule_context, 6)
         );
     }
 }
