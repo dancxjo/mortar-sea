@@ -17,8 +17,8 @@ use crate::realize::{
 };
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
-use crate::syntax::{HeuristicLinkGrammarParser, LinkGrammarParser, SentenceSyntaxAnalysis};
 use crate::syllabify::syllabify_phones;
+use crate::syntax::{HeuristicLinkGrammarParser, LinkGrammarParser, SentenceSyntaxAnalysis};
 use crate::time::{TextSpan, TimeSpan};
 use crate::variety::{
     LinguisticVariety, OrthographicUnitKind, WeakFormFollowingContext, WeakFormRule,
@@ -676,7 +676,10 @@ fn boundary_tokens(text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> 
 }
 
 fn final_terminal(boundaries: &[SpeechBoundaryToken]) -> Option<TerminalPunctuation> {
-    boundaries.iter().rev().find_map(|boundary| boundary.terminal)
+    boundaries
+        .iter()
+        .rev()
+        .find_map(|boundary| boundary.terminal)
 }
 
 fn prosody_from_boundaries(
@@ -1558,6 +1561,8 @@ pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::RuleCondition;
+    use crate::syntax::SyntacticLinkKind;
     use crate::variety::VarietyImplementationStatus;
 
     fn request(text: &str, variety: &str) -> PhonemicizeRequest {
@@ -2102,7 +2107,11 @@ mod tests {
         let rule_context = output.syntax.rule_context();
 
         assert!(output.syntax.word_has_link(0, SyntacticLinkKind::Auxiliary));
-        assert!(output.syntax.word_has_link(5, SyntacticLinkKind::Coordination));
+        assert!(
+            output
+                .syntax
+                .word_has_link(5, SyntacticLinkKind::Coordination)
+        );
         assert!(
             RuleCondition::CurrentWordHasSyntacticLink(SyntacticLinkKind::Auxiliary)
                 .matches_syntax(&rule_context, 0)

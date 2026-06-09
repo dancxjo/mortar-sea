@@ -111,8 +111,11 @@ pub struct WordSyntacticLinks {
 }
 
 pub trait LinkGrammarParser {
-    fn parse(&self, words: &[String], terminal: Option<TerminalPunctuation>)
-    -> SentenceSyntaxAnalysis;
+    fn parse(
+        &self,
+        words: &[String],
+        terminal: Option<TerminalPunctuation>,
+    ) -> SentenceSyntaxAnalysis;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -235,19 +238,34 @@ fn build_links(words: &[String]) -> Vec<SyntacticLink> {
         let left = window[0].as_str();
         let right = window[1].as_str();
         if left == "to" && is_likely_verb(right) {
-            push_link(&mut links, link(index, index + 1, SyntacticLinkKind::InfinitivalMarker, 0.92));
+            push_link(
+                &mut links,
+                link(index, index + 1, SyntacticLinkKind::InfinitivalMarker, 0.92),
+            );
         }
         if is_determiner(left) && is_likely_nominal(right) {
-            push_link(&mut links, link(index, index + 1, SyntacticLinkKind::Determiner, 0.83));
+            push_link(
+                &mut links,
+                link(index, index + 1, SyntacticLinkKind::Determiner, 0.83),
+            );
         }
         if is_auxiliary(left) && is_likely_verb(right) {
-            push_link(&mut links, link(index, index + 1, SyntacticLinkKind::Auxiliary, 0.82));
+            push_link(
+                &mut links,
+                link(index, index + 1, SyntacticLinkKind::Auxiliary, 0.82),
+            );
         }
         if is_preposition(left) && is_likely_nominal(right) {
-            push_link(&mut links, link(index, index + 1, SyntacticLinkKind::Preposition, 0.8));
+            push_link(
+                &mut links,
+                link(index, index + 1, SyntacticLinkKind::Preposition, 0.8),
+            );
         }
         if is_modifier_pair(left, right) {
-            push_link(&mut links, link(index, index + 1, SyntacticLinkKind::Modifier, 0.72));
+            push_link(
+                &mut links,
+                link(index, index + 1, SyntacticLinkKind::Modifier, 0.72),
+            );
         }
     }
 
@@ -270,7 +288,15 @@ fn push_auxiliary_phrase_links(words: &[String], links: &mut Vec<SyntacticLink>)
             .take(4)
             .find_map(|(index, word)| is_likely_verb(word).then_some(index))
         {
-            push_link(links, link(auxiliary_index, verb_index, SyntacticLinkKind::Auxiliary, 0.82));
+            push_link(
+                links,
+                link(
+                    auxiliary_index,
+                    verb_index,
+                    SyntacticLinkKind::Auxiliary,
+                    0.82,
+                ),
+            );
         }
     }
 }
@@ -284,7 +310,15 @@ fn push_core_clause_links(words: &[String], links: &mut Vec<SyntacticLink>) {
             .rev()
             .find(|index| is_likely_nominal(&words[*index]) && !is_preposition(&words[*index]))
         {
-            push_link(links, link(subject_index, predicate_index, SyntacticLinkKind::Subject, 0.8));
+            push_link(
+                links,
+                link(
+                    subject_index,
+                    predicate_index,
+                    SyntacticLinkKind::Subject,
+                    0.8,
+                ),
+            );
         }
         if let Some(object_index) = words
             .iter()
@@ -293,7 +327,15 @@ fn push_core_clause_links(words: &[String], links: &mut Vec<SyntacticLink>) {
             .take(5)
             .find_map(|(index, word)| is_likely_nominal(word).then_some(index))
         {
-            push_link(links, link(predicate_index, object_index, SyntacticLinkKind::Object, 0.78));
+            push_link(
+                links,
+                link(
+                    predicate_index,
+                    object_index,
+                    SyntacticLinkKind::Object,
+                    0.78,
+                ),
+            );
         }
     }
 }
@@ -335,7 +377,10 @@ fn push_contrast_links(words: &[String], links: &mut Vec<SyntacticLink>) {
             .skip(not_index + 1)
             .find_map(|(index, word)| (word == "but").then_some(index))
         {
-            push_link(links, link(not_index, but_index, SyntacticLinkKind::ContrastPair, 0.91));
+            push_link(
+                links,
+                link(not_index, but_index, SyntacticLinkKind::ContrastPair, 0.91),
+            );
         }
     }
 }
@@ -351,10 +396,9 @@ fn link(left: usize, right: usize, kind: SyntacticLinkKind, confidence: f32) -> 
 }
 
 fn push_link(links: &mut Vec<SyntacticLink>, link: SyntacticLink) {
-    if !links
-        .iter()
-        .any(|existing| existing.left == link.left && existing.right == link.right && existing.kind == link.kind)
-    {
+    if !links.iter().any(|existing| {
+        existing.left == link.left && existing.right == link.right && existing.kind == link.kind
+    }) {
         links.push(link);
     }
 }
@@ -399,7 +443,10 @@ fn base_pos(word: &str) -> PartOfSpeech {
         PartOfSpeech::Preposition
     } else if is_coordination_conjunction(word) {
         PartOfSpeech::Conjunction
-    } else if matches!(word, "i" | "me" | "you" | "he" | "she" | "it" | "we" | "they" | "them") {
+    } else if matches!(
+        word,
+        "i" | "me" | "you" | "he" | "she" | "it" | "we" | "they" | "them"
+    ) {
         PartOfSpeech::Pronoun
     } else if is_likely_verb(word) {
         PartOfSpeech::Verb
@@ -409,7 +456,10 @@ fn base_pos(word: &str) -> PartOfSpeech {
 }
 
 fn is_function_word(word: &str) -> bool {
-    is_auxiliary(word) || is_determiner(word) || is_preposition(word) || is_coordination_conjunction(word)
+    is_auxiliary(word)
+        || is_determiner(word)
+        || is_preposition(word)
+        || is_coordination_conjunction(word)
 }
 
 fn is_auxiliary(word: &str) -> bool {
@@ -456,7 +506,10 @@ fn is_auxiliary(word: &str) -> bool {
 }
 
 fn is_determiner(word: &str) -> bool {
-    matches!(word, "a" | "an" | "the" | "this" | "that" | "these" | "those" | "my" | "your" | "our")
+    matches!(
+        word,
+        "a" | "an" | "the" | "this" | "that" | "these" | "those" | "my" | "your" | "our"
+    )
 }
 
 fn is_preposition(word: &str) -> bool {
@@ -471,7 +524,11 @@ fn is_coordination_conjunction(word: &str) -> bool {
 }
 
 fn is_likely_nominal(word: &str) -> bool {
-    !is_function_word(word) || matches!(word, "i" | "me" | "you" | "he" | "she" | "it" | "we" | "they")
+    !is_function_word(word)
+        || matches!(
+            word,
+            "i" | "me" | "you" | "he" | "she" | "it" | "we" | "they"
+        )
 }
 
 fn is_likely_verb(word: &str) -> bool {
@@ -489,12 +546,15 @@ fn is_likely_verb(word: &str) -> bool {
             | "want"
             | "wants"
             | "went"
-    ) || word.ends_with("ed") || word.ends_with("ing")
+    ) || word.ends_with("ed")
+        || word.ends_with("ing")
 }
 
 fn is_modifier_pair(left: &str, right: &str) -> bool {
-    matches!(left, "small" | "big" | "good" | "bad" | "new" | "old" | "bright" | "dark")
-        && is_likely_nominal(right)
+    matches!(
+        left,
+        "small" | "big" | "good" | "bad" | "new" | "old" | "bright" | "dark"
+    ) && is_likely_nominal(right)
 }
 
 #[cfg(test)]
