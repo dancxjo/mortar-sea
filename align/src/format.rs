@@ -1,15 +1,18 @@
+use std::collections::BTreeMap;
+
 use crate::SyllableSummary;
 use speech::{
-    FeatureId, FeatureValue, PhoneToken, PhonemeToken, PhonemicizeOutput, Spec, VarietyId,
+    FeatureId, FeatureValue, PhoneToken, PhonemeToken, PhonemicizeOutput, Spec, Stress, VarietyId,
     phone_display_symbol, phoneme_default_phone_display_symbol,
 };
 
 pub(crate) fn format_phonemes(output: &PhonemicizeOutput) -> String {
+    let stress_markers = phoneme_stress_markers(output);
     let mut words = Vec::new();
     let mut current_word = String::new();
     let mut current_word_index = None;
 
-    for token in &output.phonemes {
+    for (index, token) in output.phonemes.iter().enumerate() {
         let label = phoneme_label(token, &output.variety);
         if label.is_empty() {
             continue;
@@ -24,6 +27,9 @@ pub(crate) fn format_phonemes(output: &PhonemicizeOutput) -> String {
             words.push(std::mem::take(&mut current_word));
         }
 
+        if let Some(marker) = stress_markers.get(&index) {
+            current_word.push(*marker);
+        }
         current_word.push_str(&label);
         current_word_index = word_index.or(current_word_index);
     }
@@ -37,6 +43,82 @@ pub(crate) fn format_phonemes(output: &PhonemicizeOutput) -> String {
     } else {
         format!("/{}/", words.join(" "))
     }
+}
+
+fn phoneme_stress_markers(output: &PhonemicizeOutput) -> BTreeMap<usize, char> {
+    let realized_phones = output
+        .phonemes
+        .iter()
+        .enumerate()
+        .flat_map(|(phoneme_index, phoneme)| {
+            phoneme
+                .realized_as
+                .iter()
+                .map(move |phone| (phoneme_index, phone))
+        })
+        .collect::<Vec<_>>();
+    let mut markers = BTreeMap::new();
+    let mut phone_cursor = 0usize;
+
+    for syllable in &output.syllables {
+        let Some((realized_index, phoneme_index)) =
+            syllable_start_phoneme(&realized_phones, phone_cursor, &syllable.phones)
+        else {
+            continue;
+        };
+
+        if let Some(marker) = stress_marker(&syllable.stress) {
+            markers.entry(phoneme_index).or_insert(marker);
+        }
+        phone_cursor = realized_index
+            + matching_realized_prefix_len(&realized_phones, realized_index, &syllable.phones)
+                .max(1);
+    }
+
+    markers
+}
+
+fn stress_marker(stress: &Spec<Stress>) -> Option<char> {
+    match stress {
+        Spec::Known(Stress::Primary) => Some('ˈ'),
+        Spec::Known(Stress::Secondary) => Some('ˌ'),
+        _ => None,
+    }
+}
+
+fn syllable_start_phoneme(
+    realized_phones: &[(usize, &PhoneToken)],
+    phone_cursor: usize,
+    syllable_phones: &[PhoneToken],
+) -> Option<(usize, usize)> {
+    let search_space = realized_phones.get(phone_cursor..)?;
+    for syllable_phone in syllable_phones {
+        let Some(relative) = search_space
+            .iter()
+            .position(|(_, realized_phone)| realized_phone == &syllable_phone)
+        else {
+            continue;
+        };
+        let realized_index = phone_cursor + relative;
+        return Some((realized_index, realized_phones[realized_index].0));
+    }
+
+    None
+}
+
+fn matching_realized_prefix_len(
+    realized_phones: &[(usize, &PhoneToken)],
+    realized_index: usize,
+    syllable_phones: &[PhoneToken],
+) -> usize {
+    let mut len = 0usize;
+    while realized_index + len < realized_phones.len()
+        && len < syllable_phones.len()
+        && realized_phones[realized_index + len].1 == &syllable_phones[len]
+    {
+        len += 1;
+    }
+    len
 }
 
 pub(crate) fn format_phones(output: &PhonemicizeOutput) -> String {
@@ -193,6 +275,23 @@ mod tests {
         assert_eq!(inner.matches(' ').count(), 1);
         assert!(!inner.starts_with(' '));
         assert!(!inner.ends_with(' '));
+    }
+
+    #[test]
+    fn format_phonemes_includes_primary_and_secondary_stress_markers() {
+        let output = phonemicized("headmistress");
+        let transcription = format_phonemes(&output);
+
+        assert!(
+            transcription.starts_with("/ˈ"),
+            "primary stress should mark the first syllable onset: {transcription}"
+        );
+        assert!(
+            transcription.contains("ˌm"),
+            "secondary stress should mark the stressed syllable onset: {transcription}"
+        );
+        assert_eq!(transcription.matches('ˈ').count(), 1);
+        assert_eq!(transcription.matches('ˌ').count(), 1);
     }
 }
 
