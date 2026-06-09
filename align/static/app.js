@@ -19,6 +19,7 @@ const state = {
   currentAudioUrl: '',
   currentPhonemicization: null,
   currentAlignment: null,
+  alignInProgress: false,
   inputVersion: 0,
   activeActionCount: 0,
   inputsChangedDuringAction: false,
@@ -61,14 +62,12 @@ window.addEventListener('DOMContentLoaded', () => {
     'refresh-voices',
     'styletts2-voice-file',
     'record-styletts2-voice',
-    'stop-styletts2-voice-recording',
     'voice-detail',
     'phonemicize',
     'synthesize',
     'align',
     'wav-file',
     'record',
-    'stop-recording',
     'audio',
     'audio-play-toggle',
     'audio-position',
@@ -81,7 +80,6 @@ window.addEventListener('DOMContentLoaded', () => {
     'alignment-detail',
     'phonemes',
     'syllables',
-    'warnings',
     'asr',
     'ir',
     'toggle-ir',
@@ -138,10 +136,8 @@ window.addEventListener('DOMContentLoaded', () => {
   elements['refresh-voices'].addEventListener('click', loadStyleTts2Voices);
   elements['styletts2-voice-file'].addEventListener('change', uploadSelectedStyleTts2VoiceFile);
   elements['wav-file'].addEventListener('change', uploadSelectedFile);
-  elements.record.addEventListener('click', () => startRecording('audio'));
-  elements['stop-recording'].addEventListener('click', stopRecording);
-  elements['record-styletts2-voice'].addEventListener('click', () => startRecording('styletts2Voice'));
-  elements['stop-styletts2-voice-recording'].addEventListener('click', stopRecording);
+  elements.record.addEventListener('click', () => toggleRecording('audio'));
+  elements['record-styletts2-voice'].addEventListener('click', () => toggleRecording('styletts2Voice'));
   elements['toggle-ir'].addEventListener('click', toggleIr);
   elements['zoom-in'].addEventListener('click', () => zoomAtCenter(1.45));
   elements['zoom-out'].addEventListener('click', () => zoomAtCenter(1 / 1.45));
@@ -314,7 +310,10 @@ async function alignAudio() {
     setStatus('Load or synthesize a WAV first', 'error');
     return;
   }
-  await runJsonAction('/api/align', {
+  const previousAlignmentDetail = elements['alignment-detail'].textContent || 'No alignment';
+  setAlignProgress(true);
+  elements['alignment-detail'].textContent = 'Aligning audio...';
+  const aligned = await runJsonAction('/api/align', {
     text: elements.text.value,
     variety: elements.variety.value || 'en-US',
     audio_url: state.currentAudioUrl,
@@ -322,16 +321,22 @@ async function alignAudio() {
     renderPhonemicization(payload.phonemicization);
     renderAlignment(payload);
     setStatus('Aligned with acoustic Viterbi');
+  }, {
+    status: 'Aligning audio',
   });
+  setAlignProgress(false);
+  if (!aligned) {
+    elements['alignment-detail'].textContent = previousAlignmentDetail;
+  }
 }
 
-async function runJsonAction(url, body, onSuccess) {
+async function runJsonAction(url, body, onSuccess, options = {}) {
   const actionId = state.nextActionId + 1;
   state.nextActionId = actionId;
   state.latestActionId = actionId;
   const requestInputVersion = state.inputVersion;
   setBusy(true);
-  setStatus('Working');
+  setStatus(options.status || 'Working');
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -342,11 +347,13 @@ async function runJsonAction(url, body, onSuccess) {
     if (!response.ok) throw new Error(payload.error || response.statusText);
     if (requestInputVersion !== state.inputVersion) {
       if (actionId === state.latestActionId) setStatus('Inputs changed; run again');
-      return;
+      return false;
     }
     await onSuccess(payload);
+    return true;
   } catch (error) {
     if (actionId === state.latestActionId) setStatus(error.message || String(error), 'error');
+    return false;
   } finally {
     setBusy(false);
   }
@@ -420,6 +427,14 @@ async function uploadStyleTts2Voice(blob, filename) {
   } finally {
     setBusy(false);
   }
+}
+
+async function toggleRecording(target) {
+  if (state.recording && state.recordingTarget === target) {
+    await stopRecording();
+    return;
+  }
+  await startRecording(target);
 }
 
 async function startRecording(target) {
@@ -502,10 +517,18 @@ function updateRecordingControls() {
   const recordingAudio = state.recording && state.recordingTarget === 'audio';
   const recordingVoice = state.recording && state.recordingTarget === 'styletts2Voice';
   const voiceEnabled = elements.backend.value === 'styletts2';
-  elements.record.disabled = state.recording;
-  elements['stop-recording'].disabled = !recordingAudio;
-  elements['record-styletts2-voice'].disabled = state.recording || !voiceEnabled;
-  elements['stop-styletts2-voice-recording'].disabled = !recordingVoice;
+  setRecordingState(elements.record, recordingAudio, 'Start recording audio');
+  setRecordingState(elements['record-styletts2-voice'], recordingVoice, 'Start recording voice sample');
+  elements.record.disabled = state.recording && !recordingAudio;
+  elements['record-styletts2-voice'].disabled = (state.recording && !recordingVoice) || !voiceEnabled;
+}
+
+function setRecordingState(recordButton, isRecording, idleLabel) {
+  recordButton.textContent = isRecording ? '\u25a0' : '\u25cf';
+  recordButton.title = isRecording ? 'Recording - stop recording' : 'Not recording - start recording';
+  recordButton.setAttribute('aria-label', isRecording ? 'Stop recording' : idleLabel);
+  recordButton.setAttribute('aria-pressed', isRecording ? 'true' : 'false');
+  recordButton.dataset.state = isRecording ? 'recording' : 'idle';
 }
 
 function flattenChunks(chunks) {
@@ -555,11 +578,8 @@ function writeAscii(view, offset, text) {
 
 function renderPhonemicization(payload) {
   state.currentPhonemicization = payload;
-  elements.phonemes.textContent = payload.phonemes || '';
-  elements.syllables.textContent = formatSyllableTranscription(payload.syllables || []);
-  elements.warnings.textContent = (payload.warnings || [])
-    .map((warning) => `${warning.token}: ${warning.message}`)
-    .join('\n');
+  elements.phonemes.value = payload.phonemes || '';
+  elements.syllables.value = formatSyllableTranscription(payload.syllables || []);
   elements.ir.textContent = JSON.stringify(payload.ir, null, 2);
   elements['phoneme-detail'].textContent = `${payload.variety}, ${countItems(payload.phonemes)} phonemes`;
   drawAll();
@@ -588,12 +608,8 @@ function renderAlignment(payload) {
   state.currentAlignment = payload;
   state.selection = null;
   state.playRangeEnd = null;
-  elements.asr.textContent = [
-    payload.asr_transcript ? `transcript: ${payload.asr_transcript}` : 'transcript: none',
-    ...(payload.asr_segments || []).map((segment) => {
-      return `${formatMs(segment.start_ms)}-${formatMs(segment.end_ms)} ${segment.text}`;
-    }),
-  ].join('\n');
+  elements.asr.value =
+    payload.asr_transcript || (payload.asr_segments || []).map((segment) => segment.text).join(' ');
   elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.feature_tracks || []).length} features, ${(payload.projected_voicing || []).length} projected, ${(payload.candidate_overlays || []).length} candidates`;
   drawAll();
 }
@@ -602,7 +618,7 @@ function clearAlignment() {
   state.currentAlignment = null;
   state.selection = null;
   state.playRangeEnd = null;
-  elements.asr.textContent = '';
+  elements.asr.value = '';
   elements['alignment-detail'].textContent = 'No alignment';
   drawAll();
 }
@@ -737,8 +753,12 @@ function updateAudioTransport() {
   elements['audio-progress-thumb'].style.left = `${percent}%`;
   elements['audio-progress'].setAttribute('aria-valuenow', Math.round(percent).toString());
   elements['audio-progress'].setAttribute('aria-valuetext', `${formatSeconds(current)} of ${formatSeconds(duration)}`);
-  elements['audio-play-toggle'].textContent =
-    !elements.audio.paused && !elements.audio.ended ? 'Pause' : 'Play';
+  const isPlaying = !elements.audio.paused && !elements.audio.ended;
+  elements['audio-play-toggle'].textContent = isPlaying ? '\u23f8' : '\u25b6';
+  elements['audio-play-toggle'].title = isPlaying ? 'Playing - pause audio' : 'Paused - play audio';
+  elements['audio-play-toggle'].setAttribute('aria-label', isPlaying ? 'Playing - pause audio' : 'Paused - play audio');
+  elements['audio-play-toggle'].setAttribute('aria-pressed', isPlaying ? 'true' : 'false');
+  elements['audio-play-toggle'].dataset.state = isPlaying ? 'playing' : 'paused';
 }
 
 function fitTimeline() {
@@ -1794,7 +1814,9 @@ function formatRange(start, end) {
 function toggleIr() {
   state.irVisible = !state.irVisible;
   elements.ir.hidden = !state.irVisible;
-  elements['toggle-ir'].textContent = state.irVisible ? 'Hide' : 'Show';
+  elements['toggle-ir'].textContent = state.irVisible ? '\u25be' : '\u25b8';
+  elements['toggle-ir'].title = state.irVisible ? 'Hide Speech IR' : 'Show Speech IR';
+  elements['toggle-ir'].setAttribute('aria-label', state.irVisible ? 'Hide Speech IR' : 'Show Speech IR');
 }
 
 function setBusy(busy) {
@@ -1815,7 +1837,20 @@ function updateActionButtons() {
   const busyDisabled = state.activeActionCount > 0 && !state.inputsChangedDuringAction;
   elements.phonemicize.disabled = busyDisabled;
   elements.synthesize.disabled = busyDisabled;
-  elements.align.disabled = busyDisabled || !state.currentAudioUrl;
+  elements.align.disabled = state.alignInProgress || busyDisabled || !state.currentAudioUrl;
+}
+
+function setAlignProgress(inProgress) {
+  state.alignInProgress = inProgress;
+  elements.align.textContent = inProgress ? 'Aligning...' : 'Align ASR';
+  if (inProgress) {
+    elements.align.setAttribute('aria-busy', 'true');
+    elements.align.dataset.progress = 'true';
+  } else {
+    elements.align.removeAttribute('aria-busy');
+    delete elements.align.dataset.progress;
+  }
+  updateActionButtons();
 }
 
 function setStatus(message, tone = '') {

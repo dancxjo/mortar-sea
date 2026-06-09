@@ -1,8 +1,8 @@
 use speech::{
     BoundaryKind, EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, FeatureBundle,
     PauseKind, PhoneId, PhoneToken, PhonemeId, PhonemeToken, PhonemicizeRequest, Phonemicizer,
-    ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken, StyleRef, StyleSource, TerminalPunctuation,
-    TextSpan, UtteranceId, UtterancePlan, VarietyId,
+    ProsodicLabel, ProsodicLabelKind, ProsodyTrack, SpeakerId, Spec, SpeechBoundaryToken, StyleRef,
+    StyleSource, TerminalPunctuation, TextSpan, TimeSpan, UtteranceId, UtterancePlan, VarietyId,
 };
 use styletts2::{
     BackendSynthesisPlan, MockStyleTts2Backend, StyleTts2Backend, StyleTts2Config,
@@ -127,6 +127,51 @@ fn lower_plan_tokens_preserves_typed_punctuation_at_word_boundaries() {
             StyleTts2SymbolSource::Phone,
             StyleTts2SymbolSource::BoundaryPunctuation,
             StyleTts2SymbolSource::Phone,
+            StyleTts2SymbolSource::BoundaryPunctuation
+        ]
+    );
+}
+
+#[test]
+fn lower_plan_tokens_marks_question_rise_from_target_prosody() {
+    let symbol_set = SymbolSet::new(["alpha", "?", "↗"]).with_alias("variety.phone.a", "alpha");
+    let mut plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![phone_token("variety.phone.a")],
+        vec![terminal_boundary(0, TerminalPunctuation::Question)],
+        Some("a?".into()),
+    );
+    plan.target_prosody.labels.push(ProsodicLabel {
+        span: TimeSpan {
+            start_s: 0.0,
+            end_s: 0.0,
+        },
+        kind: ProsodicLabelKind::QuestionRise,
+        confidence: 0.9,
+    });
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+    let sources = lowered
+        .tokens
+        .iter()
+        .map(|token| token.source)
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["alpha", "↗", "?"]);
+    assert_eq!(
+        sources,
+        [
+            StyleTts2SymbolSource::Phone,
+            StyleTts2SymbolSource::Prosody,
             StyleTts2SymbolSource::BoundaryPunctuation
         ]
     );
@@ -413,19 +458,23 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
         ("world", "wˈɜːɹld"),
         (
             "I’ll inspect the current English rule.",
-            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl .",
+            "ˈaɪl ˌɪnspˈɛkt ðə kˈɜːɹənt ˈɪŋɡlɪʃ ɹˈuːl↘ .",
         ),
         ("StyleTTS2", "stˈaɪl tˈiː tˈiːj ˈɛs tˈuː"),
         (
             "I've traveled the world and the seven seas.",
-            "ˈaɪv tɹˈævəld ðə wˈɜːɹld ənd ðə sˈɛvən sˈiːz .",
+            "ˈaɪv tɹˈævəld ðə wˈɜːɹld ənd ðə sˈɛvən sˈiːz↘ .",
         ),
         ("current", "kˈɜːɹənt"),
         ("derived", "dᵻɹˈaɪvd"),
         ("surface", "sˈɜːɹfəs"),
         (
             "That points to a real phonological rule.",
-            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːl fˌoʊnəlˈɑːdʒɪkəl ɹˈuːl .",
+            "ðˈæt pˈɔɪnts tˈuː ə ɹˈiːl fˌoʊnəlˈɑːdʒɪkəl ɹˈuːl↘ .",
+        ),
+        (
+            "Want to see hundreds of baby herons? Go to King County's busiest dog park.",
+            "wˈɑːnt tə sˈiː hˈʌndɹədz əv bˈeɪbiː hˈɛɹənz↗ ? ɡˈoʊ tə kˈɪŋ kˈaʊntiːz bˈɪziːəst dˈɔːɡ pˈɑːɹk↘ .",
         ),
     ] {
         let actual = styletts2_text_from_english(input);
@@ -596,7 +645,7 @@ fn styletts2_text_from_english(text: &str) -> String {
         target_phones: phonemicized.phones,
         target_syllables: phonemicized.syllables,
         boundaries: phonemicized.boundaries,
-        target_prosody: ProsodyTrack::default(),
+        target_prosody: phonemicized.prosody,
         target_acoustics: Vec::new(),
         style: None,
         provenance: phonemicized.provenance,

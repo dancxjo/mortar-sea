@@ -558,7 +558,7 @@ pub fn utterance_plan_from_phonemicized(output: &PhonemicizeOutput) -> Utterance
         target_phones: output.phones.clone(),
         target_syllables: output.syllables.clone(),
         boundaries: output.boundaries.clone(),
-        target_prosody: ProsodyTrack::default(),
+        target_prosody: output.prosody.clone(),
         target_acoustics: Vec::new(),
         style: None,
         provenance: EvidenceProvenance {
@@ -850,9 +850,9 @@ mod tests {
             symbols,
             [
                 "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "B", "ˈ", "EY", "B", "IY",
-                ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "D", "ˈ", "AA", "R", "L",
-                "IH", "N", ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "R", "ˈ",
-                "AE", "G", "T", "ˌ", "AY", "M", "|", "G", "ˈ", "AE", "L", "."
+                "↘", ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "D", "ˈ", "AA", "R",
+                "L", "IH", "N", "↘", ".", "HH", "ə", "L", "ˈ", "OW", "|", "M", "ˈ", "AY", "|", "R",
+                "ˈ", "AE", "G", "T", "ˌ", "AY", "M", "|", "G", "ˈ", "AE", "L", "↘", "."
             ]
         );
     }

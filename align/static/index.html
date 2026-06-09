@@ -15,69 +15,95 @@
           <h1>Align</h1>
         </div>
         <div class="transport">
-          <button type="button" id="zoom-out" title="Zoom out">-</button>
-          <button type="button" id="zoom-in" title="Zoom in">+</button>
-          <button type="button" id="fit" title="Fit timeline">Fit</button>
+          <div class="field topbar-variety">
+            <label for="variety">Linguistic Variety</label>
+            <input id="variety" name="variety" value="en-US" autocomplete="off" />
+          </div>
           <div class="status" id="status">Ready</div>
         </div>
       </header>
 
-      <section class="control-strip" aria-label="Alignment controls">
-        <div class="field text-field control-primary">
-          <label for="text">Text</label>
-          <textarea id="text" spellcheck="true">hello world</textarea>
-        </div>
-        <div class="field-group control-settings">
-          <div class="field compact-field">
-            <label for="variety">Variety</label>
-            <input id="variety" name="variety" value="en-US" autocomplete="off" />
+      <section class="transcript-panel" aria-labelledby="transcript-heading">
+        <header>
+          <h2 id="transcript-heading">Transcript</h2>
+          <div class="transcript-controls">
+            <span id="phoneme-detail">Waiting</span>
+            <span id="alignment-detail">No alignment</span>
+            <button type="button" id="phonemicize" title="Phonemicize">Phonemicize</button>
+            <button type="button" id="align" title="Align ASR">Align ASR</button>
           </div>
-        </div>
-        <div class="button-stack control-actions">
-          <label class="file-button" for="wav-file">Upload WAV</label>
-          <input id="wav-file" type="file" accept="audio/wav,.wav" />
-          <button type="button" id="record">Record</button>
-          <button type="button" id="stop-recording" disabled>Stop</button>
+        </header>
+        <div class="transcription-stack">
+          <div class="transcription-field">
+            <label for="text">Orthographic</label>
+            <textarea id="text" spellcheck="true">hello world</textarea>
+          </div>
+          <div class="transcription-field">
+            <label for="phonemes">Phonemic</label>
+            <textarea id="phonemes" readonly></textarea>
+          </div>
+          <div class="transcription-field">
+            <label for="syllables">Phonetic</label>
+            <textarea id="syllables" readonly></textarea>
+          </div>
+          <div class="transcription-field">
+            <label for="asr">ASR</label>
+            <textarea id="asr" readonly></textarea>
+          </div>
         </div>
       </section>
 
-      <section class="voice-panel" aria-labelledby="voice-heading">
-        <header>
-          <h2 id="voice-heading">Voice</h2>
-          <span id="voice-detail">Drop WAVs in voices/styletts2</span>
-        </header>
-        <div class="voice-grid">
-          <div class="field">
-            <label for="backend">Renderer</label>
-            <select id="backend" aria-label="Renderer">
-              <option value="mock">mock</option>
-              <option value="piper">piper</option>
-              <option value="styletts2" selected>styletts2</option>
-            </select>
+      <section class="control-row" aria-label="Audio controls">
+        <section class="voice-panel control-panel synthesis-panel" aria-labelledby="synthesis-heading">
+          <header>
+            <h2 id="synthesis-heading">Synthesize</h2>
+            <span id="voice-detail">Drop WAVs in voices/styletts2</span>
+          </header>
+          <div class="voice-grid">
+            <div class="field">
+              <label for="backend">Renderer</label>
+              <select id="backend" aria-label="Renderer">
+                <option value="mock">mock</option>
+                <option value="piper">piper</option>
+                <option value="styletts2" selected>styletts2</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="styletts2-voice">Speaker WAV</label>
+              <select id="styletts2-voice">
+                <option value="">default speaker</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="styletts2-style">Style WAV</label>
+              <select id="styletts2-style">
+                <option value="">default style</option>
+              </select>
+            </div>
+            <button type="button" id="refresh-voices" class="icon-button" title="Refresh WAV list" aria-label="Refresh WAV list">&#8635;</button>
+            <button type="button" id="synthesize" class="icon-button" title="Synthesize audio" aria-label="Synthesize audio">&#9889;</button>
           </div>
-          <div class="field">
-            <label for="styletts2-voice">Speaker WAV</label>
-            <select id="styletts2-voice">
-              <option value="">default speaker</option>
-            </select>
+          <details class="voice-details">
+            <summary>Add speaker WAV</summary>
+            <div class="voice-actions">
+              <label class="file-button icon-button" for="styletts2-voice-file" title="Upload voice WAV" aria-label="Upload voice WAV">&#8679;</label>
+              <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
+              <button type="button" id="record-styletts2-voice" class="icon-button" title="Record voice sample" aria-label="Start recording voice sample" aria-pressed="false" data-state="idle">&#9679;</button>
+            </div>
+          </details>
+        </section>
+
+        <section class="control-panel audio-input-panel" aria-labelledby="audio-input-heading">
+          <header>
+            <h2 id="audio-input-heading">Provide your own</h2>
+            <span>Add source WAV</span>
+          </header>
+          <div class="audio-source-controls" aria-label="Add audio">
+            <label class="file-button icon-button" for="wav-file" title="Upload WAV" aria-label="Upload WAV">&#8679;</label>
+            <input id="wav-file" type="file" accept="audio/wav,.wav" />
+            <button type="button" id="record" class="icon-button" title="Record audio" aria-label="Start recording audio" aria-pressed="false" data-state="idle">&#9679;</button>
           </div>
-          <div class="field">
-            <label for="styletts2-style">Style WAV</label>
-            <select id="styletts2-style">
-              <option value="">default style</option>
-            </select>
-          </div>
-          <button type="button" id="refresh-voices" title="Refresh WAV list">Refresh WAVs</button>
-        </div>
-        <details class="voice-details">
-          <summary>Add WAV</summary>
-          <div class="voice-actions">
-            <label class="file-button" for="styletts2-voice-file">Upload</label>
-            <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
-            <button type="button" id="record-styletts2-voice">Record</button>
-            <button type="button" id="stop-styletts2-voice-recording" disabled>Stop</button>
-          </div>
-        </details>
+        </section>
       </section>
 
       <audio id="audio" preload="metadata"></audio>
@@ -91,24 +117,15 @@
         <div class="audio-detail" id="audio-detail">No audio loaded</div>
       </section>
 
-      <section class="transcription-panel" aria-label="IPA transcription">
-        <article class="transcription-card">
-          <header>
-            <h2>IPA transcription</h2>
-            <span id="phoneme-detail">Waiting</span>
-            <button type="button" id="phonemicize">Phonemicize</button>
-          </header>
-          <dl class="transcription-readout">
-            <div><dt>Phonemes</dt><dd id="phonemes"></dd></div>
-            <div><dt>Phonetic realization</dt><dd id="syllables"></dd></div>
-            <div><dt>Warnings</dt><dd id="warnings"></dd></div>
-          </dl>
-        </article>
-      </section>
-
       <section class="daw-toolbar" aria-label="DAW actions">
-        <button type="button" id="synthesize">Synthesize</button>
-        <button type="button" id="audio-play-toggle" title="Play audio">Play</button>
+        <div class="timeline-controls" aria-label="Timeline zoom">
+          <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
+          <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+          <button type="button" id="fit" title="Fit timeline" aria-label="Fit timeline">&#9974;</button>
+        </div>
+        <div class="playback-controls" aria-label="Playback">
+          <button type="button" id="audio-play-toggle" title="Paused - play audio" aria-label="Paused - play audio" aria-pressed="false" data-state="paused">&#9654;</button>
+        </div>
       </section>
 
       <section class="daw">
@@ -130,16 +147,8 @@
       <section class="secondary-grid">
         <article>
           <header>
-            <h2>ASR</h2>
-            <span id="alignment-detail">No alignment</span>
-            <button type="button" id="align">Align ASR</button>
-          </header>
-          <pre id="asr"></pre>
-        </article>
-        <article>
-          <header>
             <h2>Speech IR</h2>
-            <button type="button" id="toggle-ir">Show</button>
+            <button type="button" id="toggle-ir" class="icon-button" title="Show Speech IR" aria-label="Show Speech IR">&#9656;</button>
           </header>
           <pre id="ir" hidden></pre>
         </article>

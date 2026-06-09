@@ -10,7 +10,7 @@ use crate::feature::{FeatureBundle, FeatureValue};
 use crate::ids::{FeatureId, GraphemeId, PhoneId, PhonemeId, VarietyId};
 use crate::orthography::GraphemeToken;
 use crate::phonology::{PhoneToken, PhonemeToken};
-use crate::prosody::Syllable;
+use crate::prosody::{ProsodicLabel, ProsodicLabelKind, ProsodyTrack, Syllable};
 use crate::realize::{
     PhoneDecompositionPolicy, RealizationOptions, epenthetic_phones_after, realize_phoneme_at,
     realize_phonemes,
@@ -18,7 +18,7 @@ use crate::realize::{
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
 use crate::syllabify::syllabify_phones;
-use crate::time::TextSpan;
+use crate::time::{TextSpan, TimeSpan};
 use crate::variety::{
     LinguisticVariety, OrthographicUnitKind, WeakFormFollowingContext, WeakFormRule,
     WeakFormStyleContext,
@@ -138,6 +138,7 @@ pub trait PronunciationPipeline {
         let normalized_text = self.text_normalizer(&input.text);
         let words = self.orthographic_tokenizer(&normalized_text);
         let boundaries = self.boundary_extractor(&normalized_text, &words);
+        let prosody = prosody_from_boundaries(&boundaries);
         let mut graphemes = Vec::with_capacity(words.len());
         let mut phonemes = Vec::new();
         let mut phones = Vec::new();
@@ -204,6 +205,7 @@ pub trait PronunciationPipeline {
             phones,
             syllables,
             boundaries,
+            prosody,
             warnings,
             provenance: self.output_provenance(&canonical_variety),
         })
@@ -264,6 +266,8 @@ pub struct PhonemicizeOutput {
     pub syllables: Vec<Syllable>,
     #[serde(default)]
     pub boundaries: Vec<SpeechBoundaryToken>,
+    #[serde(default)]
+    pub prosody: ProsodyTrack,
     #[serde(default)]
     pub warnings: Vec<PronunciationWarning>,
     pub provenance: EvidenceProvenance,
@@ -655,6 +659,35 @@ fn boundary_tokens(text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> 
     }
 
     boundaries
+}
+
+fn prosody_from_boundaries(boundaries: &[SpeechBoundaryToken]) -> ProsodyTrack {
+    let mut prosody = ProsodyTrack::default();
+    for boundary in boundaries {
+        let Some(kind) = prosodic_label_for_boundary(boundary) else {
+            continue;
+        };
+        prosody.labels.push(ProsodicLabel {
+            span: TimeSpan {
+                start_s: 0.0,
+                end_s: 0.0,
+            },
+            kind,
+            confidence: if boundary.span.is_some() { 0.9 } else { 0.55 },
+        });
+    }
+    prosody
+}
+
+fn prosodic_label_for_boundary(boundary: &SpeechBoundaryToken) -> Option<ProsodicLabelKind> {
+    match (boundary.terminal, boundary.pause) {
+        (Some(TerminalPunctuation::Question), _) => Some(ProsodicLabelKind::QuestionRise),
+        (Some(TerminalPunctuation::Period | TerminalPunctuation::Exclamation), _) => {
+            Some(ProsodicLabelKind::FinalFall)
+        }
+        (None, Some(PauseKind::Comma)) => Some(ProsodicLabelKind::ContinuationRise),
+        _ => None,
+    }
 }
 
 fn punctuation_boundary_after_word(
@@ -1811,6 +1844,12 @@ mod tests {
             boundary.kind == BoundaryKind::Phrase
                 && boundary.after_grapheme_index == 1
                 && boundary.terminal == Some(TerminalPunctuation::Question)
+        }));
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::ContinuationRise && label.confidence > 0.0
+        }));
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::QuestionRise && label.confidence > 0.0
         }));
     }
 }

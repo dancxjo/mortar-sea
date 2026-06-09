@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
     BoundaryKind, FeatureId, FeatureValue, LinguisticVariety, PauseKind, PhoneInventory,
-    PhoneToken, PhonemeInventory, PhonemeToken, Spec, SpeechBoundaryToken, Stress, Syllable,
-    TerminalPunctuation, UtterancePlan, data::arpabet, epenthetic_phones_after, variety_by_code,
+    PhoneToken, PhonemeInventory, PhonemeToken, ProsodicLabelKind, ProsodyTrack, Spec,
+    SpeechBoundaryToken, Stress, Syllable, TerminalPunctuation, UtterancePlan, data::arpabet,
+    epenthetic_phones_after, variety_by_code,
 };
 use thiserror::Error;
 
@@ -35,6 +36,7 @@ pub enum StyleTts2SymbolSource {
     Phone,
     Boundary,
     BoundaryPunctuation,
+    Prosody,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -135,24 +137,23 @@ impl SymbolSet {
         &self,
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
-        if !plan.target_syllables.is_empty() {
-            return self.lower_syllables_with_boundaries(&plan.target_syllables, &plan.boundaries);
-        }
-
-        if !plan.target_phones.is_empty() {
-            return self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries);
-        }
-
-        if !plan.intended_phonemes.is_empty() {
+        let mut sequence = if !plan.target_syllables.is_empty() {
+            self.lower_syllables_with_boundaries(&plan.target_syllables, &plan.boundaries)?
+        } else if !plan.target_phones.is_empty() {
+            self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries)?
+        } else if !plan.intended_phonemes.is_empty() {
             let variety = variety_by_code(&plan.variety.0);
-            return self.lower_phoneme_tokens_with_boundaries(
+            self.lower_phoneme_tokens_with_boundaries(
                 &plan.intended_phonemes,
                 &plan.boundaries,
                 variety.as_ref(),
-            );
-        }
+            )?
+        } else {
+            StyleTts2SymbolSequence { tokens: Vec::new() }
+        };
 
-        Ok(StyleTts2SymbolSequence { tokens: Vec::new() })
+        self.apply_prosody_markers(&mut sequence.tokens, &plan.target_prosody);
+        Ok(sequence)
     }
 
     pub fn lower_syllables(
@@ -403,6 +404,40 @@ impl SymbolSet {
         }
     }
 
+    fn apply_prosody_markers(
+        &self,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        prosody: &ProsodyTrack,
+    ) {
+        let mut markers = prosody
+            .labels
+            .iter()
+            .filter_map(|label| intonation_marker_for_label(&label.kind))
+            .collect::<Vec<_>>();
+        if markers.is_empty() {
+            return;
+        }
+
+        let mut marked = Vec::with_capacity(lowered.len() + markers.len());
+        for token in lowered.drain(..) {
+            if token.source == StyleTts2SymbolSource::BoundaryPunctuation
+                && let Some(index) = markers
+                    .iter()
+                    .position(|marker| marker.compatible_with(&token.symbol))
+            {
+                let marker = markers.remove(index);
+                if self.symbols.contains(marker.symbol) {
+                    marked.push(StyleTts2SymbolToken {
+                        symbol: marker.symbol.to_string(),
+                        source: StyleTts2SymbolSource::Prosody,
+                    });
+                }
+            }
+            marked.push(token);
+        }
+        *lowered = marked;
+    }
+
     fn push_boundary_symbol(
         &self,
         lowered: &mut Vec<StyleTts2SymbolToken>,
@@ -467,12 +502,14 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     ];
     let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ", "ɾ"];
     let stress_symbols = ["ˈ", "ˌ"];
+    let intonation_symbols = ["↗", "↘", "→"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
         arpabet_symbols
             .into_iter()
             .chain(ipa_phone_symbols.into_iter())
             .chain(stress_symbols.into_iter())
+            .chain(intonation_symbols.into_iter())
             .chain(punctuation_symbols.into_iter()),
     );
 
@@ -679,6 +716,36 @@ fn stress_marker(stress: Option<Stress>) -> Option<&'static str> {
         Some(Stress::Secondary) => Some("ˌ"),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IntonationMarker {
+    symbol: &'static str,
+    contour: ProsodicLabelKind,
+}
+
+impl IntonationMarker {
+    fn compatible_with(&self, punctuation: &str) -> bool {
+        match &self.contour {
+            ProsodicLabelKind::QuestionRise => punctuation == "?",
+            ProsodicLabelKind::ContinuationRise => matches!(punctuation, "," | ";" | ":"),
+            ProsodicLabelKind::FinalFall => matches!(punctuation, "." | "!"),
+            _ => false,
+        }
+    }
+}
+
+fn intonation_marker_for_label(kind: &ProsodicLabelKind) -> Option<IntonationMarker> {
+    let symbol = match kind {
+        ProsodicLabelKind::QuestionRise => "↗",
+        ProsodicLabelKind::ContinuationRise => "→",
+        ProsodicLabelKind::FinalFall => "↘",
+        _ => return None,
+    };
+    Some(IntonationMarker {
+        symbol,
+        contour: kind.clone(),
+    })
 }
 
 fn is_terminal_punctuation(symbol: &str) -> bool {

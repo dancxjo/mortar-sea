@@ -7,7 +7,10 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 #[cfg(feature = "piper-onnx")]
 use ort::value::{DynTensorValueType, Tensor, TensorElementType};
 use serde_json::Value;
-use speech::{PhoneToken, Spec, UtterancePlan, phoneme_display_symbol};
+use speech::{
+    PauseKind, PhoneToken, Spec, SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
+    phoneme_display_symbol,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PiperVoiceConfig {
@@ -142,10 +145,8 @@ pub fn piper_voice_config_path(model_path: &Path) -> PathBuf {
 pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
     let mut symbols = Vec::new();
     if !plan.target_phones.is_empty() {
-        let punctuation_after_words = plan
-            .intended_text
-            .as_deref()
-            .map(punctuation_after_words)
+        let punctuation_after_words = typed_punctuation_after_words(&plan.boundaries)
+            .or_else(|| plan.intended_text.as_deref().map(punctuation_after_words))
             .unwrap_or_default();
         let mut word_index = 0;
         let mut in_word = false;
@@ -326,6 +327,37 @@ fn punctuation_after_words(text: &str) -> Vec<Option<&'static str>> {
             punctuation_symbol(&text[*end..next_start])
         })
         .collect()
+}
+
+fn typed_punctuation_after_words(
+    boundaries: &[SpeechBoundaryToken],
+) -> Option<Vec<Option<&'static str>>> {
+    let max_word_index = boundaries
+        .iter()
+        .filter(|boundary| typed_punctuation_symbol(boundary).is_some())
+        .map(|boundary| boundary.after_grapheme_index)
+        .max()?;
+    let mut punctuation = vec![None; max_word_index + 1];
+    for boundary in boundaries {
+        if let Some(symbol) = typed_punctuation_symbol(boundary) {
+            punctuation[boundary.after_grapheme_index] = Some(symbol);
+        }
+    }
+    Some(punctuation)
+}
+
+fn typed_punctuation_symbol(boundary: &SpeechBoundaryToken) -> Option<&'static str> {
+    if let Some(terminal) = boundary.terminal {
+        return Some(match terminal {
+            TerminalPunctuation::Period => ".",
+            TerminalPunctuation::Question => "?",
+            TerminalPunctuation::Exclamation => "!",
+        });
+    }
+    if matches!(boundary.pause, Some(PauseKind::Comma)) {
+        return Some(",");
+    }
+    None
 }
 
 fn word_spans(text: &str) -> Vec<(usize, usize)> {
@@ -1366,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn piper_sequence_preserves_text_terminal_punctuation_from_mortar_plan() {
+    fn piper_sequence_preserves_typed_terminal_punctuation_from_mortar_plan() {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "hello world?".into(),
@@ -1378,13 +1410,13 @@ mod tests {
             id: speech::UtteranceId("test".into()),
             variety: phonemicized.variety,
             speaker: None,
-            intended_text: Some(phonemicized.text),
+            intended_text: None,
             intended_morphemes: Vec::new(),
             intended_phonemes: phonemicized.phonemes,
             target_phones: phonemicized.phones,
             target_syllables: phonemicized.syllables,
             boundaries: phonemicized.boundaries,
-            target_prosody: ProsodyTrack::default(),
+            target_prosody: phonemicized.prosody,
             target_acoustics: Vec::new(),
             style: None,
             provenance: phonemicized.provenance,

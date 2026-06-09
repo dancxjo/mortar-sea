@@ -197,14 +197,17 @@ pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2
         "ɾ" => "ɾ",
         "ɫ" => "l",
         "|" => " ",
-        "." => " .",
-        "!" => " !",
-        "?" => " ?",
-        "," => " ,",
-        ";" => " ;",
-        ":" => " :",
+        "." => " . ",
+        "!" => " ! ",
+        "?" => " ? ",
+        "," => " , ",
+        ";" => " ; ",
+        ":" => " : ",
         "ˈ" => "ˈ",
         "ˌ" => "ˌ",
+        "↗" => "↗",
+        "↘" => "↘",
+        "→" => "→",
         _ => {
             return Err(invalid_output(format!(
                 "cannot map lowered StyleTTS2 symbol `{symbol}` to text-cleaner input"
