@@ -251,7 +251,8 @@ fn split_required_question_chunks(
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     for token in tokens {
-        let is_question_terminal = terminal_for_symbol(&token.symbol) == Some(TerminalPunctuation::Question);
+        let is_question_terminal =
+            terminal_for_symbol(&token.symbol) == Some(TerminalPunctuation::Question);
         current.push(token);
         if is_question_terminal {
             chunks.push(std::mem::take(&mut current));

@@ -693,12 +693,10 @@ fn format_phones(output: &PhonemicizeOutput) -> String {
         .phones
         .iter()
         .filter_map(|token| match &token.phone {
-            Spec::Known(id) if !id.as_str().starts_with("boundary.") => {
-                Some((
-                    phone_display_symbol(id).to_string(),
-                    token_word_index(&token.features),
-                ))
-            }
+            Spec::Known(id) if !id.as_str().starts_with("boundary.") => Some((
+                phone_display_symbol(id).to_string(),
+                token_word_index(&token.features),
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -711,7 +709,9 @@ fn format_symbols_with_boundary_markers(
 ) -> String {
     let mut formatted = Vec::with_capacity(symbols.len());
     for (index, (mut symbol, word_index)) in symbols.iter().cloned().enumerate() {
-        let next_word_index = symbols.get(index + 1).and_then(|(_, word_index)| *word_index);
+        let next_word_index = symbols
+            .get(index + 1)
+            .and_then(|(_, word_index)| *word_index);
         if word_index.is_some() && word_index != next_word_index {
             for marker in boundary_markers_after_word(boundaries, word_index.expect("checked")) {
                 symbol.push_str(marker);

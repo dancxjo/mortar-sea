@@ -581,8 +581,7 @@ fn prepared_plan_splits_question_boundaries_for_intonation() {
         vec![terminal_boundary(0, TerminalPunctuation::Question)],
         Some("a? a".into()),
     );
-    let symbol_set =
-        SymbolSet::new(["alpha", "?", "|"]).with_alias("variety.phone.a", "alpha");
+    let symbol_set = SymbolSet::new(["alpha", "?", "|"]).with_alias("variety.phone.a", "alpha");
     let backend_plan = prepare_styletts2_plan(
         &plan,
         &symbol_set,
@@ -594,7 +593,10 @@ fn prepared_plan_splits_question_boundaries_for_intonation() {
     .expect("prepare plan");
 
     assert_eq!(backend_plan.chunks.len(), 2);
-    assert_eq!(backend_plan.chunks[0].terminal, Some(TerminalPunctuation::Question));
+    assert_eq!(
+        backend_plan.chunks[0].terminal,
+        Some(TerminalPunctuation::Question)
+    );
     assert_eq!(
         backend_plan.chunks[0]
             .symbols
