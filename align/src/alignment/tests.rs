@@ -1257,7 +1257,7 @@ fn feature_track_segments_preserve_real_short_silence_inside_voicing() {
 }
 
 #[test]
-fn feature_track_segments_classify_weak_vowel_shadow_by_voicing() {
+fn feature_track_segments_keep_weak_present_formants_voiced() {
     let mut frames = (0..12).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {
         frame.energy_db = -34.0;
@@ -1280,7 +1280,7 @@ fn feature_track_segments_classify_weak_vowel_shadow_by_voicing() {
             .iter()
             .map(|segment| segment.kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["unvoiced"]
+        vec!["voiced"]
     );
 }
 

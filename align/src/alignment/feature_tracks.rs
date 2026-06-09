@@ -252,11 +252,22 @@ fn average_silence_score(frames: &[AcousticFrameFeatures]) -> f32 {
 fn frame_feature_kind(frame: &AcousticFrameFeatures, activity_threshold: f32) -> &'static str {
     if frame_is_alignment_silence(frame, activity_threshold) {
         "silence"
-    } else if frame.voicing > 0.42 && frame.sonority > 0.16 {
+    } else if (frame.voicing > 0.42 && frame.sonority > 0.16)
+        || has_weak_voiced_formant_structure(frame)
+    {
         "voiced"
     } else {
         "unvoiced"
     }
+}
+
+fn has_weak_voiced_formant_structure(frame: &AcousticFrameFeatures) -> bool {
+    reduced_vowel_shadow_score(frame) > 0.56
+        && frame.sonority > 0.12
+        && frame.high_ratio < 0.34
+        && frame.zero_crossing_rate < 0.16
+        && breath_noise_score(frame) < 0.45
+        && !is_stop_like_unvoiced_landmark(frame)
 }
 
 fn feature_track_segment(
