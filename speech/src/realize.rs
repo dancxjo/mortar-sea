@@ -820,6 +820,42 @@ mod tests {
     }
 
     #[test]
+    fn ah_defaults_to_schwa_and_uses_strut_in_stressed_syllables() {
+        let variety = variety_by_code("en-US-GA").expect("GA");
+        let default = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "AH")],
+            &RealizationOptions::default(),
+        );
+        let primary = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "AH1")],
+            &RealizationOptions::default(),
+        );
+        let secondary = realize_phonemes(
+            &variety,
+            &[phoneme("en-US-GA", "AH2")],
+            &RealizationOptions::default(),
+        );
+
+        assert_eq!(symbols(&default), ["ə"]);
+        assert_eq!(symbols(&primary), ["ʌ"]);
+        assert!(
+            primary[0]
+                .provenance
+                .method
+                .contains("stressed_ah_primary_strut_allophone")
+        );
+        assert_eq!(symbols(&secondary), ["ʌ"]);
+        assert!(
+            secondary[0]
+                .provenance
+                .method
+                .contains("stressed_ah_secondary_strut_allophone")
+        );
+    }
+
+    #[test]
     fn nasal_assimilation_applies_before_velar_stops() {
         let variety = variety_by_code("en-US-GA").expect("GA");
         let phones = realize_phonemes(

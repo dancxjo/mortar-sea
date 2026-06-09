@@ -125,6 +125,40 @@ pub(crate) fn token_word_index(token: &PhonemeToken) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use speech::{EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer};
+
+    fn phonemicized(text: &str) -> PhonemicizeOutput {
+        EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: text.into(),
+                variety: VarietyId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize")
+    }
+
+    #[test]
+    fn format_syllables_keeps_shared_labels_unmarked() {
+        let output = phonemicized("headmistress");
+        let syllables = format_syllables(&output);
+        let stresses = syllables
+            .iter()
+            .map(|syllable| syllable.stress.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(stresses.contains(&"primary"));
+        assert!(stresses.contains(&"secondary"));
+        assert!(
+            syllables.iter().all(
+                |syllable| !syllable.label.starts_with('ˈ') && !syllable.label.starts_with('ˌ')
+            )
+        );
+    }
+}
+
 pub(crate) fn phone_word_index(token: &PhoneToken) -> Option<usize> {
     let value = token
         .features

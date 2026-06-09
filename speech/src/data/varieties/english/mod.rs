@@ -58,6 +58,7 @@ const CH: PhoneId = PhoneId::borrowed("ipa.phone.tʃ");
 const JH: PhoneId = PhoneId::borrowed("ipa.phone.dʒ");
 const TAP: PhoneId = PhoneId::borrowed("ipa.phone.ɾ");
 const SCHWA: PhoneId = PhoneId::borrowed("ipa.phone.ə");
+const STRUT: PhoneId = PhoneId::borrowed("ipa.phone.ʌ");
 const R_COLORED_SCHWA: PhoneId = PhoneId::borrowed("ipa.phone.ɚ");
 const SYLLABLE_BREAK: PhoneId = PhoneId::borrowed("ipa.phone.|");
 const WORD_BOUNDARY: PhoneId = PhoneId::borrowed("boundary.word");
@@ -383,6 +384,12 @@ fn phoneme_inventory(variety_id: &str) -> PhonemeInventory {
             (phoneme.id.clone(), phoneme)
         })
         .collect::<HashMap<_, _>>();
+    if let Some(ah) = phonemes.get_mut(&arpabet::phoneme_id(variety_id, "AH")) {
+        ah.default_phone = Some(SCHWA);
+        if !ah.possible_phones.contains(&SCHWA) {
+            ah.possible_phones.insert(0, SCHWA);
+        }
+    }
     for rule in allophone_rules(variety_id) {
         let Spec::Known(phoneme_id) = &rule.input.phoneme else {
             continue;
@@ -412,6 +419,9 @@ fn phone_inventory() -> PhoneInventory {
     for entry in ARPABET {
         let mut phone = arpabet::phone_for_entry(entry);
         enrich_english_inventory_features(&mut phone.features, entry);
+        if entry.symbol == "AH" {
+            phone.status = crate::segment::SegmentStatus::Allophonic;
+        }
         phones.insert(phone.id.clone(), phone);
     }
     for (phone_ref, base, ipa) in [(SCHWA, "AH", "ə"), (R_COLORED_SCHWA, "ER", "ɚ")] {
@@ -425,12 +435,17 @@ fn phone_inventory() -> PhoneInventory {
             FeatureId("phonology.reduced_vowel".into()),
             Spec::Known(FeatureValue::Bool(true)),
         );
+        let status = if phone_ref == SCHWA {
+            crate::segment::SegmentStatus::Core
+        } else {
+            crate::segment::SegmentStatus::Allophonic
+        };
         let phone = crate::phonetics::Phone {
             id: phone_ref,
             ipa: ipa.into(),
             features,
             aliases: Vec::new(),
-            status: crate::segment::SegmentStatus::Allophonic,
+            status,
         };
         phones.insert(phone.id.clone(), phone);
     }
@@ -2903,6 +2918,32 @@ fn allophone_rules(variety_id: &str) -> Vec<AllophoneRule> {
         status: RuleStatus::Productive,
     });
 
+    for (stress, label) in [
+        (Stress::Primary, "primary"),
+        (Stress::Secondary, "secondary"),
+    ] {
+        rules.push(AllophoneRule {
+            id: format!("american_english_stressed_ah_{label}_strut_allophone"),
+            name: format!("American English {label}-stressed /AH/ strut allophone"),
+            input: phoneme_pattern(variety_id, "AH"),
+            environment: Environment {
+                syllable_position: Spec::Known(SyllablePosition::Nucleus),
+                stress_context: Spec::Known(stress),
+                ..Default::default()
+            },
+            conditions: Vec::new(),
+            output: PhonePattern {
+                phone: Spec::Known(STRUT),
+                features: feature_bundle_with_values(&[(
+                    "phonology.stress_conditioned_allophone",
+                    FeatureValue::Bool(true),
+                )]),
+            },
+            confidence: 0.95,
+            status: RuleStatus::Productive,
+        });
+    }
+
     for (symbol, phone) in [("AH", SCHWA), ("ER", R_COLORED_SCHWA)] {
         rules.push(AllophoneRule {
             id: format!(
@@ -3262,12 +3303,21 @@ mod tests {
                 .contains_key(&PhonemeId("en-US-GA.phoneme.ʌ".into()))
         );
         assert!(ga.phones.phones.contains_key(&PhoneId::from("ipa.phone.ʌ")));
+        assert_eq!(
+            ga.phones.phones.get(&SCHWA).expect("schwa phone").status,
+            crate::segment::SegmentStatus::Core
+        );
+        assert_eq!(
+            ga.phones.phones.get(&STRUT).expect("strut phone").status,
+            crate::segment::SegmentStatus::Allophonic
+        );
         let ah = ga
             .phonemes
             .phonemes
             .get(&arpabet::phoneme_id("en-US-GA", "AH"))
             .expect("AH phoneme decoded to canonical id");
         assert_eq!(ah.id, PhonemeId("en-US-GA.phoneme.ʌ".into()));
+        assert_eq!(ah.default_phone, Some(SCHWA));
         assert!(
             ah.aliases
                 .iter()
@@ -3925,9 +3975,20 @@ mod tests {
         assert!(d.possible_phones.contains(&TAP));
         assert!(l.possible_phones.contains(&DARK_L));
         assert!(ah.possible_phones.contains(&SCHWA));
+        assert!(ah.possible_phones.contains(&STRUT));
         assert!(ah.allophones.iter().any(|allophone| {
             allophone.phone == SCHWA
                 && allophone.environment.stress_context == Spec::Known(Stress::Unstressed)
+                && allophone.environment.syllable_position == Spec::Known(SyllablePosition::Nucleus)
+        }));
+        assert!(ah.allophones.iter().any(|allophone| {
+            allophone.phone == STRUT
+                && allophone.environment.stress_context == Spec::Known(Stress::Primary)
+                && allophone.environment.syllable_position == Spec::Known(SyllablePosition::Nucleus)
+        }));
+        assert!(ah.allophones.iter().any(|allophone| {
+            allophone.phone == STRUT
+                && allophone.environment.stress_context == Spec::Known(Stress::Secondary)
                 && allophone.environment.syllable_position == Spec::Known(SyllablePosition::Nucleus)
         }));
 

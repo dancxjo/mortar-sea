@@ -405,15 +405,32 @@ function renderPhonemicization(payload) {
   state.currentPhonemicization = payload;
   elements.phonemes.textContent = payload.phonemes || '';
   elements.phones.textContent = payload.phones || '';
-  elements.syllables.textContent = (payload.syllables || [])
-    .map((syllable) => `${syllable.label} (${syllable.stress})`)
-    .join(' / ');
+  elements.syllables.textContent = formatSyllableTranscription(payload.syllables || []);
   elements.warnings.textContent = (payload.warnings || [])
     .map((warning) => `${warning.token}: ${warning.message}`)
     .join('\n');
   elements.ir.textContent = JSON.stringify(payload.ir, null, 2);
   elements['phoneme-detail'].textContent = `${payload.variety}, ${countItems(payload.phonemes)} phonemes`;
   drawAll();
+}
+
+function formatSyllableTranscription(syllables) {
+  const labels = syllables
+    .map((syllable) => {
+      const label = syllable.label || '';
+      if (syllable.stress === 'primary') return `ˈ${label}`;
+      if (syllable.stress === 'secondary') return `ˌ${label}`;
+      return label;
+    })
+    .filter((label) => label.length > 0);
+  const transcription = labels
+    .map((label, index) => {
+      if (index === 0 || label.startsWith('ˈ') || label.startsWith('ˌ')) return label;
+      return `.${label}`;
+    })
+    .join('');
+
+  return transcription ? `[${transcription}]` : '';
 }
 
 function renderAlignment(payload) {
