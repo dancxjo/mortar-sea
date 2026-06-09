@@ -191,6 +191,7 @@ pub fn styletts2_text_for_symbol(symbol: &str) -> Result<&'static str, StyleTts2
         "Z" => "z",
         "ZH" => "ʒ",
         "ə" => "ə",
+        "ɐ" => "ɐ",
         "ʌ" => "ʌ",
         "ɚ" => "ɚ",
         "ɝ" => "ɝ",

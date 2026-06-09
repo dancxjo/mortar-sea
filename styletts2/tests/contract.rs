@@ -412,6 +412,7 @@ fn en_us_phone_lowering_preserves_schwa_and_strut_distinction() {
     let lowered = styletts2_en_us_symbol_set()
         .lower_phone_tokens(&[
             phone_token("ipa.phone.ə"),
+            phone_token("ipa.phone.ɐ"),
             phone_token("ipa.phone.ʌ"),
             phone_token("ipa.phone.ɚ"),
             phone_token("ipa.phone.ɝ"),
@@ -423,7 +424,7 @@ fn en_us_phone_lowering_preserves_schwa_and_strut_distinction() {
         .map(|token| token.symbol.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(symbols, ["ə", "ʌ", "ɚ", "ɝ"]);
+    assert_eq!(symbols, ["ə", "ɐ", "ʌ", "ɚ", "ɝ"]);
 }
 
 #[test]
@@ -554,6 +555,10 @@ fn speech_spine_lowers_to_ipa_text_without_lexical_stress_for_styletts2() {
         ("current", "kɝənt"),
         ("derived", "dɚaɪvd"),
         ("surface", "sɝfəs"),
+        (
+            "Tomorrow I will align the tires",
+            "təmɑːɹoʊ aɪ wɪl ɐlaɪn ðə taɪɚz",
+        ),
         (
             "That points to a real phonological rule.",
             "ðæt pɔɪnts tuː ə ɹiːl foʊnəlɑːdʒɪkəl ɹuːl↘ .",

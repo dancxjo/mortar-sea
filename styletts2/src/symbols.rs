@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use speech::{
-    BoundaryKind, FeatureId, FeatureValue, LinguisticVariety, PauseKind, PhoneInventory,
-    PhoneToken, PhonemeInventory, PhonemeToken, ProsodicLabelKind, ProsodyTrack, Spec,
-    SpeechBoundaryToken, Syllable, TerminalPunctuation, UtterancePlan, data::arpabet,
+    BoundaryKind, EvidenceSource, FeatureId, FeatureValue, LinguisticVariety, PauseKind,
+    PhoneInventory, PhoneToken, PhonemeInventory, PhonemeToken, ProsodicLabelKind, ProsodyTrack,
+    Spec, SpeechBoundaryToken, Syllable, TerminalPunctuation, UtterancePlan, data::arpabet,
     epenthetic_phones_after, variety_by_code,
 };
 use thiserror::Error;
@@ -315,7 +315,8 @@ impl SymbolSet {
                 continue;
             }
 
-            if let Some(symbol) = phoneme_symbols.symbol_for_phone(token) {
+            let word_initial = !in_word;
+            if let Some(symbol) = phoneme_symbols.symbol_for_phone(token, word_initial) {
                 lowered.push(StyleTts2SymbolToken {
                     symbol,
                     source: StyleTts2SymbolSource::Phoneme,
@@ -363,13 +364,18 @@ impl SymbolSet {
                     continue;
                 }
                 let word_index = phone_usize_feature(phone, "orthography.word_index");
+                let word_initial = match (previous_word_index, word_index) {
+                    (Some(previous), Some(current)) => current != previous,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
                 if let (Some(previous), Some(current)) = (previous_word_index, word_index)
                     && current != previous
                     && !self.push_boundary_after_word(&mut lowered, boundaries, previous)
                 {
                     self.push_boundary_symbol(&mut lowered, "|", StyleTts2SymbolSource::Boundary);
                 }
-                if let Some(symbol) = phoneme_symbols.symbol_for_phone(phone) {
+                if let Some(symbol) = phoneme_symbols.symbol_for_phone(phone, word_initial) {
                     lowered.push(StyleTts2SymbolToken {
                         symbol,
                         source: StyleTts2SymbolSource::Phoneme,
@@ -527,7 +533,8 @@ struct PhoneBackedPhonemeSymbols {
 #[derive(Debug, Clone)]
 struct PhoneBackedPhonemeSymbol {
     phone: PhoneToken,
-    symbol: Option<String>,
+    phoneme: PhonemeToken,
+    underlying_symbol: Option<String>,
 }
 
 impl PhoneBackedPhonemeSymbols {
@@ -548,7 +555,8 @@ impl PhoneBackedPhonemeSymbols {
             for phone in &phoneme.realized_as {
                 queued.push_back(PhoneBackedPhonemeSymbol {
                     phone: phone.clone(),
-                    symbol: if phone_should_lower_as_underlying_phoneme(phone) {
+                    phoneme: phoneme.clone(),
+                    underlying_symbol: if phone_should_lower_as_underlying_phoneme(phone) {
                         symbol.clone()
                     } else {
                         None
@@ -559,7 +567,7 @@ impl PhoneBackedPhonemeSymbols {
         Ok(Self { queued })
     }
 
-    fn symbol_for_phone(&mut self, phone: &PhoneToken) -> Option<String> {
+    fn symbol_for_phone(&mut self, phone: &PhoneToken, word_initial: bool) -> Option<String> {
         let position = self
             .queued
             .iter()
@@ -567,7 +575,14 @@ impl PhoneBackedPhonemeSymbols {
         for _ in 0..position {
             self.queued.pop_front();
         }
-        self.queued.pop_front()?.symbol
+        let candidate = self.queued.pop_front()?;
+        if phone_should_lower_as_underlying_phoneme(phone) {
+            return candidate.underlying_symbol;
+        }
+        if styletts2_prefers_open_central_reduced_vowel(phone, &candidate.phoneme, word_initial) {
+            return Some("ɐ".into());
+        }
+        None
     }
 }
 
@@ -581,6 +596,18 @@ fn phones_align(left: &PhoneToken, right: &PhoneToken) -> bool {
 
 fn phone_should_lower_as_underlying_phoneme(phone: &PhoneToken) -> bool {
     matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɾ")
+}
+
+fn styletts2_prefers_open_central_reduced_vowel(
+    phone: &PhoneToken,
+    phoneme: &PhonemeToken,
+    word_initial: bool,
+) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ə")
+        && word_initial
+        && phoneme.provenance.source == EvidenceSource::Lexicon
+        && phone_feature_category(phone, "phonology.base_symbol") == Some("AH")
+        && phone_feature_category(phone, "phonology.stress") == Some("unstressed")
 }
 
 fn is_r_colored_vowel_phone(phone: &PhoneToken) -> bool {
@@ -598,7 +625,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
-    let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ"];
+    let ipa_phone_symbols = ["ə", "ɐ", "ʌ", "ɚ", "ɝ"];
     let intonation_symbols = ["↗", "↘", "→"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
     let mut set = SymbolSet::new(
@@ -662,6 +689,7 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.æ", "AE"),
         ("ipa.phone.ʌ", "ʌ"),
         ("ipa.phone.ə", "ə"),
+        ("ipa.phone.ɐ", "ɐ"),
         ("ipa.phone.ɔ", "AO"),
         ("ipa.phone.aʊ", "AW"),
         ("ipa.phone.aɪ", "AY"),
@@ -769,6 +797,16 @@ fn cmudict_backend_alias(token: &PhonemeToken) -> Option<String> {
 }
 
 fn phoneme_feature_category<'a>(token: &'a PhonemeToken, feature_id: &str) -> Option<&'a str> {
+    let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn phone_feature_category<'a>(token: &'a PhoneToken, feature_id: &str) -> Option<&'a str> {
     let value = token.features.values.get(&FeatureId(feature_id.into()))?;
     match value {
         Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
