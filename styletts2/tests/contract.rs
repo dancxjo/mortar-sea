@@ -568,6 +568,52 @@ fn prepared_plan_coalesces_sentences_up_to_symbol_limit() {
 }
 
 #[test]
+fn prepared_plan_splits_question_boundaries_for_intonation() {
+    let plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![
+            phone_token("variety.phone.a"),
+            phone_token("boundary.word"),
+            phone_token("variety.phone.a"),
+        ],
+        vec![terminal_boundary(0, TerminalPunctuation::Question)],
+        Some("a? a".into()),
+    );
+    let symbol_set =
+        SymbolSet::new(["alpha", "?", "|"]).with_alias("variety.phone.a", "alpha");
+    let backend_plan = prepare_styletts2_plan(
+        &plan,
+        &symbol_set,
+        StyleTts2PlanOptions {
+            max_symbols_per_chunk: 10,
+            chunking_enabled: true,
+        },
+    )
+    .expect("prepare plan");
+
+    assert_eq!(backend_plan.chunks.len(), 2);
+    assert_eq!(backend_plan.chunks[0].terminal, Some(TerminalPunctuation::Question));
+    assert_eq!(
+        backend_plan.chunks[0]
+            .symbols
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "?"]
+    );
+    assert_eq!(
+        backend_plan.chunks[1]
+            .symbols
+            .iter()
+            .map(|token| token.symbol.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+}
+
+#[test]
 fn prepared_plan_splits_oversized_input_at_sentence_boundaries_first() {
     let plan = plan(
         None,

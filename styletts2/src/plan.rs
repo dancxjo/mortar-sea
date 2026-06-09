@@ -237,10 +237,30 @@ fn chunk_symbols(
         return vec![chunk_from_tokens(tokens)];
     }
 
-    split_oversized_chunk(tokens, max_symbols_per_chunk)
+    split_required_question_chunks(tokens)
+        .into_iter()
+        .flat_map(|tokens| split_oversized_chunk(tokens, max_symbols_per_chunk))
         .into_iter()
         .filter(|chunk| !chunk.symbols.is_empty())
         .collect()
+}
+
+fn split_required_question_chunks(
+    tokens: Vec<StyleTts2SymbolToken>,
+) -> Vec<Vec<StyleTts2SymbolToken>> {
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for token in tokens {
+        let is_question_terminal = terminal_for_symbol(&token.symbol) == Some(TerminalPunctuation::Question);
+        current.push(token);
+        if is_question_terminal {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn split_oversized_chunk(

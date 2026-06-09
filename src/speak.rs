@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use speech::{
-    EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, PhonemicizeOutput, PhonemicizeRequest,
-    Phonemicizer, PronunciationWarning, PronunciationWarningKind, ProsodyTrack, Spec, UtteranceId,
-    UtterancePlan, VarietyId, phone_display_symbol, phoneme_default_phone_display_symbol,
+    EnglishPhonemicizer, EvidenceProvenance, EvidenceSource, FeatureId, FeatureValue, PauseKind,
+    PhonemicizeOutput, PhonemicizeRequest, Phonemicizer, PronunciationWarning,
+    PronunciationWarningKind, ProsodyTrack, Spec, SpeechBoundaryToken, TerminalPunctuation,
+    UtteranceId, UtterancePlan, VarietyId, phone_display_symbol,
+    phoneme_default_phone_display_symbol,
 };
 use styletts2::{
     BackendSynthesisPlan, DEFAULT_MAX_TTS_SYMBOLS, MockStyleTts2Backend, StyleTts2Backend,
@@ -672,29 +674,87 @@ fn synthesize_backend_plan_with_styletts2_to_wav(
 }
 
 fn format_phonemes(output: &PhonemicizeOutput) -> String {
-    output
+    let symbols = output
         .phonemes
         .iter()
         .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variety)),
+            Spec::Known(id) => Some((
+                phoneme_default_phone_display_symbol(id, &output.variety),
+                token_word_index(&token.features),
+            )),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<Vec<_>>();
+    format_symbols_with_boundary_markers(symbols, &output.boundaries)
 }
 
 fn format_phones(output: &PhonemicizeOutput) -> String {
-    output
+    let symbols = output
         .phones
         .iter()
         .filter_map(|token| match &token.phone {
             Spec::Known(id) if !id.as_str().starts_with("boundary.") => {
-                Some(phone_display_symbol(id).to_string())
+                Some((
+                    phone_display_symbol(id).to_string(),
+                    token_word_index(&token.features),
+                ))
             }
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<Vec<_>>();
+    format_symbols_with_boundary_markers(symbols, &output.boundaries)
+}
+
+fn format_symbols_with_boundary_markers(
+    symbols: Vec<(String, Option<usize>)>,
+    boundaries: &[SpeechBoundaryToken],
+) -> String {
+    let mut formatted = Vec::with_capacity(symbols.len());
+    for (index, (mut symbol, word_index)) in symbols.iter().cloned().enumerate() {
+        let next_word_index = symbols.get(index + 1).and_then(|(_, word_index)| *word_index);
+        if word_index.is_some() && word_index != next_word_index {
+            for marker in boundary_markers_after_word(boundaries, word_index.expect("checked")) {
+                symbol.push_str(marker);
+            }
+        }
+        formatted.push(symbol);
+    }
+    formatted.join(" ")
+}
+
+fn boundary_markers_after_word(
+    boundaries: &[SpeechBoundaryToken],
+    word_index: usize,
+) -> impl Iterator<Item = &'static str> + '_ {
+    boundaries
+        .iter()
+        .filter(move |boundary| boundary.after_grapheme_index == word_index)
+        .filter_map(boundary_intonation_marker)
+}
+
+fn boundary_intonation_marker(boundary: &SpeechBoundaryToken) -> Option<&'static str> {
+    if let Some(terminal) = boundary.terminal {
+        return Some(match terminal {
+            TerminalPunctuation::Question => "↗",
+            TerminalPunctuation::Period | TerminalPunctuation::Exclamation => "↘",
+        });
+    }
+    if matches!(boundary.pause, Some(PauseKind::Comma)) {
+        return Some("→");
+    }
+    None
+}
+
+fn token_word_index(features: &speech::FeatureBundle) -> Option<usize> {
+    let value = features
+        .values
+        .get(&FeatureId("orthography.word_index".into()))?;
+    match value {
+        Spec::Known(FeatureValue::Number(value)) if value.is_finite() && *value >= 0.0 => {
+            Some(*value as usize)
+        }
+        _ => None,
+    }
 }
 
 fn format_phonemes_with_features(output: &PhonemicizeOutput) -> String {
@@ -855,6 +915,24 @@ mod tests {
                 "ˈ", "AE", "G", "T", "ˌ", "AY", "M", "|", "G", "ˈ", "AE", "L", "↘", "."
             ]
         );
+    }
+
+    #[test]
+    fn speak_formats_ipa_transcriptions_with_intonation_markers() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "Want to see hundreds of baby herons? Go to King County's busiest dog park"
+                    .into(),
+                variety: VarietyId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+
+        let phonemes = format_phonemes(&phonemicized);
+        let phones = format_phones(&phonemicized);
+
+        assert!(phonemes.contains("z↗"), "{phonemes}");
+        assert!(phones.contains("z↗"), "{phones}");
     }
 
     #[test]
