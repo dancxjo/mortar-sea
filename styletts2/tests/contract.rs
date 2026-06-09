@@ -443,6 +443,21 @@ fn en_us_phone_lowering_lowers_dark_l_to_regular_l() {
 }
 
 #[test]
+fn en_us_phone_lowering_does_not_lower_bare_tap_phone() {
+    let error = styletts2_en_us_symbol_set()
+        .lower_phone_tokens(&[phone_token("ipa.phone.ɾ")])
+        .expect_err("bare tap phone should need an underlying phoneme");
+
+    assert_eq!(
+        error,
+        SymbolLoweringError::UnknownSymbol {
+            token_source: StyleTts2SymbolSource::Phone,
+            token_id: "ipa.phone.ɾ".into()
+        }
+    );
+}
+
+#[test]
 fn en_us_phone_lowering_keeps_acronym_letter_boundaries() {
     let lowered = styletts2_en_us_symbol_set()
         .lower_phone_tokens(&[
@@ -459,6 +474,31 @@ fn en_us_phone_lowering_keeps_acronym_letter_boundaries() {
         .collect::<Vec<_>>();
 
     assert_eq!(symbols, ["AY", "|", "AA", "R"]);
+}
+
+#[test]
+fn plan_lowering_uses_underlying_phoneme_for_tap_phone() {
+    for (phoneme_id, expected_symbol) in [("en-US-GA.phoneme.T", "T"), ("en-US-GA.phoneme.D", "D")]
+    {
+        let tap = phone_token("ipa.phone.ɾ");
+        let mut phoneme = phoneme_token(phoneme_id);
+        phoneme.realized_as = vec![tap.clone()];
+        let plan = plan(
+            None,
+            None,
+            vec![phoneme],
+            vec![tap],
+            Vec::new(),
+            Some("tap".into()),
+        );
+
+        let lowered = styletts2_en_us_symbol_set()
+            .lower_plan_tokens(&plan)
+            .expect("plan should lower");
+
+        assert_eq!(lowered.tokens[0].symbol, expected_symbol);
+        assert_eq!(lowered.tokens[0].source, StyleTts2SymbolSource::Phoneme);
+    }
 }
 
 #[test]
@@ -500,6 +540,7 @@ fn plan_lowering_prefers_realized_phones_over_phonemes() {
 fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
     for (input, expected) in [
         ("I R", "ˈaɪj ˈɑːɹ"),
+        ("city", "sˈɪtiː"),
         ("world", "wˈɜːɹld"),
         (
             "I’ll inspect the current English rule.",

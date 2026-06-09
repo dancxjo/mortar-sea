@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -138,9 +138,17 @@ impl SymbolSet {
         plan: &UtterancePlan,
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         let mut sequence = if !plan.target_syllables.is_empty() {
-            self.lower_syllables_with_boundaries(&plan.target_syllables, &plan.boundaries)?
+            self.lower_syllables_with_boundaries(
+                &plan.target_syllables,
+                &plan.boundaries,
+                &plan.intended_phonemes,
+            )?
         } else if !plan.target_phones.is_empty() {
-            self.lower_phone_tokens_with_boundaries(&plan.target_phones, &plan.boundaries)?
+            self.lower_phone_tokens_with_boundaries(
+                &plan.target_phones,
+                &plan.boundaries,
+                &plan.intended_phonemes,
+            )?
         } else if !plan.intended_phonemes.is_empty() {
             let variety = variety_by_code(&plan.variety.0);
             self.lower_phoneme_tokens_with_boundaries(
@@ -160,7 +168,7 @@ impl SymbolSet {
         &self,
         syllables: &[Syllable],
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
-        self.lower_syllables_with_boundaries(syllables, &[])
+        self.lower_syllables_with_boundaries(syllables, &[], &[])
     }
 
     pub fn lower_phoneme_tokens(
@@ -275,10 +283,12 @@ impl SymbolSet {
         &self,
         tokens: &[PhoneToken],
         boundaries: &[SpeechBoundaryToken],
+        phonemes: &[PhonemeToken],
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         let mut lowered = Vec::new();
         let mut word_index = 0;
         let mut in_word = false;
+        let mut phoneme_symbols = PhoneBackedPhonemeSymbols::new(self, phonemes)?;
 
         for token in tokens {
             let Some(token_id) = spec_token_id(&token.phone) else {
@@ -305,6 +315,15 @@ impl SymbolSet {
                 continue;
             }
 
+            if let Some(symbol) = phoneme_symbols.symbol_for_phone(token) {
+                lowered.push(StyleTts2SymbolToken {
+                    symbol,
+                    source: StyleTts2SymbolSource::Phoneme,
+                });
+                in_word = true;
+                continue;
+            }
+
             lowered.push(StyleTts2SymbolToken {
                 symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
                 source: StyleTts2SymbolSource::Phone,
@@ -324,9 +343,11 @@ impl SymbolSet {
         &self,
         syllables: &[Syllable],
         boundaries: &[SpeechBoundaryToken],
+        phonemes: &[PhonemeToken],
     ) -> Result<StyleTts2SymbolSequence, SymbolLoweringError> {
         let mut lowered = Vec::new();
         let mut previous_word_index = None;
+        let mut phoneme_symbols = PhoneBackedPhonemeSymbols::new(self, phonemes)?;
 
         for syllable in syllables {
             let stress_marker = stress_marker(syllable_stress(syllable));
@@ -353,6 +374,14 @@ impl SymbolSet {
                         marker,
                         StyleTts2SymbolSource::Boundary,
                     );
+                }
+                if let Some(symbol) = phoneme_symbols.symbol_for_phone(phone) {
+                    lowered.push(StyleTts2SymbolToken {
+                        symbol,
+                        source: StyleTts2SymbolSource::Phoneme,
+                    });
+                    previous_word_index = word_index.or(previous_word_index);
+                    continue;
                 }
                 lowered.push(StyleTts2SymbolToken {
                     symbol: self.resolve_symbol(token_id, StyleTts2SymbolSource::Phone)?,
@@ -494,13 +523,77 @@ impl SymbolSet {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PhoneBackedPhonemeSymbols {
+    queued: VecDeque<PhoneBackedPhonemeSymbol>,
+}
+
+#[derive(Debug, Clone)]
+struct PhoneBackedPhonemeSymbol {
+    phone: PhoneToken,
+    symbol: Option<String>,
+}
+
+impl PhoneBackedPhonemeSymbols {
+    fn new(symbol_set: &SymbolSet, phonemes: &[PhonemeToken]) -> Result<Self, SymbolLoweringError> {
+        let mut queued = VecDeque::new();
+        for phoneme in phonemes {
+            let mut symbol = None;
+            if phoneme
+                .realized_as
+                .iter()
+                .any(phone_should_lower_as_underlying_phoneme)
+            {
+                if let Some(token_id) = spec_token_id(&phoneme.phoneme) {
+                    symbol = Some(symbol_set.resolve_phoneme_symbol(token_id, phoneme)?);
+                }
+            }
+
+            for phone in &phoneme.realized_as {
+                queued.push_back(PhoneBackedPhonemeSymbol {
+                    phone: phone.clone(),
+                    symbol: if phone_should_lower_as_underlying_phoneme(phone) {
+                        symbol.clone()
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
+        Ok(Self { queued })
+    }
+
+    fn symbol_for_phone(&mut self, phone: &PhoneToken) -> Option<String> {
+        let position = self
+            .queued
+            .iter()
+            .position(|candidate| phones_align(phone, &candidate.phone))?;
+        for _ in 0..position {
+            self.queued.pop_front();
+        }
+        self.queued.pop_front()?.symbol
+    }
+}
+
+fn phones_align(left: &PhoneToken, right: &PhoneToken) -> bool {
+    left.phone == right.phone
+        && phone_usize_feature(left, "orthography.word_index")
+            == phone_usize_feature(right, "orthography.word_index")
+        && phone_usize_feature(left, "orthography.letter_index")
+            == phone_usize_feature(right, "orthography.letter_index")
+}
+
+fn phone_should_lower_as_underlying_phoneme(phone: &PhoneToken) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɾ")
+}
+
 pub fn styletts2_en_us_symbol_set() -> SymbolSet {
     let arpabet_symbols = [
         "AA", "AE", "AH", "AO", "AW", "AY", "B", "CH", "D", "DH", "EH", "ER", "EY", "F", "G", "HH",
         "IH", "IY", "JH", "K", "L", "M", "N", "NG", "OW", "OY", "P", "R", "S", "SH", "T", "TH",
         "UH", "UW", "V", "W", "Y", "Z", "ZH", "|",
     ];
-    let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ", "ɾ"];
+    let ipa_phone_symbols = ["ə", "ʌ", "ɚ", "ɝ"];
     let stress_symbols = ["ˈ", "ˌ"];
     let intonation_symbols = ["↗", "↘", "→"];
     let punctuation_symbols = [".", "!", "?", ",", ";", ":"];
@@ -602,7 +695,6 @@ pub fn styletts2_en_us_symbol_set() -> SymbolSet {
         ("ipa.phone.t", "T"),
         ("ipa.phone.tʰ", "T"),
         ("ipa.phone.t˭", "T"),
-        ("ipa.phone.ɾ", "ɾ"),
         ("ipa.phone.θ", "TH"),
         ("ipa.phone.ʊ", "UH"),
         ("ipa.phone.uː", "UW"),
