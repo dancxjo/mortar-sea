@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mortar Align</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
     <script defer src="/static/app.js"></script>
   </head>
   <body>
@@ -80,15 +81,15 @@
                 <option value="">default style</option>
               </select>
             </div>
-            <button type="button" id="refresh-voices" class="icon-button" title="Refresh WAV list" aria-label="Refresh WAV list">&#8635;</button>
-            <button type="button" id="synthesize" class="icon-button" title="Synthesize audio" aria-label="Synthesize audio">&#9889;</button>
+            <button type="button" id="refresh-voices" class="icon-button" title="Refresh WAV list" aria-label="Refresh WAV list"><i data-lucide="refresh-cw" aria-hidden="true">&#8635;</i></button>
+            <button type="button" id="synthesize" class="icon-button" title="Synthesize audio" aria-label="Synthesize audio"><i data-lucide="zap" aria-hidden="true">&#9889;</i></button>
           </div>
           <details class="voice-details">
             <summary>Add speaker WAV</summary>
             <div class="voice-actions">
-              <label class="file-button icon-button" for="styletts2-voice-file" title="Upload voice WAV" aria-label="Upload voice WAV">&#8679;</label>
+              <label class="file-button labeled-icon-button" for="styletts2-voice-file" title="Upload voice WAV" aria-label="Upload voice WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
               <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
-              <button type="button" id="record-styletts2-voice" class="icon-button" title="Record voice sample" aria-label="Start recording voice sample" aria-pressed="false" data-state="idle">&#9679;</button>
+              <button type="button" id="record-styletts2-voice" class="labeled-icon-button" title="Record voice sample" aria-label="Start recording voice sample" aria-pressed="false" data-state="idle"><i data-lucide="circle" aria-hidden="true">&#9679;</i><span>Record</span></button>
             </div>
           </details>
         </section>
@@ -97,11 +98,12 @@
           <header>
             <h2 id="audio-input-heading">Provide your own</h2>
             <span>Add source WAV</span>
+
           </header>
           <div class="audio-source-controls" aria-label="Add audio">
-            <label class="file-button icon-button" for="wav-file" title="Upload WAV" aria-label="Upload WAV">&#8679;</label>
+            <label class="file-button labeled-icon-button" for="wav-file" title="Upload WAV" aria-label="Upload WAV"><i data-lucide="upload" aria-hidden="true">&#8679;</i><span>Upload</span></label>
             <input id="wav-file" type="file" accept="audio/wav,.wav" />
-            <button type="button" id="record" class="icon-button" title="Record audio" aria-label="Start recording audio" aria-pressed="false" data-state="idle">&#9679;</button>
+            <button type="button" id="record" class="labeled-icon-button" title="Record audio" aria-label="Start recording audio" aria-pressed="false" data-state="idle"><i data-lucide="circle" aria-hidden="true">&#9679;</i><span>Record</span></button>
           </div>
         </section>
       </section>
@@ -119,12 +121,12 @@
 
       <section class="daw-toolbar" aria-label="DAW actions">
         <div class="timeline-controls" aria-label="Timeline zoom">
-          <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>
-          <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-          <button type="button" id="fit" title="Fit timeline" aria-label="Fit timeline">&#9974;</button>
+          <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out"><i data-lucide="zoom-out" aria-hidden="true">-</i></button>
+          <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in"><i data-lucide="zoom-in" aria-hidden="true">+</i></button>
+          <button type="button" id="fit" title="Fit timeline" aria-label="Fit timeline"><i data-lucide="maximize" aria-hidden="true">&#9974;</i></button>
         </div>
         <div class="playback-controls" aria-label="Playback">
-          <button type="button" id="audio-play-toggle" title="Paused - play audio" aria-label="Paused - play audio" aria-pressed="false" data-state="paused">&#9654;</button>
+          <button type="button" id="audio-play-toggle" title="Paused - play audio" aria-label="Paused - play audio" aria-pressed="false" data-state="paused"><i data-lucide="play" aria-hidden="true">&#9654;</i></button>
         </div>
       </section>
 
@@ -148,7 +150,7 @@
         <article>
           <header>
             <h2>Speech IR</h2>
-            <button type="button" id="toggle-ir" class="icon-button" title="Show Speech IR" aria-label="Show Speech IR">&#9656;</button>
+            <button type="button" id="toggle-ir" class="icon-button" title="Show Speech IR" aria-label="Show Speech IR"><i data-lucide="chevron-right" aria-hidden="true">&#9656;</i></button>
           </header>
           <pre id="ir" hidden></pre>
         </article>

@@ -50,6 +50,20 @@ const state = {
 
 const elements = {};
 const canvases = {};
+const ICON_FALLBACKS = {
+  'chevron-down': '\u25be',
+  'chevron-right': '\u25b8',
+  circle: '\u25cf',
+  maximize: '\u26f6',
+  pause: '\u23f8',
+  play: '\u25b6',
+  square: '\u25a0',
+  upload: '\u21e7',
+  zap: '\u26a1',
+  'zoom-in': '+',
+  'zoom-out': '-',
+  'refresh-cw': '\u21bb',
+};
 
 window.addEventListener('DOMContentLoaded', () => {
   for (const id of [
@@ -184,8 +198,41 @@ window.addEventListener('DOMContentLoaded', () => {
   updateAudioTransport();
   updateRecordingControls();
   updateActionButtons();
+  renderLucideIcons();
   drawAll();
 });
+
+function iconMarkup(iconName, label = '') {
+  const fallback = ICON_FALLBACKS[iconName] || '';
+  const labelMarkup = label ? `<span>${label}</span>` : '';
+  return `<i data-lucide="${iconName}" aria-hidden="true">${fallback}</i>${labelMarkup}`;
+}
+
+function renderLucideIcons() {
+  window.lucide?.createIcons?.({
+    attrs: {
+      'aria-hidden': 'true',
+      focusable: 'false',
+    },
+  });
+}
+
+function setButtonIcon(button, iconName, ariaLabel, title = ariaLabel, visibleLabel = '') {
+  if (
+    button.dataset.icon === iconName
+    && button.getAttribute('aria-label') === ariaLabel
+    && button.title === title
+    && (button.dataset.visibleLabel || '') === visibleLabel
+  ) {
+    return;
+  }
+  button.innerHTML = iconMarkup(iconName, visibleLabel);
+  button.dataset.icon = iconName;
+  button.dataset.visibleLabel = visibleLabel;
+  button.title = title;
+  button.setAttribute('aria-label', ariaLabel);
+  renderLucideIcons();
+}
 
 function loadPreferences() {
   try {
@@ -524,9 +571,13 @@ function updateRecordingControls() {
 }
 
 function setRecordingState(recordButton, isRecording, idleLabel) {
-  recordButton.textContent = isRecording ? '\u25a0' : '\u25cf';
-  recordButton.title = isRecording ? 'Recording - stop recording' : 'Not recording - start recording';
-  recordButton.setAttribute('aria-label', isRecording ? 'Stop recording' : idleLabel);
+  setButtonIcon(
+    recordButton,
+    isRecording ? 'square' : 'circle',
+    isRecording ? 'Stop recording' : idleLabel,
+    isRecording ? 'Recording - stop recording' : 'Not recording - start recording',
+    isRecording ? 'Stop' : 'Record',
+  );
   recordButton.setAttribute('aria-pressed', isRecording ? 'true' : 'false');
   recordButton.dataset.state = isRecording ? 'recording' : 'idle';
 }
@@ -754,9 +805,11 @@ function updateAudioTransport() {
   elements['audio-progress'].setAttribute('aria-valuenow', Math.round(percent).toString());
   elements['audio-progress'].setAttribute('aria-valuetext', `${formatSeconds(current)} of ${formatSeconds(duration)}`);
   const isPlaying = !elements.audio.paused && !elements.audio.ended;
-  elements['audio-play-toggle'].textContent = isPlaying ? '\u23f8' : '\u25b6';
-  elements['audio-play-toggle'].title = isPlaying ? 'Playing - pause audio' : 'Paused - play audio';
-  elements['audio-play-toggle'].setAttribute('aria-label', isPlaying ? 'Playing - pause audio' : 'Paused - play audio');
+  setButtonIcon(
+    elements['audio-play-toggle'],
+    isPlaying ? 'pause' : 'play',
+    isPlaying ? 'Playing - pause audio' : 'Paused - play audio',
+  );
   elements['audio-play-toggle'].setAttribute('aria-pressed', isPlaying ? 'true' : 'false');
   elements['audio-play-toggle'].dataset.state = isPlaying ? 'playing' : 'paused';
 }
@@ -1814,9 +1867,11 @@ function formatRange(start, end) {
 function toggleIr() {
   state.irVisible = !state.irVisible;
   elements.ir.hidden = !state.irVisible;
-  elements['toggle-ir'].textContent = state.irVisible ? '\u25be' : '\u25b8';
-  elements['toggle-ir'].title = state.irVisible ? 'Hide Speech IR' : 'Show Speech IR';
-  elements['toggle-ir'].setAttribute('aria-label', state.irVisible ? 'Hide Speech IR' : 'Show Speech IR');
+  setButtonIcon(
+    elements['toggle-ir'],
+    state.irVisible ? 'chevron-down' : 'chevron-right',
+    state.irVisible ? 'Hide Speech IR' : 'Show Speech IR',
+  );
 }
 
 function setBusy(busy) {

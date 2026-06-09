@@ -474,7 +474,7 @@ fn speech_spine_lowers_to_stressed_ipa_text_for_styletts2() {
         ),
         (
             "Want to see hundreds of baby herons? Go to King County's busiest dog park.",
-            "wˈɑːnt tə sˈiː hˈʌndɹədz əv bˈeɪbiː hˈɛɹənz↗ ? ɡˈoʊ tə kˈɪŋ kˈaʊntiːz bˈɪziːəst dˈɔːɡ pˈɑːɹk↘ .",
+            "wˈɑːnt tə sˈiː hˈʌndɹədz əv bˈeɪbiː hˈɛɹənz↗ ?  || ɡˈoʊ tə kˈɪŋ kˈaʊntiːz bˈɪziːəst dˈɔːɡ pˈɑːɹk↘ .",
         ),
     ] {
         let actual = styletts2_text_from_english(input);

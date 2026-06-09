@@ -77,6 +77,43 @@ button,
   line-height: 1;
 }
 
+.icon-button svg,
+.icon-button i {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  stroke-width: 2.25;
+}
+
+.labeled-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 96px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.labeled-icon-button svg,
+.labeled-icon-button i {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  stroke-width: 2.25;
+}
+
+.labeled-icon-button span {
+  font-size: 12px;
+}
+
+.transport .field {
+  flex-direction: row;
+}
+
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -422,17 +459,16 @@ h2 {
 
 .voice-actions {
   display: grid;
-  grid-template-columns: repeat(2, 36px);
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
   gap: 6px;
   margin-top: 8px;
 }
 
 .voice-actions button,
 .voice-actions .file-button {
-  width: 36px;
-  min-width: 36px;
+  width: 100%;
+  min-width: 0;
   min-height: 32px;
-  padding: 0;
 }
 
 .audio-input-panel {
@@ -441,6 +477,8 @@ h2 {
 }
 
 .audio-input-panel .audio-source-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
   border-right: 0;
   padding: 3px;
 }
