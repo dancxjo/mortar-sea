@@ -861,6 +861,41 @@ fn feature_track_segments_mark_silence_voiced_and_unvoiced_regions() {
 }
 
 #[test]
+fn vad_track_segments_mark_speech_activity_above_voicing_regions() {
+    let mut frames = (0..30).map(test_frame).collect::<Vec<_>>();
+    for frame in frames.iter_mut().take(10) {
+        frame.energy_db = -80.0;
+        frame.energy_norm = 0.0;
+        frame.voicing = 0.0;
+        frame.sonority = 0.0;
+        frame.high_ratio = 0.0;
+    }
+    for frame in frames.iter_mut().take(20).skip(10) {
+        frame.energy_norm = 0.75;
+        frame.voicing = 0.72;
+        frame.sonority = 0.70;
+    }
+    for frame in frames.iter_mut().skip(20) {
+        frame.energy_norm = 0.70;
+        frame.voicing = 0.04;
+        frame.sonority = 0.08;
+        frame.high_ratio = 0.78;
+    }
+
+    let segments = vad_track_segments(&frames);
+
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["silence", "speech"]
+    );
+    assert_eq!(segments[1].start_ms, 10 * ALIGN_HOP_MS);
+    assert_eq!(segments[1].end_ms, 30 * ALIGN_HOP_MS);
+}
+
+#[test]
 fn feature_track_segments_smooth_tiny_unvoiced_islands_inside_voicing() {
     let mut frames = (0..28).map(test_frame).collect::<Vec<_>>();
     for frame in &mut frames {

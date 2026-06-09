@@ -26,10 +26,10 @@ mod timing;
 use acoustic::{AcousticFrameFeatures, closeness, extract_acoustic_features, positive_closeness};
 #[cfg(test)]
 use acoustic::{SpectrumPlan, analyze_frame};
-pub(crate) use feature_tracks::alignment_feature_tracks;
-#[cfg(test)]
-use feature_tracks::feature_track_segments;
 use feature_tracks::voicing_feature_kinds;
+pub(crate) use feature_tracks::{alignment_feature_tracks, alignment_vad_tracks};
+#[cfg(test)]
+use feature_tracks::{feature_track_segments, vad_track_segments};
 use scoring::*;
 pub(crate) use timing::alignment_tracks;
 use timing::distribute_spans;

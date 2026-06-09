@@ -123,6 +123,7 @@ struct AlignmentResponse {
     asr_transcript: String,
     asr_segments: Vec<AsrSentence>,
     phonemicization: PhonemicizeResponse,
+    vad_tracks: Vec<FeatureTrackSegment>,
     feature_tracks: Vec<FeatureTrackSegment>,
     projected_voicing: Vec<FeatureTrackSegment>,
     candidate_overlays: Vec<CandidateOverlaySegment>,

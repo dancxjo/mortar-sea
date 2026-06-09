@@ -10,11 +10,42 @@ pub(crate) fn alignment_feature_tracks(decoded: &DecodedWav) -> Vec<FeatureTrack
     feature_track_segments(&frames)
 }
 
+pub(crate) fn alignment_vad_tracks(decoded: &DecodedWav) -> Vec<FeatureTrackSegment> {
+    let samples = resample_linear(
+        &decoded.samples,
+        decoded.sample_rate_hz,
+        ALIGN_SAMPLE_RATE_HZ,
+    );
+    let frames = extract_acoustic_features(&samples, ALIGN_SAMPLE_RATE_HZ);
+    vad_track_segments(&frames)
+}
+
+pub(super) fn vad_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
+    let kinds = voicing_feature_kinds(frames)
+        .into_iter()
+        .map(|kind| {
+            if kind == "silence" {
+                "silence"
+            } else {
+                "speech"
+            }
+        })
+        .collect::<Vec<_>>();
+    feature_track_segments_from_kinds(frames, &kinds)
+}
+
 pub(super) fn feature_track_segments(frames: &[AcousticFrameFeatures]) -> Vec<FeatureTrackSegment> {
+    let kinds = voicing_feature_kinds(frames);
+    feature_track_segments_from_kinds(frames, &kinds)
+}
+
+fn feature_track_segments_from_kinds(
+    frames: &[AcousticFrameFeatures],
+    kinds: &[&'static str],
+) -> Vec<FeatureTrackSegment> {
     if frames.is_empty() {
         return Vec::new();
     }
-    let kinds = voicing_feature_kinds(frames);
     let mut segments = Vec::new();
     let mut current_kind = kinds[0];
     let mut start_ms = frames[0].start_ms;

@@ -111,6 +111,7 @@ window.addEventListener('DOMContentLoaded', () => {
     'ruler',
     'waveform',
     'spectrogram',
+    'vad-track',
     'feature-track',
     'projected-voicing-track',
     'candidate-overlay-track',
@@ -683,7 +684,7 @@ function renderAlignment(payload) {
   state.playRangeEnd = null;
   elements.asr.value =
     payload.asr_transcript || (payload.asr_segments || []).map((segment) => segment.text).join(' ');
-  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.feature_tracks || []).length} features, ${(payload.projected_voicing || []).length} projected, ${(payload.candidate_overlays || []).length} candidates`;
+  elements['alignment-detail'].textContent = `${payload.words.length} words, ${payload.phonemes.length} phonemes, ${payload.phones.length} phones, ${(payload.vad_tracks || []).length} vad, ${(payload.feature_tracks || []).length} features, ${(payload.projected_voicing || []).length} projected, ${(payload.candidate_overlays || []).length} candidates`;
   drawAll();
 }
 
@@ -948,6 +949,14 @@ function drawAll(options = {}) {
   drawRuler();
   drawWaveform();
   drawSpectrogram();
+  drawTrack(canvases['vad-track'], state.currentAlignment?.vad_tracks || [], {
+    kind: 'vad',
+    color: vadTrackColor,
+    text: '#f3f6f1',
+    empty: 'VAD',
+    label: vadTrackLabel,
+    centeredLabel: true,
+  });
   drawTrack(canvases['feature-track'], state.currentAlignment?.feature_tracks || [], {
     kind: 'feature',
     color: featureTrackColor,
@@ -1666,6 +1675,16 @@ function featureTrackColor(segment) {
   return '#66727a';
 }
 
+function vadTrackColor(segment) {
+  if (segment.kind === 'speech') return '#6fd2a4';
+  if (segment.kind === 'silence') return '#2c3337';
+  return '#66727a';
+}
+
+function vadTrackLabel(segment) {
+  return segment.kind === 'speech' ? '1' : '0';
+}
+
 function voicingTrackLabel(segment) {
   return segment.kind === 'voiced' ? '+' : '-';
 }
@@ -1846,6 +1865,7 @@ function hitTestSpectrogramCandidateOverlay(event, alignment, timeMs) {
 }
 
 function alignmentSegments(alignment, kind) {
+  if (kind === 'vad') return alignment.vad_tracks || [];
   if (kind === 'feature') return alignment.feature_tracks || [];
   if (kind === 'projected_voicing') return alignment.projected_voicing || [];
   if (kind === 'candidate_overlay') return alignment.candidate_overlays || [];
@@ -1854,6 +1874,7 @@ function alignmentSegments(alignment, kind) {
 
 function trackKindForTarget(target) {
   if (!target || !target.id) return '';
+  if (target.id === 'vad-track') return 'vad';
   if (target.id === 'feature-track') return 'feature';
   if (target.id === 'projected-voicing-track') return 'projected_voicing';
   if (target.id === 'spectrogram') return 'spectrogram_candidate';
@@ -1870,7 +1891,7 @@ function isSelectedSegment(kind, segment) {
 }
 
 function segmentKey(kind, segment) {
-  if (kind === 'feature' || kind === 'projected_voicing' || kind === 'candidate_overlay') {
+  if (kind === 'vad' || kind === 'feature' || kind === 'projected_voicing' || kind === 'candidate_overlay') {
     return String(segment.index);
   }
   if (kind === 'word') return String(segment.index);

@@ -26,7 +26,7 @@ use crate::{
 use crate::{
     alignment::{
         alignment_candidate_overlays, alignment_feature_tracks, alignment_tracks,
-        forced_alignment_tracks, projected_voicing_tracks,
+        alignment_vad_tracks, forced_alignment_tracks, projected_voicing_tracks,
     },
     asr::transcribe_with_ear,
     audio::{
@@ -347,6 +347,7 @@ async fn align_audio(
     };
     let (words, phonemes, phones) = forced_alignment_tracks(&phonemicized.ir, &decoded)
         .unwrap_or_else(|| alignment_tracks(&phonemicized.ir, &asr_segments, decoded.duration_ms));
+    let vad_tracks = alignment_vad_tracks(&decoded);
     let feature_tracks = alignment_feature_tracks(&decoded);
     let projected_voicing = projected_voicing_tracks(&phonemicized.ir, &phones);
     let candidate_overlays = alignment_candidate_overlays(&phonemicized.ir, &decoded, &phones);
@@ -361,6 +362,7 @@ async fn align_audio(
             .join(" "),
         asr_segments,
         phonemicization: phonemicized,
+        vad_tracks,
         feature_tracks,
         projected_voicing,
         candidate_overlays,
