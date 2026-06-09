@@ -45,6 +45,8 @@ struct SynthesizeRequestBody {
     backend: AlignBackend,
     #[serde(default)]
     styletts2_voice: Option<String>,
+    #[serde(default)]
+    styletts2_style: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

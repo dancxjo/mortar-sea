@@ -117,10 +117,17 @@ async fn synthesize(
     let filename = format!("synth-{}-{}.wav", request.backend.as_str(), Uuid::new_v4());
     let output_path = state.audio_dir.join(&filename);
     let options = SpeechSynthesisOptions {
-        voice_wav: selected_styletts2_voice_path(
+        voice_wav: selected_styletts2_wav_path(
             request.backend,
             &state.styletts2_voice_dir,
             request.styletts2_voice.as_deref(),
+            "speaker",
+        )?,
+        style_wav: selected_styletts2_wav_path(
+            request.backend,
+            &state.styletts2_voice_dir,
+            request.styletts2_style.as_deref(),
+            "style",
         )?,
         ..SpeechSynthesisOptions::default()
     };
@@ -257,30 +264,32 @@ fn styletts2_voice_from_filename(filename: String) -> StyleTts2Voice {
     }
 }
 
-fn selected_styletts2_voice_path(
+fn selected_styletts2_wav_path(
     backend: AlignBackend,
     voice_dir: &Path,
-    voice_id: Option<&str>,
+    wav_id: Option<&str>,
+    role: &str,
 ) -> Result<Option<PathBuf>, AppError> {
     if backend != AlignBackend::Styletts2 {
         return Ok(None);
     }
-    let Some(voice_id) = voice_id
-        .map(str::trim)
-        .filter(|voice_id| !voice_id.is_empty())
-    else {
+    let Some(wav_id) = wav_id.map(str::trim).filter(|wav_id| !wav_id.is_empty()) else {
         return Ok(None);
     };
-    if voice_id.contains('/') || voice_id.contains('\\') || voice_id.contains("..") {
-        return Err(AppError::bad_request("invalid StyleTTS2 voice filename"));
+    if wav_id.contains('/') || wav_id.contains('\\') || wav_id.contains("..") {
+        return Err(AppError::bad_request(format!(
+            "invalid StyleTTS2 {role} filename"
+        )));
     }
-    if !is_wav_filename(voice_id) {
-        return Err(AppError::bad_request("StyleTTS2 voice must be a WAV file"));
+    if !is_wav_filename(wav_id) {
+        return Err(AppError::bad_request(format!(
+            "StyleTTS2 {role} must be a WAV file"
+        )));
     }
-    let path = voice_dir.join(voice_id);
+    let path = voice_dir.join(wav_id);
     if !path.is_file() {
         return Err(AppError::bad_request(format!(
-            "StyleTTS2 voice `{voice_id}` was not found"
+            "StyleTTS2 {role} `{wav_id}` was not found"
         )));
     }
     Ok(Some(path))

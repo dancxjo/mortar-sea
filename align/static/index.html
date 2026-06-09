@@ -33,33 +33,51 @@
             <input id="variety" name="variety" value="en-US" autocomplete="off" />
           </div>
         </div>
-        <div class="field voice-field control-voice">
-          <label for="backend">Renderer</label>
-          <div class="renderer-grid">
-            <select id="backend" aria-label="Renderer">
-              <option value="mock">mock</option>
-              <option value="piper">piper</option>
-              <option value="styletts2" selected>styletts2</option>
-            </select>
-            <select id="styletts2-voice" aria-label="StyleTTS2 voice">
-              <option value="">default reference</option>
-            </select>
-            <button type="button" id="refresh-voices" title="Refresh voices">Refresh</button>
-          </div>
-          <div class="voice-actions">
-            <label class="file-button" for="styletts2-voice-file">Upload sample</label>
-            <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
-            <button type="button" id="record-styletts2-voice">Record sample</button>
-            <button type="button" id="stop-styletts2-voice-recording" disabled>Stop</button>
-          </div>
-          <span id="voice-detail">Drop WAVs in voices/styletts2</span>
-        </div>
         <div class="button-stack control-actions">
           <label class="file-button" for="wav-file">Upload WAV</label>
           <input id="wav-file" type="file" accept="audio/wav,.wav" />
           <button type="button" id="record">Record</button>
           <button type="button" id="stop-recording" disabled>Stop</button>
         </div>
+      </section>
+
+      <section class="voice-panel" aria-labelledby="voice-heading">
+        <header>
+          <h2 id="voice-heading">Voice</h2>
+          <span id="voice-detail">Drop WAVs in voices/styletts2</span>
+        </header>
+        <div class="voice-grid">
+          <div class="field">
+            <label for="backend">Renderer</label>
+            <select id="backend" aria-label="Renderer">
+              <option value="mock">mock</option>
+              <option value="piper">piper</option>
+              <option value="styletts2" selected>styletts2</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="styletts2-voice">Speaker WAV</label>
+            <select id="styletts2-voice">
+              <option value="">default speaker</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="styletts2-style">Style WAV</label>
+            <select id="styletts2-style">
+              <option value="">default style</option>
+            </select>
+          </div>
+          <button type="button" id="refresh-voices" title="Refresh WAV list">Refresh WAVs</button>
+        </div>
+        <details class="voice-details">
+          <summary>Add WAV</summary>
+          <div class="voice-actions">
+            <label class="file-button" for="styletts2-voice-file">Upload</label>
+            <input id="styletts2-voice-file" type="file" accept="audio/wav,.wav" />
+            <button type="button" id="record-styletts2-voice">Record</button>
+            <button type="button" id="stop-styletts2-voice-recording" disabled>Stop</button>
+          </div>
+        </details>
       </section>
 
       <audio id="audio" preload="metadata"></audio>
@@ -82,8 +100,7 @@
           </header>
           <dl class="transcription-readout">
             <div><dt>Phonemes</dt><dd id="phonemes"></dd></div>
-            <div><dt>Phones</dt><dd id="phones"></dd></div>
-            <div><dt>Syllables</dt><dd id="syllables"></dd></div>
+            <div><dt>Phonetic realization</dt><dd id="syllables"></dd></div>
             <div><dt>Warnings</dt><dd id="warnings"></dd></div>
           </dl>
         </article>
@@ -96,19 +113,18 @@
 
       <section class="daw">
         <section class="timeline" id="timeline">
-          <canvas id="ruler" height="34"></canvas>
-          <canvas id="waveform" height="176"></canvas>
-          <canvas id="spectrogram" height="150"></canvas>
-          <canvas id="feature-track" height="42"></canvas>
-          <canvas id="projected-voicing-track" height="42"></canvas>
-          <canvas id="candidate-overlay-track" height="54"></canvas>
-          <canvas id="word-track" height="54"></canvas>
-          <canvas id="phoneme-track" height="66"></canvas>
-          <canvas id="phone-track" height="54"></canvas>
+          <div class="timeline-content" id="timeline-content">
+            <canvas id="ruler" height="34"></canvas>
+            <canvas id="waveform" height="176"></canvas>
+            <canvas id="spectrogram" height="150"></canvas>
+            <canvas id="feature-track" height="42"></canvas>
+            <canvas id="projected-voicing-track" height="42"></canvas>
+            <canvas id="candidate-overlay-track" height="54"></canvas>
+            <canvas id="word-track" height="54"></canvas>
+            <canvas id="phoneme-track" height="66"></canvas>
+            <canvas id="phone-track" height="54"></canvas>
+          </div>
         </section>
-        <div class="timeline-scrollbar" id="timeline-scrollbar" aria-label="Timeline horizontal scroll">
-          <div class="timeline-scrollbar-spacer" id="timeline-scrollbar-spacer"></div>
-        </div>
       </section>
 
       <section class="secondary-grid">

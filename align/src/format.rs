@@ -5,15 +5,38 @@ use speech::{
 };
 
 pub(crate) fn format_phonemes(output: &PhonemicizeOutput) -> String {
-    output
-        .phonemes
-        .iter()
-        .filter_map(|token| match &token.phoneme {
-            Spec::Known(id) => Some(phoneme_default_phone_display_symbol(id, &output.variety)),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut words = Vec::new();
+    let mut current_word = String::new();
+    let mut current_word_index = None;
+
+    for token in &output.phonemes {
+        let label = phoneme_label(token, &output.variety);
+        if label.is_empty() {
+            continue;
+        }
+
+        let word_index = token_word_index(token);
+        if !current_word.is_empty()
+            && current_word_index.is_some()
+            && word_index.is_some()
+            && word_index != current_word_index
+        {
+            words.push(std::mem::take(&mut current_word));
+        }
+
+        current_word.push_str(&label);
+        current_word_index = word_index.or(current_word_index);
+    }
+
+    if !current_word.is_empty() {
+        words.push(current_word);
+    }
+
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!("/{}/", words.join(" "))
+    }
 }
 
 pub(crate) fn format_phones(output: &PhonemicizeOutput) -> String {
@@ -156,6 +179,20 @@ mod tests {
                 |syllable| !syllable.label.starts_with('ˈ') && !syllable.label.starts_with('ˌ')
             )
         );
+    }
+
+    #[test]
+    fn format_phonemes_uses_slashes_and_word_spacing() {
+        let output = phonemicized("test case");
+        let transcription = format_phonemes(&output);
+        let inner = transcription
+            .strip_prefix('/')
+            .and_then(|value| value.strip_suffix('/'))
+            .expect("phoneme transcription should use slash delimiters");
+
+        assert_eq!(inner.matches(' ').count(), 1);
+        assert!(!inner.starts_with(' '));
+        assert!(!inner.ends_with(' '));
     }
 }
 

@@ -2,6 +2,7 @@ const PREFERENCES_STORAGE_KEY = 'mortar-align.preferences.v1';
 const DEFAULT_PREFERENCES = {
   backend: 'styletts2',
   styletts2Voice: '',
+  styletts2Style: '',
   variety: 'en-US',
 };
 
@@ -25,6 +26,7 @@ const state = {
   latestActionId: 0,
   styletts2VoiceDir: 'voices/styletts2',
   pendingStyletts2Voice: '',
+  pendingStyletts2Style: '',
   audioBuffer: null,
   spectrogramCanvas: null,
   spectrogramMeta: null,
@@ -55,6 +57,7 @@ window.addEventListener('DOMContentLoaded', () => {
     'text',
     'backend',
     'styletts2-voice',
+    'styletts2-style',
     'refresh-voices',
     'styletts2-voice-file',
     'record-styletts2-voice',
@@ -77,7 +80,6 @@ window.addEventListener('DOMContentLoaded', () => {
     'phoneme-detail',
     'alignment-detail',
     'phonemes',
-    'phones',
     'syllables',
     'warnings',
     'asr',
@@ -87,8 +89,7 @@ window.addEventListener('DOMContentLoaded', () => {
     'zoom-out',
     'fit',
     'timeline',
-    'timeline-scrollbar',
-    'timeline-scrollbar-spacer',
+    'timeline-content',
   ]) {
     elements[id] = document.getElementById(id);
   }
@@ -118,6 +119,11 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   elements['styletts2-voice'].addEventListener('change', () => {
     state.pendingStyletts2Voice = elements['styletts2-voice'].value;
+    savePreferences();
+    markActionInputsChanged();
+  });
+  elements['styletts2-style'].addEventListener('change', () => {
+    state.pendingStyletts2Style = elements['styletts2-style'].value;
     savePreferences();
     markActionInputsChanged();
   });
@@ -170,7 +176,7 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   elements.timeline.addEventListener('wheel', onTimelineWheel, { passive: false });
   elements.timeline.addEventListener('pointerdown', onTimelinePointerDown);
-  elements['timeline-scrollbar'].addEventListener('scroll', onTimelineScrollbarScroll);
+  elements.timeline.addEventListener('scroll', onTimelineScroll);
   window.addEventListener('pointermove', onTimelinePointerMove);
   window.addEventListener('pointerup', onTimelinePointerUp);
   window.addEventListener('resize', drawAll);
@@ -181,6 +187,7 @@ window.addEventListener('DOMContentLoaded', () => {
   syncVoiceSelector();
   updateAudioTransport();
   updateRecordingControls();
+  updateActionButtons();
   drawAll();
 });
 
@@ -199,6 +206,7 @@ function savePreferences() {
     window.localStorage?.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({
       backend: elements.backend.value || DEFAULT_PREFERENCES.backend,
       styletts2Voice: state.pendingStyletts2Voice || elements['styletts2-voice'].value || '',
+      styletts2Style: state.pendingStyletts2Style || elements['styletts2-style'].value || '',
       variety: elements.variety.value || DEFAULT_PREFERENCES.variety,
     }));
   } catch (_error) {
@@ -215,6 +223,7 @@ function applyPreferences() {
   }
   elements.variety.value = preferences.variety || DEFAULT_PREFERENCES.variety;
   state.pendingStyletts2Voice = preferences.styletts2Voice || '';
+  state.pendingStyletts2Style = preferences.styletts2Style || '';
 }
 
 async function phonemicize() {
@@ -235,6 +244,7 @@ async function synthesize() {
     variety: elements.variety.value || 'en-US',
     backend: elements.backend.value,
     styletts2_voice: elements['styletts2-voice'].value || null,
+    styletts2_style: elements['styletts2-style'].value || null,
   }, async (payload) => {
     renderPhonemicization(payload.phonemicization);
     await setAudio(payload.audio_url, `${payload.duration_ms} ms, ${payload.samples} samples`);
@@ -249,20 +259,28 @@ async function synthesize() {
 
 async function loadStyleTts2Voices() {
   try {
-    const selected = state.pendingStyletts2Voice || elements['styletts2-voice'].value;
+    const selectedVoice = state.pendingStyletts2Voice || elements['styletts2-voice'].value;
+    const selectedStyle = state.pendingStyletts2Style || elements['styletts2-style'].value;
     const response = await fetch('/api/styletts2/voices');
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || response.statusText);
     state.styletts2VoiceDir = payload.directory || 'voices/styletts2';
     elements['styletts2-voice'].replaceChildren(
-      optionElement('', 'default reference'),
+      optionElement('', 'default speaker'),
       ...(payload.voices || []).map((voice) => optionElement(voice.id, voice.label)),
     );
-    if (selectHasValue(elements['styletts2-voice'], selected)) {
-      elements['styletts2-voice'].value = selected;
+    elements['styletts2-style'].replaceChildren(
+      optionElement('', 'default style'),
+      ...(payload.voices || []).map((voice) => optionElement(voice.id, voice.label)),
+    );
+    if (selectHasValue(elements['styletts2-voice'], selectedVoice)) {
+      elements['styletts2-voice'].value = selectedVoice;
+    }
+    if (selectHasValue(elements['styletts2-style'], selectedStyle)) {
+      elements['styletts2-style'].value = selectedStyle;
     }
     elements['voice-detail'].textContent = (payload.voices || []).length
-      ? `${payload.voices.length} WAV voice${payload.voices.length === 1 ? '' : 's'} in ${state.styletts2VoiceDir}`
+      ? `${payload.voices.length} WAV${payload.voices.length === 1 ? '' : 's'} in ${state.styletts2VoiceDir}`
       : `Drop WAVs in ${state.styletts2VoiceDir}`;
   } catch (error) {
     elements['voice-detail'].textContent = error.message || String(error);
@@ -285,6 +303,7 @@ function optionElement(value, label) {
 function syncVoiceSelector() {
   const enabled = elements.backend.value === 'styletts2';
   elements['styletts2-voice'].disabled = !enabled;
+  elements['styletts2-style'].disabled = !enabled;
   elements['refresh-voices'].disabled = false;
   elements['styletts2-voice-file'].disabled = !enabled;
   updateRecordingControls();
@@ -382,9 +401,15 @@ async function uploadStyleTts2Voice(blob, filename) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || response.statusText);
     state.pendingStyletts2Voice = payload.voice?.id || '';
+    if (!state.pendingStyletts2Style) {
+      state.pendingStyletts2Style = state.pendingStyletts2Voice;
+    }
     await loadStyleTts2Voices();
     if (state.pendingStyletts2Voice && selectHasValue(elements['styletts2-voice'], state.pendingStyletts2Voice)) {
       elements['styletts2-voice'].value = state.pendingStyletts2Voice;
+    }
+    if (state.pendingStyletts2Style && selectHasValue(elements['styletts2-style'], state.pendingStyletts2Style)) {
+      elements['styletts2-style'].value = state.pendingStyletts2Style;
     }
     savePreferences();
     markActionInputsChanged();
@@ -531,7 +556,6 @@ function writeAscii(view, offset, text) {
 function renderPhonemicization(payload) {
   state.currentPhonemicization = payload;
   elements.phonemes.textContent = payload.phonemes || '';
-  elements.phones.textContent = payload.phones || '';
   elements.syllables.textContent = formatSyllableTranscription(payload.syllables || []);
   elements.warnings.textContent = (payload.warnings || [])
     .map((warning) => `${warning.token}: ${warning.message}`)
@@ -593,6 +617,7 @@ async function setAudio(url, detail) {
   elements.audio.load();
   elements['audio-detail'].textContent = detail || 'Audio ready';
   updateAudioTransport();
+  updateActionButtons();
   await loadWaveform(url);
 }
 
@@ -729,10 +754,10 @@ function zoomAtCenter(multiplier) {
 
 function zoomAt(x, multiplier) {
   const oldDuration = viewDuration();
-  const centerTime = xToTime(x);
+  const centerTime = xToTime(elements.timeline.scrollLeft + x);
   state.zoom = clamp(state.zoom * multiplier, 1, 240);
   const newDuration = viewDuration();
-  const fraction = x / Math.max(1, elements.timeline.clientWidth);
+  const fraction = x / timelineViewportWidth();
   state.viewStart = clamp(centerTime - newDuration * fraction, 0, maxViewStart());
   if (Math.abs(oldDuration - newDuration) > 0.0001) drawAll();
 }
@@ -744,15 +769,14 @@ function onTimelineWheel(event) {
   zoomAt(event.clientX - rect.left, multiplier);
 }
 
-function onTimelineScrollbarScroll() {
-  const scrollbar = elements['timeline-scrollbar'];
-  const maxScrollLeft = Math.max(0, scrollbar.scrollWidth - scrollbar.clientWidth);
+function onTimelineScroll() {
+  const maxScrollLeft = Math.max(0, elements.timeline.scrollWidth - elements.timeline.clientWidth);
   const maxStart = maxViewStart();
-  const nextViewStart = maxScrollLeft > 0 ? (scrollbar.scrollLeft / maxScrollLeft) * maxStart : 0;
+  const nextViewStart = maxScrollLeft > 0 ? (elements.timeline.scrollLeft / maxScrollLeft) * maxStart : 0;
   const clampedViewStart = clamp(nextViewStart, 0, maxStart);
   if (Math.abs(state.viewStart - clampedViewStart) < 0.0005) return;
   state.viewStart = clampedViewStart;
-  drawAll({ syncScrollbarPosition: false });
+  drawAll({ syncScrollPosition: false });
 }
 
 function onTimelinePointerDown(event) {
@@ -781,7 +805,7 @@ function onTimelinePointerMove(event) {
   }
 
   if (state.pointerMode === 'pan') {
-    const secondsPerPixel = viewDuration() / Math.max(1, elements.timeline.clientWidth);
+    const secondsPerPixel = state.duration / contentWidth();
     state.viewStart = clamp(state.dragStartView - deltaX * secondsPerPixel, 0, maxViewStart());
     drawAll();
     return;
@@ -824,7 +848,7 @@ function startPlaybackLoop() {
 }
 
 function drawAll(options = {}) {
-  syncTimelineScrollbar(options);
+  syncTimelineContent(options);
   setupCanvases();
   drawRuler();
   drawWaveform();
@@ -877,8 +901,9 @@ function drawAll(options = {}) {
 
 function setupCanvases() {
   const pixelRatio = window.devicePixelRatio || 1;
+  const cssWidth = contentWidth();
   for (const canvas of Object.values(canvases)) {
-    const cssWidth = canvas.clientWidth || canvas.parentElement.clientWidth || 300;
+    canvas.style.width = `${cssWidth}px`;
     const cssHeight = Number(canvas.getAttribute('height')) || canvas.clientHeight || 40;
     const width = Math.max(1, Math.floor(cssWidth * pixelRatio));
     const height = Math.max(1, Math.floor(cssHeight * pixelRatio));
@@ -891,22 +916,24 @@ function setupCanvases() {
   }
 }
 
-function syncTimelineScrollbar({ syncScrollbarPosition = true } = {}) {
-  const scrollbar = elements['timeline-scrollbar'];
-  const spacer = elements['timeline-scrollbar-spacer'];
-  if (!scrollbar || !spacer) return;
+function syncTimelineContent({ syncScrollPosition = true } = {}) {
+  const content = elements['timeline-content'];
+  if (!content) return;
 
-  const viewportWidth = Math.max(1, elements.timeline.clientWidth);
-  const contentWidth = Math.max(viewportWidth, Math.round(viewportWidth * state.zoom));
-  spacer.style.width = `${contentWidth}px`;
+  const viewportWidth = timelineViewportWidth();
+  const width = contentWidth();
+  content.style.width = `${width}px`;
+  for (const canvas of Object.values(canvases)) {
+    canvas.style.width = `${width}px`;
+  }
 
-  if (!syncScrollbarPosition) return;
+  if (!syncScrollPosition) return;
 
-  const maxScrollLeft = Math.max(0, scrollbar.scrollWidth - scrollbar.clientWidth);
+  const maxScrollLeft = Math.max(0, width - viewportWidth);
   const maxStart = maxViewStart();
   const nextScrollLeft = maxStart > 0 ? (state.viewStart / maxStart) * maxScrollLeft : 0;
-  if (Math.abs(scrollbar.scrollLeft - nextScrollLeft) > 0.5) {
-    scrollbar.scrollLeft = nextScrollLeft;
+  if (Math.abs(elements.timeline.scrollLeft - nextScrollLeft) > 0.5) {
+    elements.timeline.scrollLeft = nextScrollLeft;
   }
 }
 
@@ -921,10 +948,10 @@ function clearCanvas(canvas) {
 
 function drawGrid(ctx, width, height) {
   const seconds = tickSeconds();
-  const firstTick = Math.floor(state.viewStart / seconds) * seconds;
+  const firstTick = 0;
   ctx.strokeStyle = '#293238';
   ctx.lineWidth = 1;
-  for (let time = firstTick; time <= state.viewStart + viewDuration(); time += seconds) {
+  for (let time = firstTick; time <= state.duration; time += seconds) {
     const x = timeToX(time);
     ctx.beginPath();
     ctx.moveTo(x, 0);
@@ -945,7 +972,7 @@ function drawRuler() {
   ctx.strokeStyle = '#46525a';
   ctx.fillStyle = '#aab5af';
   ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-  for (let time = firstTick; time <= state.viewStart + viewDuration(); time += seconds) {
+  for (let time = firstTick; time <= state.duration; time += seconds) {
     const x = timeToX(time);
     ctx.beginPath();
     ctx.moveTo(x, height - 10);
@@ -976,17 +1003,14 @@ function drawWaveform() {
   }
 
   const samples = state.audioBuffer.getChannelData(0);
-  const sampleRate = state.audioBuffer.sampleRate;
-  const startSample = Math.max(0, Math.floor(state.viewStart * sampleRate));
-  const endSample = Math.min(samples.length, Math.ceil((state.viewStart + viewDuration()) * sampleRate));
-  const samplesPerPixel = Math.max(1, Math.floor((endSample - startSample) / width));
+  const samplesPerPixel = Math.max(1, Math.floor(samples.length / width));
 
   ctx.strokeStyle = '#6fd2a4';
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let x = 0; x < width; x += 1) {
-    const start = startSample + x * samplesPerPixel;
-    const end = Math.min(endSample, start + samplesPerPixel);
+    const start = x * samplesPerPixel;
+    const end = Math.min(samples.length, start + samplesPerPixel);
     let min = 0;
     let max = 0;
     for (let index = start; index < end; index += 1) {
@@ -1021,21 +1045,7 @@ function drawSpectrogram() {
     return;
   }
 
-  const sourceWidth = state.spectrogramCanvas.width;
-  const sourceHeight = state.spectrogramCanvas.height;
-  const startX = Math.floor((state.viewStart / state.duration) * sourceWidth);
-  const viewWidth = Math.max(1, Math.ceil((viewDuration() / state.duration) * sourceWidth));
-  ctx.drawImage(
-    state.spectrogramCanvas,
-    clamp(startX, 0, sourceWidth - 1),
-    0,
-    Math.min(viewWidth, sourceWidth - startX),
-    sourceHeight,
-    0,
-    0,
-    width,
-    height,
-  );
+  ctx.drawImage(state.spectrogramCanvas, 0, 0, width, height);
 
   drawGrid(ctx, width, height);
   drawSpectrogramCandidateOverlays(ctx, width, height);
@@ -1621,7 +1631,6 @@ function drawSelection() {
 
 function drawPlayhead() {
   const time = elements.audio.currentTime || 0;
-  if (time < state.viewStart || time > state.viewStart + viewDuration()) return;
   const x = timeToX(time);
   for (const canvas of Object.values(canvases)) {
     const ctx = canvas.getContext('2d');
@@ -1775,7 +1784,7 @@ function segmentKey(kind, segment) {
 
 function timelineX(event) {
   const rect = elements.timeline.getBoundingClientRect();
-  return clamp(event.clientX - rect.left, 0, rect.width);
+  return clamp(event.clientX - rect.left + elements.timeline.scrollLeft, 0, contentWidth());
 }
 
 function formatRange(start, end) {
@@ -1803,10 +1812,10 @@ function markActionInputsChanged() {
 }
 
 function updateActionButtons() {
-  const disabled = state.activeActionCount > 0 && !state.inputsChangedDuringAction;
-  for (const id of ['phonemicize', 'synthesize', 'align']) {
-    elements[id].disabled = disabled;
-  }
+  const busyDisabled = state.activeActionCount > 0 && !state.inputsChangedDuringAction;
+  elements.phonemicize.disabled = busyDisabled;
+  elements.synthesize.disabled = busyDisabled;
+  elements.align.disabled = busyDisabled || !state.currentAudioUrl;
 }
 
 function setStatus(message, tone = '') {
@@ -1822,6 +1831,16 @@ function viewDuration() {
   return Math.max(0.05, state.duration / state.zoom);
 }
 
+function timelineViewportWidth() {
+  const rectWidth = Math.floor(elements.timeline.getBoundingClientRect().width);
+  const parentWidth = elements.timeline.parentElement?.clientWidth || 0;
+  return Math.max(1, rectWidth, elements.timeline.clientWidth, parentWidth);
+}
+
+function contentWidth() {
+  return Math.max(timelineViewportWidth(), Math.round(timelineViewportWidth() * state.zoom));
+}
+
 function audioDuration() {
   if (Number.isFinite(elements.audio.duration) && elements.audio.duration > 0) {
     return elements.audio.duration;
@@ -1835,15 +1854,15 @@ function maxViewStart() {
 }
 
 function timeToX(time) {
-  return ((time - state.viewStart) / viewDuration()) * Math.max(1, elements.timeline.clientWidth);
+  return (time / Math.max(0.001, state.duration)) * contentWidth();
 }
 
 function xToTime(x) {
-  return state.viewStart + (x / Math.max(1, elements.timeline.clientWidth)) * viewDuration();
+  return (x / contentWidth()) * state.duration;
 }
 
 function tickSeconds() {
-  const targetTicks = Math.max(4, elements.timeline.clientWidth / 120);
+  const targetTicks = Math.max(4, timelineViewportWidth() / 120);
   const rough = viewDuration() / targetTicks;
   const bases = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60];
   return bases.find((base) => base >= rough) || 120;
