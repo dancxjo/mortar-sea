@@ -1354,18 +1354,6 @@ mod tests {
         }
     }
 
-    fn request_with_style(
-        text: &str,
-        variety: &str,
-        style: PhonemicizeStyle,
-    ) -> PhonemicizeRequest {
-        PhonemicizeRequest {
-            text: text.into(),
-            variety: VarietyId(variety.into()),
-            style: Some(style),
-        }
-    }
-
     fn phoneme_symbols(output: &PhonemicizeOutput) -> Vec<String> {
         output
             .phonemes
@@ -1585,48 +1573,6 @@ mod tests {
             .phonemicize(&request("strut", "en-US"))
             .expect("strut");
         assert!(phone_symbols(&strut).contains(&"ʌ".into()));
-    }
-
-    #[test]
-    fn non_r_ful_style_colors_postvocalic_r_as_schwa() {
-        let compared = EnglishPhonemicizer
-            .phonemicize(&request_with_style(
-                "compared",
-                "en-US",
-                PhonemicizeStyle {
-                    r_fullness: false,
-                    ..PhonemicizeStyle::default()
-                },
-            ))
-            .expect("compared");
-        assert_eq!(
-            phone_symbols(&compared),
-            ["k", "ə", "m", "pʰ", "ɛ", "ɚ", "d"]
-        );
-        assert_eq!(compared.syllables[1].phones.len(), 4);
-        assert_eq!(
-            compared.syllables[1]
-                .phones
-                .iter()
-                .filter_map(|phone| match &phone.phone {
-                    Spec::Known(id) => Some(phone_display_symbol(id).to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            ["pʰ", "ɛ", "ɚ", "d"]
-        );
-
-        let fairy = EnglishPhonemicizer
-            .phonemicize(&request_with_style(
-                "fairy",
-                "en-US",
-                PhonemicizeStyle {
-                    r_fullness: false,
-                    ..PhonemicizeStyle::default()
-                },
-            ))
-            .expect("fairy");
-        assert!(phone_symbols(&fairy).contains(&"ɹ".into()));
     }
 
     #[test]

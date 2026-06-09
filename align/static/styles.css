@@ -321,7 +321,7 @@ textarea {
 
 .daw {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   grid-template-rows: auto 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -329,7 +329,26 @@ textarea {
   overflow: hidden;
 }
 
+.daw::before {
+  content: "";
+  grid-column: 1;
+  grid-row: 1;
+  border-right: 1px solid var(--line);
+  background: #12171a;
+}
+
+.daw::after {
+  content: "";
+  grid-column: 1;
+  grid-row: 2;
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  background: #12171a;
+}
+
 .timeline {
+  grid-column: 2;
+  grid-row: 1;
   overflow: hidden;
   cursor: crosshair;
   touch-action: none;
@@ -340,6 +359,8 @@ textarea {
 }
 
 .timeline-scrollbar {
+  grid-column: 2;
+  grid-row: 2;
   overflow-x: scroll;
   overflow-y: hidden;
   border-top: 1px solid var(--line);
@@ -559,6 +580,10 @@ pre {
   .daw-toolbar button {
     flex: 1 1 0;
     min-width: 0;
+  }
+
+  .daw {
+    grid-template-columns: 82px minmax(0, 1fr);
   }
 
 }
