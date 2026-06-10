@@ -1987,6 +1987,7 @@ fn dialogue_voice_system_prompt() -> &'static str {
      If it is better to wait, listen, or pass the turn, return an empty message; empty messages are treated as silence. \
      Treat only the structured context and conversation turns as external fact. \
      Do not repeat the user's words back as your whole reply. \
+     Do not repeat yourself; if you have already said the same thing, say something meaningfully new or stay silent. \
      Preserve uncertainty and do not invent new external events, people, objects, or intentions."
 }
 
@@ -3545,6 +3546,8 @@ mod tests {
         assert!(prompt.contains("return an empty message"));
         assert!(prompt.contains("empty messages are treated as silence"));
         assert!(prompt.contains("Do not repeat the user's words back as your whole reply"));
+        assert!(prompt.contains("Do not repeat yourself"));
+        assert!(prompt.contains("say something meaningfully new or stay silent"));
         assert!(!prompt.contains("Start with <thought/>"));
         assert!(!prompt.contains("<thought/> to pass the turn"));
         assert!(!prompt.contains("<say"));
