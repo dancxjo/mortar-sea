@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 mod catalog;
+pub mod morphology;
 
 use crate::acoustics::{
     AcousticCueDef, AcousticLandmark, AcousticLandmarkKind, AcousticMeasurement, AcousticProfile,
@@ -196,7 +197,7 @@ pub fn variety(id: &str) -> LinguisticVariety {
             name: "English Latin orthography".into(),
             ..Default::default()
         }),
-        morphology: None,
+        morphology: Some(morphology::english_morphology(row.id)),
         acoustic_profile: Some(acoustic_profile),
         prosody_profile: None,
         status: VarietyStatus::Attested,

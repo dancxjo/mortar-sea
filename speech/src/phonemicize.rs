@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::lexicons::cmudict::{self, CmuPhoneme, PronunciationStatus};
+use crate::data::lexicons::cmudict::{self, CmuPhoneme, CmuStress, PronunciationStatus};
 use crate::data::notation::arpabet::{self, split_stress};
 use crate::data::{canonical_variety_id, variety_by_code};
 use crate::evidence::{EvidenceProvenance, EvidenceSource};
@@ -48,6 +48,10 @@ pub trait PronunciationPipeline {
     -> Result<LinguisticVariety, PhonemicizeError>;
 
     fn text_normalizer(&self, text: &str) -> String {
+        self.normalize_numbers(text)
+    }
+
+    fn normalize_numbers(&self, text: &str) -> String {
         text.to_string()
     }
 
@@ -374,6 +378,10 @@ impl PronunciationPipeline for EnglishPhonemicizer {
             });
         }
         Ok(variety)
+    }
+
+    fn normalize_numbers(&self, text: &str) -> String {
+        english_normalize_numbers(text)
     }
 
     fn orthographic_tokenizer(&self, text: &str) -> Vec<WordToken> {
@@ -1110,9 +1118,28 @@ fn pronunciation_for_word(
             status: entry.status,
             provenance: cmudict_pronunciation_provenance(
                 entry.status,
+                entry.source,
                 context.part_of_speech,
                 selection.applied_pos,
             ),
+            warnings: Vec::new(),
+            letter_break_offsets: Vec::new(),
+            letter_indices: Vec::new(),
+            part_of_speech: context.part_of_speech,
+        };
+    }
+
+    use crate::data::varieties::english::morphology;
+    if let Some(morph_parts) = morphology::decompose_word(variety, &word.normalized) {
+        let candidates = vec![morphology::compose_pronunciation(variety, &morph_parts)];
+        return WordPronunciation {
+            candidates,
+            status: PronunciationStatus::Exact,
+            provenance: EvidenceProvenance {
+                source: EvidenceSource::Rule,
+                method: "morphological composition".into(),
+                version: Some("0.1".into()),
+            },
             warnings: Vec::new(),
             letter_break_offsets: Vec::new(),
             letter_indices: Vec::new(),
@@ -1136,10 +1163,15 @@ fn pronunciation_for_word(
             part_of_speech: context.part_of_speech,
         }
     } else {
+        eprintln!("GUESSED: {}", word.text);
         WordPronunciation {
             candidates: vec![guessed],
             status: PronunciationStatus::Guessed,
-            provenance: pronunciation_provenance(PronunciationStatus::Guessed),
+            provenance: EvidenceProvenance {
+                source: EvidenceSource::Rule,
+                method: "fallback".into(),
+                version: Some("0.1".into()),
+            },
             warnings: vec![PronunciationWarning {
                 token: word.text.clone(),
                 kind: PronunciationWarningKind::GuessedWord,
@@ -1594,34 +1626,46 @@ fn orthographic_unit_candidate(
 }
 
 fn guess_pronunciation(word: &str) -> Vec<CmuPhoneme> {
-    word.chars()
+    let mut phonemes: Vec<CmuPhoneme> = word
+        .chars()
         .filter_map(|character| fallback_symbol_for_char(character).map(CmuPhoneme::parse))
-        .collect()
+        .collect();
+
+    let vowels = [
+        "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW",
+    ];
+    if let Some(first_vowel_idx) = phonemes
+        .iter()
+        .position(|p| vowels.contains(&p.base.as_str()))
+    {
+        phonemes[first_vowel_idx].stress = Some(CmuStress::Primary);
+    }
+    phonemes
 }
 
 fn fallback_symbol_for_char(character: char) -> Option<&'static str> {
     match character {
-        'a' => Some("AE1"),
+        'a' => Some("AH0"),
         'b' => Some("B"),
         'c' => Some("K"),
         'd' => Some("D"),
-        'e' => Some("EH1"),
+        'e' => Some("IH0"),
         'f' => Some("F"),
         'g' => Some("G"),
         'h' => Some("HH"),
-        'i' => Some("IH1"),
+        'i' => Some("IH0"),
         'j' => Some("JH"),
         'k' => Some("K"),
         'l' => Some("L"),
         'm' => Some("M"),
         'n' => Some("N"),
-        'o' => Some("OW1"),
+        'o' => Some("AH0"),
         'p' => Some("P"),
         'q' => Some("K"),
         'r' => Some("R"),
         's' => Some("S"),
         't' => Some("T"),
-        'u' => Some("AH1"),
+        'u' => Some("AH0"),
         'v' => Some("V"),
         'w' => Some("W"),
         'x' => Some("K"),
@@ -1815,11 +1859,16 @@ fn confidence_for_status(status: PronunciationStatus) -> f32 {
 
 fn cmudict_pronunciation_provenance(
     status: PronunciationStatus,
+    source: &'static str,
     part_of_speech: Option<PartOfSpeech>,
     applied_pos: bool,
 ) -> EvidenceProvenance {
+    let mut provenance = EvidenceProvenance {
+        source: EvidenceSource::Lexicon,
+        method: format!("{} lookup", source),
+        version: Some("0.1".into()),
+    };
     if applied_pos {
-        let mut provenance = pronunciation_provenance(status);
         if let Some(part_of_speech) = part_of_speech {
             provenance.method = format!(
                 "{} + link-grammar POS {}",
@@ -1827,9 +1876,8 @@ fn cmudict_pronunciation_provenance(
                 part_of_speech_feature_value(part_of_speech)
             );
         }
-        return provenance;
     }
-    pronunciation_provenance(status)
+    provenance
 }
 
 fn pronunciation_provenance(status: PronunciationStatus) -> EvidenceProvenance {
@@ -1887,12 +1935,484 @@ pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {
     split_stress(symbol).0
 }
 
+const PREFIX: &[&str] = &[
+    "", "m", "b", "tr", "quadr", "quint", "sext", "sept", "oct", "non",
+    "dec", "undec", "duodec", "tredec", "quattuordec", "quindec", "sexdec",
+    "septendec", "octodec", "novemdec", "vigint",
+];
+
+fn power_name(p: usize) -> Result<String, &'static str> {
+    if p == 0 {
+        return Ok("thousand".to_string());
+    }
+    if p == 100 {
+        return Ok("centillion".to_string());
+    }
+    if p >= PREFIX.len() {
+        return Err("The number is too large to be represented in text.");
+    }
+    Ok(format!("{}illion", PREFIX[p]))
+}
+
+fn ilog10_u128(mut n: u128) -> u32 {
+    let mut count = 0;
+    while n >= 10 {
+        n /= 10;
+        count += 1;
+    }
+    count
+}
+
+fn spell_out(i: u128) -> String {
+    match i {
+        0 => "zero".to_string(),
+        1 => "one".to_string(),
+        2 => "two".to_string(),
+        3 => "three".to_string(),
+        4 => "four".to_string(),
+        5 => "five".to_string(),
+        6 => "six".to_string(),
+        7 => "seven".to_string(),
+        8 => "eight".to_string(),
+        9 => "nine".to_string(),
+        10 => "ten".to_string(),
+        11 => "eleven".to_string(),
+        12 => "twelve".to_string(),
+        13 => "thirteen".to_string(),
+        14 => "fourteen".to_string(),
+        15 => "fifteen".to_string(),
+        16 => "sixteen".to_string(),
+        17 => "seventeen".to_string(),
+        18 => "eighteen".to_string(),
+        19 => "nineteen".to_string(),
+        20 => "twenty".to_string(),
+        30 => "thirty".to_string(),
+        40 => "forty".to_string(),
+        50 => "fifty".to_string(),
+        60 => "sixty".to_string(),
+        70 => "seventy".to_string(),
+        80 => "eighty".to_string(),
+        90 => "ninety".to_string(),
+        _ => {
+            let l = ilog10_u128(i);
+            match l {
+                1 => {
+                    let head = i / 10;
+                    let tail = i % 10;
+                    format!("{}-{}", spell_out(head * 10), spell_out(tail))
+                }
+                2 => {
+                    let head = i / 100;
+                    let tail = i % 100;
+                    if tail > 0 {
+                        format!("{} hundred {}", spell_out(head), spell_out(tail))
+                    } else {
+                        format!("{} hundred", spell_out(head))
+                    }
+                }
+                _ => {
+                    let p = (l / 3) - 1;
+                    let num_digits = l - (l % 3);
+                    let divisor = 10u128.pow(num_digits);
+                    let head = i / divisor;
+                    let tail = i % divisor;
+                    
+                    let power_name_str = match power_name(p as usize) {
+                        Ok(name) => name,
+                        Err(_) => {
+                            return i.to_string(); 
+                        }
+                    };
+                    
+                    if tail > 0 {
+                        format!("{} {} {}", spell_out(head), power_name_str, spell_out(tail))
+                    } else {
+                        format!("{} {}", spell_out(head), power_name_str)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_scale_word(word: &str) -> bool {
+    matches!(
+        word,
+        "thousand"
+            | "million"
+            | "billion"
+            | "trillion"
+            | "quadrillion"
+            | "quintillion"
+            | "sextillion"
+            | "septillion"
+            | "octillion"
+            | "nonillion"
+            | "decillion"
+    )
+}
+
+fn is_known_unit(word: &str) -> bool {
+    matches!(
+        word,
+        "ft" | "feet"
+            | "foot"
+            | "in"
+            | "inch"
+            | "inches"
+            | "mph"
+            | "lb"
+            | "lbs"
+            | "pound"
+            | "pounds"
+            | "kg"
+            | "kilo"
+            | "kilos"
+            | "kilograms"
+            | "cm"
+            | "centimeter"
+            | "centimeters"
+            | "m"
+            | "meter"
+            | "meters"
+            | "%"
+            | "percent"
+    )
+}
+
+fn spell_unit(val: u128, unit: &str) -> &'static str {
+    match unit {
+        "ft" | "feet" | "foot" => if val == 1 { "foot" } else { "feet" },
+        "in" | "inch" | "inches" => if val == 1 { "inch" } else { "inches" },
+        "mph" => "miles per hour",
+        "lb" | "lbs" | "pound" | "pounds" => if val == 1 { "pound" } else { "pounds" },
+        "kg" | "kilo" | "kilos" | "kilograms" => if val == 1 { "kilogram" } else { "kilograms" },
+        "cm" | "centimeter" | "centimeters" => if val == 1 { "centimeter" } else { "centimeters" },
+        "m" | "meter" | "meters" => if val == 1 { "meter" } else { "meters" },
+        "%" | "percent" => "percent",
+        _ => "",
+    }
+}
+
+fn is_number_or_scale_word(word: &str) -> bool {
+    if is_scale_word(word) {
+        return true;
+    }
+    word.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+}
+
+fn is_linked_as_modifier(word_idx: usize, syntax: &crate::syntax::SentenceSyntaxAnalysis, words: &[WordToken]) -> bool {
+    let parse = match syntax.primary_parse() {
+        Some(p) => p,
+        None => return false,
+    };
+    
+    let mut current_idx = word_idx;
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(current_idx);
+    
+    while let Some(link) = parse.links.iter().find(|l| {
+        l.left == current_idx 
+            && (l.kind == crate::syntax::SyntacticLinkKind::NounCompound || l.kind == crate::syntax::SyntacticLinkKind::Modifier)
+            && !visited.contains(&l.right)
+    }) {
+        current_idx = link.right;
+        visited.insert(current_idx);
+        
+        if let Some(target_word) = words.get(current_idx) {
+            let text_lower = target_word.normalized.to_lowercase();
+            if !is_number_or_scale_word(&text_lower) {
+                return true;
+            }
+        }
+    }
+    
+    false
+}
+
+pub fn english_normalize_numbers(text: &str) -> String {
+    let words = tokenize_words(text);
+    if words.is_empty() {
+        return text.to_string();
+    }
+
+    let words_str: Vec<String> = words.iter().map(|w| w.text.clone()).collect();
+    let syntax = crate::syntax::HeuristicLinkGrammarParser.parse(&words_str, None);
+
+    let char_vec: Vec<char> = text.chars().collect();
+    let mut result = String::new();
+    let mut last_char_idx = 0;
+    let mut i = 0;
+
+    while i < words.len() {
+        let word = &words[i];
+        let span = word.span;
+
+        // Append non-word content before this word
+        for c in &char_vec[last_char_idx..span.start_char] {
+            result.push(*c);
+        }
+
+        // Check if this word is a currency amount (preceded by '$')
+        let is_currency = span.start_char > 0 && char_vec[span.start_char - 1] == '$';
+
+        if is_currency {
+            if result.ends_with('$') {
+                result.pop();
+            }
+
+            let mut cents_val: Option<u128> = None;
+            let mut cents_consumed = false;
+
+            if i + 1 < words.len() {
+                let next_word = &words[i + 1];
+                let dot_idx = word.span.end_char;
+                if dot_idx < char_vec.len() && char_vec[dot_idx] == '.' {
+                    if next_word.span.start_char == dot_idx + 1 {
+                        if next_word.text.len() == 2 && next_word.text.chars().all(|c| c.is_ascii_digit()) {
+                            let is_longer_decimal = if i + 2 < words.len() {
+                                words[i + 2].span.start_char == next_word.span.end_char
+                                    && words[i + 2].text.chars().all(|c| c.is_ascii_digit())
+                            } else {
+                                false
+                            };
+
+                            if !is_longer_decimal {
+                                if let Ok(val) = next_word.text.parse::<u128>() {
+                                    cents_val = Some(val);
+                                    cents_consumed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut scale_word: Option<String> = None;
+            let mut scale_word_idx: Option<usize> = None;
+            if !cents_consumed && i + 1 < words.len() {
+                let next_word = &words[i + 1];
+                let next_lower = next_word.normalized.to_lowercase();
+                if is_scale_word(&next_lower) {
+                    scale_word = Some(next_lower);
+                    scale_word_idx = Some(i + 1);
+                }
+            }
+
+            let dollars_str: String = word.text.chars().filter(|&c| c != ',').collect();
+            if let Ok(dollars_val) = dollars_str.parse::<u128>() {
+                let check_idx = scale_word_idx.unwrap_or(i);
+                let modifier = is_linked_as_modifier(check_idx, &syntax, &words);
+
+                let spelled = if modifier {
+                    let dollars_spelled = spell_out(dollars_val);
+                    let base = if let Some(ref scale) = scale_word {
+                        format!("{}-{}", dollars_spelled, scale)
+                    } else {
+                        dollars_spelled
+                    };
+                    
+                    if let Some(cents) = cents_val {
+                        let cents_spelled = spell_out(cents);
+                        format!("{}-dollar-and-{}-cent", base.replace(' ', "-"), cents_spelled.replace(' ', "-"))
+                    } else {
+                        format!("{}-dollar", base.replace(' ', "-"))
+                    }
+                } else {
+                    let dollars_spelled = spell_out(dollars_val);
+                    let base = if let Some(ref scale) = scale_word {
+                        format!("{} {}", dollars_spelled, scale)
+                    } else {
+                        dollars_spelled
+                    };
+                    
+                    let dollars_unit = if dollars_val == 1 && scale_word.is_none() { "dollar" } else { "dollars" };
+                    if let Some(cents) = cents_val {
+                        let cents_spelled = spell_out(cents);
+                        let cents_unit = if cents == 1 { "cent" } else { "cents" };
+                        format!("{} {} and {} {}", base, dollars_unit, cents_spelled, cents_unit)
+                    } else {
+                        format!("{} {}", base, dollars_unit)
+                    }
+                };
+
+                result.push_str(&spelled);
+
+                let end_word_idx = if cents_consumed { i + 1 } else { scale_word_idx.unwrap_or(i) };
+                last_char_idx = words[end_word_idx].span.end_char;
+                i = end_word_idx + 1;
+                continue;
+            }
+        }
+
+        let first_char = word.text.chars().next().unwrap_or(' ');
+        if first_char.is_ascii_digit() {
+            let digits: String = word.text.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
+            let suffix: String = word.text.chars().skip(digits.len()).collect();
+            let clean_digits = digits.replace(',', "");
+            
+            if let Ok(val) = clean_digits.parse::<u128>() {
+                let mut unit_str = suffix.to_lowercase();
+                let mut unit_from_next_word = false;
+                
+                if unit_str.is_empty() && i + 1 < words.len() {
+                    let next_word = &words[i + 1];
+                    let next_lower = next_word.normalized.to_lowercase();
+                    if is_known_unit(&next_lower) {
+                        unit_str = next_lower;
+                        unit_from_next_word = true;
+                    }
+                }
+                
+                let mut percent_consumed = false;
+                if unit_str.is_empty() {
+                    let end_idx = word.span.end_char;
+                    if end_idx < char_vec.len() && char_vec[end_idx] == '%' {
+                        unit_str = "%".to_string();
+                        percent_consumed = true;
+                    }
+                }
+
+                if is_known_unit(&unit_str) {
+                    let mut height_inches_val: Option<u128> = None;
+                    let mut height_inches_consumed = false;
+                    
+                    if matches!(unit_str.as_str(), "ft" | "feet" | "foot") {
+                        let next_num_idx = if unit_from_next_word { i + 2 } else { i + 1 };
+                        if next_num_idx < words.len() {
+                            let next_word = &words[next_num_idx];
+                            if next_word.text.chars().all(|c| c.is_ascii_digit()) {
+                                if let Ok(inches) = next_word.text.parse::<u128>() {
+                                    height_inches_val = Some(inches);
+                                    height_inches_consumed = true;
+                                }
+                            }
+                        }
+                    }
+                    
+                    let spelled = if let Some(inches) = height_inches_val {
+                        format!("{} foot {}", spell_out(val), spell_out(inches))
+                    } else {
+                        let unit_spelled = spell_unit(val, &unit_str);
+                        format!("{} {}", spell_out(val), unit_spelled)
+                    };
+                    
+                    result.push_str(&spelled);
+                    
+                    let end_word_idx = if height_inches_consumed {
+                        if unit_from_next_word { i + 2 } else { i + 1 }
+                    } else {
+                        if unit_from_next_word { i + 1 } else { i }
+                    };
+                    
+                    last_char_idx = words[end_word_idx].span.end_char;
+                    if percent_consumed {
+                        last_char_idx += 1;
+                    }
+                    i = end_word_idx + 1;
+                    continue;
+                } else {
+                    let mut is_decimal = false;
+                    if i + 1 < words.len() {
+                        let next_word = &words[i + 1];
+                        let dot_idx = word.span.end_char;
+                        if dot_idx < char_vec.len() && char_vec[dot_idx] == '.' {
+                            if next_word.span.start_char == dot_idx + 1 {
+                                is_decimal = true;
+                            }
+                        }
+                    }
+                    
+                    if !is_decimal {
+                        let spelled = spell_out(val);
+                        result.push_str(&spelled);
+                        last_char_idx = word.span.end_char;
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Fallback: append the word as-is
+        for c in &char_vec[span.start_char..span.end_char] {
+            result.push(*c);
+        }
+        last_char_idx = span.end_char;
+        i += 1;
+    }
+
+    // Append remaining characters
+    for c in &char_vec[last_char_idx..] {
+        result.push(*c);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rules::RuleCondition;
     use crate::syntax::SyntacticLinkKind;
     use crate::variety::VarietyImplementationStatus;
+
+    #[test]
+    fn test_tts_pronunciation_pipeline_regression() {
+        let phonemicizer = EnglishPhonemicizer;
+
+        // Test "logorrhea" (override)
+        let out_logo = phonemicizer
+            .phonemicize(&request("logorrhea", "en-US"))
+            .unwrap();
+        let syms_logo = cmudict_symbols(&out_logo);
+        assert_eq!(syms_logo, vec!["L", "AO2", "G", "ER0", "IY1", "AH0"]);
+
+        // Test "talkativeness" (morphology)
+        let out_talk = phonemicizer
+            .phonemicize(&request("talkativeness", "en-US"))
+            .unwrap();
+        let syms_talk = cmudict_symbols(&out_talk);
+        assert_eq!(
+            syms_talk,
+            vec!["T", "AO1", "K", "AH0", "T", "IH0", "V", "N", "AH0", "S"]
+        );
+
+        // Test "wordiness" (morphology)
+        let out_word = phonemicizer
+            .phonemicize(&request("wordiness", "en-US"))
+            .unwrap();
+        let syms_word = cmudict_symbols(&out_word);
+        assert_eq!(syms_word, vec!["W", "ER1", "D", "IY0", "N", "AH0", "S"]);
+
+        // Test "excessive" (base dict/morphology)
+        let out_exc = phonemicizer
+            .phonemicize(&request("excessive", "en-US"))
+            .unwrap();
+        let syms_exc = cmudict_symbols(&out_exc);
+        assert_eq!(syms_exc, vec!["IH0", "K", "S", "EH1", "S", "IH0", "V"]);
+
+        // Test "incoherent" (base dict/morphology)
+        let out_inc = phonemicizer
+            .phonemicize(&request("incoherent", "en-US"))
+            .unwrap();
+        let syms_inc = cmudict_symbols(&out_inc);
+        assert_eq!(
+            syms_inc,
+            vec!["IH2", "N", "K", "OW0", "HH", "IH1", "R", "AH0", "N", "T"]
+        );
+
+        // Test fallback (humble G2P with single stress)
+        let out_fallback = phonemicizer
+            .phonemicize(&request("xyzzyqux", "en-US"))
+            .unwrap();
+        let syms_fallback = cmudict_symbols(&out_fallback);
+        let primary_stress_count = syms_fallback.iter().filter(|s| s.ends_with('1')).count();
+        assert!(
+            primary_stress_count <= 1,
+            "Fallback should never have more than one primary stress"
+        );
+    }
 
     fn request(text: &str, variety: &str) -> PhonemicizeRequest {
         PhonemicizeRequest {

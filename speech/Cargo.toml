@@ -6,3 +6,4 @@ description = "Backend-free linguistic and acoustic speech ontology"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+dirs = "6"

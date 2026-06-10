@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -64,13 +65,32 @@ impl CmuPhoneme {
 }
 
 #[derive(Debug, Clone)]
-pub struct CmudictLexicon {
-    entries: HashMap<Box<str>, Vec<Vec<CmuPhoneme>>>,
+pub struct LexiconEntry {
+    pub candidates: Vec<Vec<CmuPhoneme>>,
+    pub source: &'static str,
 }
+
+#[derive(Debug, Clone)]
+pub struct CmudictLexicon {
+    entries: HashMap<Box<str>, LexiconEntry>,
+}
+
+pub const GENERATED_OVERRIDES: &str = "\
+logorrhea L AO2 G ER0 IY1 AH0
+talkativeness T AO1 K AH0 T IH0 V N AH0 S
+wordiness W ER1 D IY0 N AH0 S
+";
 
 impl CmudictLexicon {
     pub fn bundled() -> Self {
-        let mut lexicon = Self::from_str(include_str!("cmudict.dict"));
+        if let Some(lexicon) = Self::load_from_runtime_path() {
+            return lexicon;
+        }
+
+        let mut lexicon = Self {
+            entries: HashMap::new(),
+        };
+        lexicon.extend_from_str(include_str!("cmudict.dict"), "base cmu");
         lexicon.extend_from_str(
             "\
 mm M
@@ -78,8 +98,49 @@ mm-hm M HH M
 mm-hmm M HH M
 mmm M
 ",
+            "extras",
         );
+        lexicon.extend_from_str(GENERATED_OVERRIDES, "generated overrides");
         lexicon
+    }
+
+    fn load_from_runtime_path() -> Option<Self> {
+        let home = if let Some(home_var) = std::env::var_os("MORTAR_SEA_HOME") {
+            PathBuf::from(home_var)
+        } else {
+            dirs::data_local_dir()?.join("mortar-sea")
+        };
+
+        let base_path = home.join("models/speech/en-us/cmudict-0.7b");
+        let vp_path = home.join("models/speech/en-us/cmudict-0.7b.vp");
+
+        if base_path.exists() {
+            if let Ok(base_data) = std::fs::read_to_string(&base_path) {
+                let mut lexicon = Self {
+                    entries: HashMap::new(),
+                };
+                lexicon.extend_from_str(&base_data, "base cmu");
+
+                if vp_path.exists() {
+                    if let Ok(vp_data) = std::fs::read_to_string(&vp_path) {
+                        lexicon.extend_from_str(&vp_data, "base cmu");
+                    }
+                }
+
+                lexicon.extend_from_str(
+                    "\
+mm M
+mm-hm M HH M
+mm-hmm M HH M
+mmm M
+",
+                    "extras",
+                );
+                lexicon.extend_from_str(GENERATED_OVERRIDES, "generated overrides");
+                return Some(lexicon);
+            }
+        }
+        None
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -87,31 +148,31 @@ mmm M
         let mut lexicon = Self {
             entries: HashMap::new(),
         };
-        lexicon.extend_from_str(data);
+        lexicon.extend_from_str(data, "base cmu");
         lexicon
     }
 
     pub fn lookup_entry(&self, word: &str) -> PronunciationEntry {
         let exact_key = word.to_lowercase();
-        if let Some(candidates) = self.entries.get(exact_key.as_str()) {
+        if let Some(entry) = self.entries.get(exact_key.as_str()) {
             return PronunciationEntry {
                 original: word.into(),
                 lookup: exact_key,
-                source: "cmudict",
-                candidates: candidates.clone(),
+                source: entry.source,
+                candidates: entry.candidates.clone(),
                 status: PronunciationStatus::Exact,
             };
         }
 
         let normalized = normalize_for_lookup(word);
         if normalized != exact_key
-            && let Some(candidates) = self.entries.get(normalized.as_str())
+            && let Some(entry) = self.entries.get(normalized.as_str())
         {
             return PronunciationEntry {
                 original: word.into(),
                 lookup: normalized,
-                source: "cmudict",
-                candidates: candidates.clone(),
+                source: entry.source,
+                candidates: entry.candidates.clone(),
                 status: PronunciationStatus::Normalized,
             };
         }
@@ -123,7 +184,7 @@ mmm M
             } else {
                 normalized
             },
-            source: "cmudict",
+            source: "fallback",
             candidates: Vec::new(),
             status: PronunciationStatus::Missing,
         }
@@ -137,7 +198,7 @@ mmm M
         self.entries.is_empty()
     }
 
-    fn extend_from_str(&mut self, data: &str) {
+    fn extend_from_str(&mut self, data: &str, source: &'static str) {
         for line in data.lines().map(str::trim) {
             if line.is_empty() || line.starts_with(";;;") {
                 continue;
@@ -155,9 +216,15 @@ mmm M
             if phonemes.is_empty() {
                 continue;
             }
+
+            let key = word.to_lowercase().into_boxed_str();
             self.entries
-                .entry(word.to_lowercase().into_boxed_str())
-                .or_default()
+                .entry(key)
+                .or_insert_with(|| LexiconEntry {
+                    candidates: Vec::new(),
+                    source,
+                })
+                .candidates
                 .push(phonemes);
         }
     }
