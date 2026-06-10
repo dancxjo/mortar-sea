@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
 use anyhow::Context;
@@ -43,6 +44,9 @@ const COMMENTATOR_REPETITION_RECENT_TURNS: usize = 4;
 const COMMENTATOR_REPETITION_MIN_SENTENCES: usize = 6;
 const COMMENTATOR_REPETITION_MIN_SENTENCE_WORDS: usize = 4;
 const COMMENTATOR_REPETITION_SIMILARITY_THRESHOLD: f32 = 0.50;
+
+static MOUTH_PIPER_SYNTHESIZER: LazyLock<Mutex<Option<mortar_sea::speak::PiperTextSynthesizer>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 pub(crate) fn mouth_audio_dir() -> PathBuf {
     PathBuf::from("target/face-mouth")
@@ -170,12 +174,30 @@ enum VoiceReply {
 }
 
 pub(crate) fn spawn_voice(state: AppState) {
+    spawn_mouth_piper_warmup();
     let commentator_state = state.clone();
     tokio::spawn(async move {
         run_commentator(commentator_state).await;
     });
     tokio::spawn(async move {
         run_voice(state).await;
+    });
+}
+
+fn spawn_mouth_piper_warmup() {
+    tokio::task::spawn_blocking(|| {
+        let started_at = Instant::now();
+        match cached_mouth_piper_synthesizer() {
+            Ok(()) => info!(
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "Mouth Piper synthesizer warmed"
+            ),
+            Err(error) => warn!(
+                error = %format!("{error:#}"),
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "Mouth Piper synthesizer warmup failed"
+            ),
+        }
     });
 }
 
@@ -1213,11 +1235,7 @@ fn synthesize_voice_speech_audio(
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("failed to create {}", parent.display()))?;
                 }
-                let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
-                    &text_for_task,
-                    "en-US",
-                    &output_path,
-                )?;
+                let artifact = synthesize_mouth_text_to_wav(&text_for_task, &output_path)?;
                 let byte_len = std::fs::metadata(&artifact.path)?.len();
                 Ok((byte_len, artifact))
             })();
@@ -1287,6 +1305,32 @@ fn synthesize_voice_speech_audio(
             }
         }
     });
+}
+
+fn cached_mouth_piper_synthesizer() -> anyhow::Result<()> {
+    let mut synthesizer = MOUTH_PIPER_SYNTHESIZER
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mouth Piper synthesizer lock poisoned"))?;
+    if synthesizer.is_none() {
+        *synthesizer = Some(mortar_sea::speak::PiperTextSynthesizer::load_selected()?);
+    }
+    Ok(())
+}
+
+fn synthesize_mouth_text_to_wav(
+    text: &str,
+    output_path: &Path,
+) -> anyhow::Result<mortar_sea::speak::SpeechSynthesisArtifact> {
+    let mut synthesizer = MOUTH_PIPER_SYNTHESIZER
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mouth Piper synthesizer lock poisoned"))?;
+    if synthesizer.is_none() {
+        *synthesizer = Some(mortar_sea::speak::PiperTextSynthesizer::load_selected()?);
+    }
+    synthesizer
+        .as_mut()
+        .expect("mouth Piper synthesizer was initialized")
+        .synthesize_text_to_wav(text, "en-US", output_path)
 }
 
 fn remember_speech_feedback(
