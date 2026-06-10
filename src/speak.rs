@@ -496,6 +496,7 @@ pub fn run(command: SpeakCommand) -> Result<()> {
                 .expect("Piper voice model should be available");
             let config = PiperVoiceConfig::from_json_file(piper_voice_config_path(voice_model))?;
             piper_sequence_from_plan(&plan)
+                .context("failed to prepare Piper synthesis symbol sequence")?
                 .to_symbols_compatible(&config)
                 .context("failed to format Piper backend symbols")?
                 .symbols

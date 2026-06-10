@@ -8,8 +8,8 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::{DynTensorValueType, Tensor, TensorElementType};
 use serde_json::Value;
 use speech::{
-    PauseKind, PhoneToken, Spec, SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
-    phoneme_display_symbol,
+    FeatureId, FeatureValue, PauseKind, PhoneToken, PhonemeToken, Spec, SpeechBoundaryToken,
+    TerminalPunctuation, UtterancePlan,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +142,7 @@ pub fn piper_voice_config_path(model_path: &Path) -> PathBuf {
     model_path.with_extension("onnx.json")
 }
 
-pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
+pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> Result<PiperPhonemeSequence> {
     let mut symbols = Vec::new();
     if !plan.target_phones.is_empty() {
         let punctuation_after_words = typed_punctuation_after_words(&plan.boundaries)
@@ -170,7 +170,10 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             } else if phone_id.0 == "boundary.letter" {
                 continue;
             } else {
-                push_symbol(&mut symbols, piper_symbol_for_phone(token));
+                let symbol = piper_symbol_for_phone(token).with_context(|| {
+                    format!("cannot lower phone `{}` to a Piper ARPAbet symbol", phone_id.0)
+                })?;
+                push_symbol(&mut symbols, &symbol);
                 in_word = true;
             }
         }
@@ -187,15 +190,18 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> PiperPhonemeSequence {
             let Spec::Known(phoneme_id) = &token.phoneme else {
                 continue;
             };
-            push_symbol(&mut symbols, phoneme_display_symbol(phoneme_id));
+            let symbol = piper_symbol_for_phoneme(token).with_context(|| {
+                format!("cannot lower phoneme `{}` to a Piper ARPAbet symbol", phoneme_id.0)
+            })?;
+            push_symbol(&mut symbols, &symbol);
         }
     }
     append_default_terminal_symbol(&mut symbols);
-    PiperPhonemeSequence { symbols }
+    Ok(PiperPhonemeSequence { symbols })
 }
 
-pub fn piper_synthesis_chunks_from_plan(plan: &UtterancePlan) -> Vec<PiperSynthesisChunk> {
-    piper_synthesis_chunks_from_sequence(piper_sequence_from_plan(plan))
+pub fn piper_synthesis_chunks_from_plan(plan: &UtterancePlan) -> Result<Vec<PiperSynthesisChunk>> {
+    piper_sequence_from_plan(plan).map(piper_synthesis_chunks_from_sequence)
 }
 
 fn piper_synthesis_chunks_from_sequence(
@@ -248,21 +254,39 @@ fn piper_pause_after_ms(symbol: &str) -> Option<u32> {
     }
 }
 
-fn piper_symbol_for_phone(token: &PhoneToken) -> &str {
+fn piper_symbol_for_phone(token: &PhoneToken) -> Option<String> {
     let Spec::Known(phone_id) = &token.phone else {
-        return "";
+        return None;
     };
-    match phone_id.as_str() {
-        "ipa.phone.ʌ" => "AH1",
-        _ => piper_symbol_for_phone_id(phone_id.as_str()),
+    if let Some(symbol) = piper_arpabet_symbol_from_features(&token.features) {
+        return Some(symbol);
     }
+    piper_symbol_for_phone_id(phone_id.as_str()).map(str::to_string)
 }
 
-fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
-    match phone_id {
+fn piper_symbol_for_phoneme(token: &PhonemeToken) -> Option<String> {
+    piper_arpabet_symbol_from_features(&token.features)
+}
+
+fn piper_arpabet_symbol_from_features(features: &speech::FeatureBundle) -> Option<String> {
+    let base = feature_category(features, "phonology.base_symbol")?;
+    if !is_piper_arpabet_symbol(base) {
+        return None;
+    }
+    if is_arpabet_vowel(base)
+        && let Some(stress) = feature_category(features, "phonology.stress").and_then(stress_digit)
+    {
+        return Some(format!("{base}{stress}"));
+    }
+    Some(base.to_string())
+}
+
+fn piper_symbol_for_phone_id(phone_id: &str) -> Option<&'static str> {
+    Some(match phone_id {
         "ipa.phone.ɑ" => "AA",
         "ipa.phone.æ" => "AE",
         "ipa.phone.ʌ" => "AH1",
+        "ipa.phone.ə" | "ipa.phone.ɐ" => "AH0",
         "ipa.phone.ɔ" => "AO",
         "ipa.phone.aʊ" => "AW",
         "ipa.phone.aɪ" => "AY",
@@ -271,7 +295,8 @@ fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
         "ipa.phone.d" => "D",
         "ipa.phone.ð" => "DH",
         "ipa.phone.ɛ" => "EH",
-        "ipa.phone.ɝ" | "ipa.phone.ɚ" => "ER",
+        "ipa.phone.ɝ" => "ER1",
+        "ipa.phone.ɚ" => "ER0",
         "ipa.phone.eɪ" => "EY",
         "ipa.phone.f" => "F",
         "ipa.phone.ɡ" => "G",
@@ -290,7 +315,7 @@ fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
         "ipa.phone.ɹ" => "R",
         "ipa.phone.s" => "S",
         "ipa.phone.ʃ" => "SH",
-        "ipa.phone.t" | "ipa.phone.tʰ" | "ipa.phone.t˭" | "ipa.phone.ɾ" => "T",
+        "ipa.phone.t" | "ipa.phone.tʰ" | "ipa.phone.t˭" => "T",
         "ipa.phone.θ" => "TH",
         "ipa.phone.ʊ" => "UH",
         "ipa.phone.uː" | "ipa.phone.u" => "UW",
@@ -299,8 +324,8 @@ fn piper_symbol_for_phone_id(phone_id: &str) -> &str {
         "ipa.phone.j" => "Y",
         "ipa.phone.z" => "Z",
         "ipa.phone.ʒ" => "ZH",
-        _ => phone_id.rsplit('.').next().unwrap_or(phone_id),
-    }
+        _ => return None,
+    })
 }
 
 fn append_default_terminal_symbol(symbols: &mut Vec<String>) {
@@ -589,7 +614,7 @@ impl PiperOnnxBackend {
     }
 
     pub fn synthesize_plan(&mut self, plan: &UtterancePlan) -> Result<PiperSynthesisOutput> {
-        let chunks = piper_synthesis_chunks_from_plan(plan);
+        let chunks = piper_synthesis_chunks_from_plan(plan)?;
         let mut pcm_mono_f32 = Vec::new();
         for chunk in chunks {
             let ids = chunk
@@ -997,6 +1022,57 @@ fn expand_espeak_phoneme(symbol: &str, config: &PiperVoiceConfig) -> Option<Vec<
     Some(output)
 }
 
+fn feature_category<'a>(features: &'a speech::FeatureBundle, feature_id: &str) -> Option<&'a str> {
+    let value = features.values.get(&FeatureId(feature_id.into()))?;
+    match value {
+        Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
+            Some(value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn stress_digit(stress: &str) -> Option<&'static str> {
+    match stress {
+        "unstressed" => Some("0"),
+        "primary" => Some("1"),
+        "secondary" => Some("2"),
+        _ => None,
+    }
+}
+
+fn is_piper_arpabet_symbol(symbol: &str) -> bool {
+    is_arpabet_vowel(symbol)
+        || matches!(
+            symbol,
+            "B" | "CH"
+                | "D"
+                | "DH"
+                | "DX"
+                | "F"
+                | "G"
+                | "HH"
+                | "JH"
+                | "K"
+                | "L"
+                | "M"
+                | "N"
+                | "NG"
+                | "P"
+                | "R"
+                | "S"
+                | "SH"
+                | "T"
+                | "TH"
+                | "TS"
+                | "V"
+                | "W"
+                | "Y"
+                | "Z"
+                | "ZH"
+        )
+}
+
 fn is_arpabet_vowel(symbol: &str) -> bool {
     matches!(
         symbol,
@@ -1326,7 +1402,7 @@ mod tests {
 
     #[test]
     fn piper_sequence_lowers_dark_l_to_regular_piper_l() {
-        assert_eq!(piper_symbol_for_phone_id("ipa.phone.ɫ"), "L");
+        assert_eq!(piper_symbol_for_phone_id("ipa.phone.ɫ"), Some("L"));
 
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
@@ -1351,18 +1427,19 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
         assert_eq!(
             sequence.symbols,
             vec![
-                "W", "ER", "L", "D", " ", "T", "R", "AE", "V", "ə", "L", "D", "."
+                "W", "ER1", "L", "D", " ", "T", "R", "AE1", "V", "AH0", "L", "D", "."
             ]
         );
         assert!(
             !sequence.symbols.iter().any(|symbol| symbol == "ɫ"),
             "Piper should receive regular L, not raw dark-L IPA"
         );
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
@@ -1390,11 +1467,14 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
         assert_eq!(
             sequence.symbols,
-            vec!["HH", "ə", "L", "OW", " ", "W", "ER", "L", "D", "."]
+            vec![
+                "HH", "AH0", "L", "OW1", " ", "W", "ER1", "L", "D", "."
+            ]
         );
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
@@ -1422,7 +1502,7 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
         assert_eq!(sequence.symbols.last().map(String::as_str), Some("?"));
     }
@@ -1452,7 +1532,7 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
         assert_eq!(
             sequence.symbols,

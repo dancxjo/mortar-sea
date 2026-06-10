@@ -96,6 +96,7 @@ const LLM_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(1);
 pub(crate) struct LlmStreamControl {
     appends: Arc<Mutex<VecDeque<String>>>,
     paused: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl LlmStreamControl {
@@ -103,6 +104,7 @@ impl LlmStreamControl {
         Self {
             appends: Arc::new(Mutex::new(VecDeque::new())),
             paused: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -128,8 +130,16 @@ impl LlmStreamControl {
         self.paused.store(false, Ordering::SeqCst);
     }
 
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
     fn is_paused(&self) -> bool {
         self.paused.load(Ordering::SeqCst)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -602,11 +612,40 @@ mod tests {
         assert_eq!(engine.append_attempts, 1);
     }
 
+    #[test]
+    fn cancelled_control_stops_active_generation() {
+        let id = Uuid::new_v4();
+        let mut engine = ScriptedEngine::new(
+            id,
+            [vec![LlmEvent::Token {
+                text: "daydream".to_owned(),
+            }]],
+        );
+        let control = LlmStreamControl::new();
+        control.cancel();
+        let (events, _receiver) = tokio::sync::broadcast::channel(8);
+
+        let result = run_generation(
+            &mut engine,
+            Uuid::new_v4(),
+            LlmJobKind::Commentator,
+            Instant::now(),
+            GenerationRequest::default(),
+            Some(control),
+            None,
+            &events,
+        );
+
+        assert!(result.is_err_and(|err| err.to_string().contains("cancelled")));
+        assert_eq!(engine.cancel_attempts, 1);
+    }
+
     struct ScriptedEngine {
         id: GenerationId,
         polls: VecDeque<Vec<LlmEvent>>,
         fail_next_append: bool,
         append_attempts: usize,
+        cancel_attempts: usize,
         append_allowed: Option<Arc<AtomicBool>>,
     }
 
@@ -617,6 +656,7 @@ mod tests {
                 polls: VecDeque::from(polls),
                 fail_next_append: false,
                 append_attempts: 0,
+                cancel_attempts: 0,
                 append_allowed: None,
             }
         }
@@ -632,6 +672,7 @@ mod tests {
         }
 
         fn cancel(&mut self, _id: GenerationId) -> anyhow::Result<()> {
+            self.cancel_attempts += 1;
             Ok(())
         }
 
@@ -870,6 +911,9 @@ fn run_generation(
     loop {
         let mut made_progress = false;
         if let Some(control) = &control {
+            if control.is_cancelled() {
+                return cancel_generation(engine, generation, id, kind, events);
+            }
             if control.is_paused() {
                 if last_pause_progress_at.elapsed() >= LLM_PROGRESS_HEARTBEAT {
                     send_generation_progress(
@@ -945,6 +989,32 @@ fn run_generation(
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn cancel_generation(
+    engine: &mut impl LlmEngine,
+    generation: psyche::GenerationId,
+    id: Uuid,
+    kind: LlmJobKind,
+    events: &broadcast::Sender<RealTimeExperienceEvent>,
+) -> Result<String> {
+    if let Err(err) = engine.cancel(generation) {
+        let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+            job_id: id,
+            job_kind: kind.as_str().to_string(),
+            observed_at: chrono::Utc::now(),
+            error: err.to_string(),
+        });
+        return Err(err).context("failed to cancel LLM job");
+    }
+
+    let _ = events.send(RealTimeExperienceEvent::LlmJobFailed {
+        job_id: id,
+        job_kind: kind.as_str().to_string(),
+        observed_at: chrono::Utc::now(),
+        error: "cancelled".to_string(),
+    });
+    anyhow::bail!("LLM job {} was cancelled", kind.as_str());
 }
 
 struct ControlAppendResult {

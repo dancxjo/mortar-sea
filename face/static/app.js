@@ -208,22 +208,17 @@ window.faceApp = function faceApp() {
           return;
         }
         if (message.type === 'voice_response_start') {
-          if (this.voiceResponse && this.activeVoiceGenerationId !== message.generation_id) {
-            this.voiceResponse += '\n';
-            this.scrollVoiceStream();
-          }
           this.activeVoiceGenerationId = message.generation_id;
-          this.voiceHasTokens = Boolean(this.voiceResponse);
+          this.voiceResponse = '';
+          this.voiceHasTokens = false;
           this.voiceStatus = 'thinking';
           return;
         }
         if (message.type === 'voice_response_token') {
           if (message.generation_id !== this.activeVoiceGenerationId) {
-            if (this.voiceResponse) {
-              this.voiceResponse += '\n';
-            }
             this.activeVoiceGenerationId = message.generation_id;
-            this.voiceHasTokens = Boolean(this.voiceResponse);
+            this.voiceResponse = '';
+            this.voiceHasTokens = false;
             this.voiceStatus = 'thinking';
           }
           if (!this.voiceHasTokens) {

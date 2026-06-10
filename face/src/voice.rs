@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -38,15 +38,16 @@ const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
+const COMMENTATOR_ENABLED: bool = false;
+const COMMENTATOR_DAYDREAM_ENABLED: bool = false;
 const VOICE_DAYDREAM_MAX_TOKENS_PER_TURN: usize = 420;
 const DIALOGUE_VOICE_MAX_TOKENS_PER_TURN: usize = 96;
 const COMMENTATOR_REPETITION_RECENT_TURNS: usize = 4;
 const COMMENTATOR_REPETITION_MIN_SENTENCES: usize = 6;
 const COMMENTATOR_REPETITION_MIN_SENTENCE_WORDS: usize = 4;
 const COMMENTATOR_REPETITION_SIMILARITY_THRESHOLD: f32 = 0.50;
-
-static MOUTH_PIPER_SYNTHESIZER: LazyLock<Mutex<Option<mortar_sea::speak::PiperTextSynthesizer>>> =
-    LazyLock::new(|| Mutex::new(None));
+const DIALOGUE_VOICE_TURN_PROMPT: &str = "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice. Leave the response empty to stay silent.";
+const DIALOGUE_VOICE_TURN_PROMPT_PREFIX: &str = "Respond now only if it is your turn.";
 
 pub(crate) fn mouth_audio_dir() -> PathBuf {
     PathBuf::from("target/face-mouth")
@@ -109,6 +110,7 @@ struct ActiveVoiceGeneration {
     generation_id: Uuid,
     control: LlmStreamControl,
     experience_ids: Vec<Uuid>,
+    daydream_mode: bool,
     completed: bool,
 }
 
@@ -174,30 +176,17 @@ enum VoiceReply {
 }
 
 pub(crate) fn spawn_voice(state: AppState) {
-    spawn_mouth_piper_warmup();
-    let commentator_state = state.clone();
-    tokio::spawn(async move {
-        run_commentator(commentator_state).await;
-    });
+    if COMMENTATOR_ENABLED {
+        let commentator_state = state.clone();
+        tokio::spawn(async move {
+            run_commentator(commentator_state).await;
+        });
+    } else {
+        info!("Commentator observer disabled");
+    }
+
     tokio::spawn(async move {
         run_voice(state).await;
-    });
-}
-
-fn spawn_mouth_piper_warmup() {
-    tokio::task::spawn_blocking(|| {
-        let started_at = Instant::now();
-        match cached_mouth_piper_synthesizer() {
-            Ok(()) => info!(
-                elapsed_ms = started_at.elapsed().as_millis(),
-                "Mouth Piper synthesizer warmed"
-            ),
-            Err(error) => warn!(
-                error = %format!("{error:#}"),
-                elapsed_ms = started_at.elapsed().as_millis(),
-                "Mouth Piper synthesizer warmup failed"
-            ),
-        }
     });
 }
 
@@ -240,8 +229,23 @@ async fn run_commentator(state: AppState) {
                             &mut recent_experiences,
                             &mut last_experience_signature,
                         );
-                        let _recovered_asr =
+                        let recovered_asr =
                             sync_recent_finalized_asr_from_state(&state, &mut recent_finalized_asr);
+                        if (!recovered.is_empty() || !recovered_asr.is_empty())
+                            && interrupt_commentator_daydream_for_alert(
+                                &state,
+                                &generation_tx,
+                                &mut active,
+                                &recent_experiences,
+                                &recent_finalized_asr,
+                                &recent_thoughts,
+                                &mut recent_voice_turns,
+                                &recent_speech_feedback,
+                                "lagged real-world input",
+                            )
+                        {
+                            continue;
+                        }
                         if let Some(current) = active.as_mut() {
                             remember_voice_experience_ids(current, &recovered);
                             append_live_voice_experiences(current, &recovered);
@@ -258,6 +262,20 @@ async fn run_commentator(state: AppState) {
                             &mut recent_experiences,
                             experience.clone(),
                             &mut last_experience_signature,
+                        ) {
+                            continue;
+                        }
+
+                        if interrupt_commentator_daydream_for_alert(
+                            &state,
+                            &generation_tx,
+                            &mut active,
+                            &recent_experiences,
+                            &recent_finalized_asr,
+                            &recent_thoughts,
+                            &mut recent_voice_turns,
+                            &recent_speech_feedback,
+                            "real-world Experience",
                         ) {
                             continue;
                         }
@@ -304,6 +322,20 @@ async fn run_commentator(state: AppState) {
                         if !remember_recent_finalized_asr_update(
                             &mut recent_finalized_asr,
                             update.clone(),
+                        ) {
+                            continue;
+                        }
+
+                        if interrupt_commentator_daydream_for_alert(
+                            &state,
+                            &generation_tx,
+                            &mut active,
+                            &recent_experiences,
+                            &recent_finalized_asr,
+                            &recent_thoughts,
+                            &mut recent_voice_turns,
+                            &recent_speech_feedback,
+                            "finalized ASR",
                         ) {
                             continue;
                         }
@@ -623,6 +655,14 @@ async fn run_voice(state: AppState) {
                         match result {
                             Ok(generated) => match voice_reply_from_generated(&generated) {
                                 Some(VoiceReply::Spoken(text)) => {
+                                    if spoken_voice_echoes_latest_user_turn(&text, &conversation) {
+                                        info!(
+                                            generation_id = %generation_id,
+                                            text = %text,
+                                            "Voice generated an exact echo of the latest user turn; treating as silence"
+                                        );
+                                        continue;
+                                    }
                                     if let Some(draft) = draft_voice_speech_from_text(
                                         &state,
                                         generation_id,
@@ -790,6 +830,50 @@ fn append_live_voice_experiences(
     if !prompt.is_empty() {
         current.control.append_prompt(prompt);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interrupt_commentator_daydream_for_alert(
+    state: &AppState,
+    generation_tx: &mpsc::UnboundedSender<VoiceGenerationEvent>,
+    active: &mut Option<ActiveVoiceGeneration>,
+    recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
+    recent_thoughts: &VecDeque<VoiceObservation>,
+    recent_voice_turns: &mut VecDeque<String>,
+    recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
+    reason: &'static str,
+) -> bool {
+    let Some(current) = active.take() else {
+        return false;
+    };
+    if !current.daydream_mode {
+        *active = Some(current);
+        return false;
+    }
+
+    current.control.cancel();
+    let _ = state
+        .realtime_experience_events
+        .send(RealTimeExperienceEvent::VoiceResponseDone {
+            generation_id: current.generation_id,
+        });
+    recent_voice_turns.clear();
+    info!(
+        generation_id = %current.generation_id,
+        reason,
+        "Commentator daydream interrupted; switching to alert mode"
+    );
+    *active = Some(start_voice_generation(
+        state,
+        generation_tx,
+        recent_experiences,
+        recent_finalized_asr,
+        recent_thoughts,
+        recent_voice_turns,
+        recent_speech_feedback,
+    ));
+    true
 }
 
 fn live_voice_experiences_prompt(experiences: &[ExperienceRecord]) -> String {
@@ -1307,30 +1391,152 @@ fn synthesize_voice_speech_audio(
     });
 }
 
-fn cached_mouth_piper_synthesizer() -> anyhow::Result<()> {
-    let mut synthesizer = MOUTH_PIPER_SYNTHESIZER
-        .lock()
-        .map_err(|_| anyhow::anyhow!("mouth Piper synthesizer lock poisoned"))?;
-    if synthesizer.is_none() {
-        *synthesizer = Some(mortar_sea::speak::PiperTextSynthesizer::load_selected()?);
-    }
-    Ok(())
-}
-
 fn synthesize_mouth_text_to_wav(
     text: &str,
     output_path: &Path,
 ) -> anyhow::Result<mortar_sea::speak::SpeechSynthesisArtifact> {
-    let mut synthesizer = MOUTH_PIPER_SYNTHESIZER
-        .lock()
-        .map_err(|_| anyhow::anyhow!("mouth Piper synthesizer lock poisoned"))?;
-    if synthesizer.is_none() {
-        *synthesizer = Some(mortar_sea::speak::PiperTextSynthesizer::load_selected()?);
+    let cli = mortar_sea_cli_path()?;
+    let output = Command::new(&cli)
+        .arg("speak")
+        .arg("--backend")
+        .arg("piper")
+        .arg("--variety")
+        .arg("en-US")
+        .arg("--output")
+        .arg(output_path)
+        .arg(text)
+        .output()
+        .with_context(|| format!("failed to run {}", cli.display()))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "Mouth Piper subprocess failed with status {}: stdout={} stderr={}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
     }
-    synthesizer
-        .as_mut()
-        .expect("mouth Piper synthesizer was initialized")
-        .synthesize_text_to_wav(text, "en-US", output_path)
+
+    let (sample_rate_hz, samples) = wav_pcm_metadata(output_path)?;
+    Ok(mortar_sea::speak::SpeechSynthesisArtifact {
+        path: output_path.to_path_buf(),
+        sample_rate_hz,
+        samples,
+        timings: Vec::new(),
+    })
+}
+
+fn mortar_sea_cli_path() -> anyhow::Result<PathBuf> {
+    let current_exe =
+        std::env::current_exe().context("failed to locate current Face executable")?;
+    let Some(dir) = current_exe.parent() else {
+        anyhow::bail!(
+            "Face executable has no parent directory: {}",
+            current_exe.display()
+        );
+    };
+    let cli = dir.join("mortar-sea");
+    if cli.is_file() {
+        Ok(cli)
+    } else {
+        anyhow::bail!(
+            "Mortar CLI not found at {}; build it with `cargo build --no-default-features --features piper-onnx`",
+            cli.display()
+        )
+    }
+}
+
+fn wav_pcm_metadata(path: &Path) -> anyhow::Result<(u32, usize)> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    anyhow::ensure!(
+        bytes.len() >= 12,
+        "WAV file is too short: {}",
+        path.display()
+    );
+    anyhow::ensure!(
+        &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+        "not a RIFF/WAVE file: {}",
+        path.display()
+    );
+
+    let mut offset = 12usize;
+    let mut sample_rate_hz = None::<u32>;
+    let mut channels = None::<u16>;
+    let mut bits_per_sample = None::<u16>;
+    let mut data_bytes = None::<usize>;
+
+    while offset + 8 <= bytes.len() {
+        let chunk_id = &bytes[offset..offset + 4];
+        let chunk_size = u32::from_le_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]) as usize;
+        offset += 8;
+        anyhow::ensure!(
+            offset + chunk_size <= bytes.len(),
+            "WAV chunk exceeds file length in {}",
+            path.display()
+        );
+
+        if chunk_id == b"fmt " {
+            anyhow::ensure!(
+                chunk_size >= 16,
+                "WAV fmt chunk is too short: {}",
+                path.display()
+            );
+            let audio_format = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+            let chunk_channels = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]);
+            let chunk_sample_rate = u32::from_le_bytes([
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
+            ]);
+            let chunk_bits_per_sample =
+                u16::from_le_bytes([bytes[offset + 14], bytes[offset + 15]]);
+            anyhow::ensure!(
+                audio_format == 1,
+                "unsupported WAV format {} in {}",
+                audio_format,
+                path.display()
+            );
+            sample_rate_hz = Some(chunk_sample_rate);
+            channels = Some(chunk_channels);
+            bits_per_sample = Some(chunk_bits_per_sample);
+        } else if chunk_id == b"data" {
+            data_bytes = Some(chunk_size);
+        }
+
+        offset += chunk_size + (chunk_size % 2);
+    }
+
+    let sample_rate_hz = sample_rate_hz
+        .ok_or_else(|| anyhow::anyhow!("WAV fmt chunk missing in {}", path.display()))?;
+    let channels = channels
+        .ok_or_else(|| anyhow::anyhow!("WAV channel count missing in {}", path.display()))?;
+    let bits_per_sample = bits_per_sample
+        .ok_or_else(|| anyhow::anyhow!("WAV bit depth missing in {}", path.display()))?;
+    let data_bytes = data_bytes
+        .ok_or_else(|| anyhow::anyhow!("WAV data chunk missing in {}", path.display()))?;
+    anyhow::ensure!(
+        channels > 0 && bits_per_sample > 0 && bits_per_sample % 8 == 0,
+        "invalid WAV shape in {}: channels={} bits_per_sample={}",
+        path.display(),
+        channels,
+        bits_per_sample
+    );
+    let frame_bytes = usize::from(channels) * usize::from(bits_per_sample / 8);
+    anyhow::ensure!(
+        frame_bytes > 0 && data_bytes % frame_bytes == 0,
+        "WAV data size is not frame-aligned in {}",
+        path.display()
+    );
+    Ok((sample_rate_hz, data_bytes / frame_bytes))
 }
 
 fn remember_speech_feedback(
@@ -1354,7 +1560,8 @@ fn start_voice_generation(
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> ActiveVoiceGeneration {
     let generation_id = Uuid::new_v4();
-    let daydream_mode = commentator_repetition_detected(recent_voice_turns);
+    let daydream_mode =
+        COMMENTATOR_DAYDREAM_ENABLED && commentator_repetition_detected(recent_voice_turns);
     let experience_ids = recent_experiences
         .iter()
         .map(|experience| experience.id)
@@ -1411,6 +1618,7 @@ fn start_voice_generation(
         generation_id,
         control,
         experience_ids,
+        daydream_mode,
         completed: false,
     }
 }
@@ -1484,7 +1692,6 @@ fn voice_system_prompt() -> &'static str {
      When there is nothing obvious to comment on, contemplate the present situation, your surroundings, life in general, or your own existence. \
      Treat only the structured real-world context in this conversation as external fact. \
      Do not invent new external events, people, objects, or intentions. \
-     You may daydream, associate, or explore an idea, but keep imagined material distinct from what is actually known. \
      Constantly review what is happening against the latest real-world context. \
      Do not mention prompt context, metadata, ids, frames, logs, or the fact that you are an LLM."
 }
@@ -1497,7 +1704,7 @@ fn voice_mouth_guidance_prompt() -> &'static str {
 }
 
 fn commentator_continue_prompt(recent_voice_turns: &VecDeque<String>) -> String {
-    if !commentator_repetition_detected(recent_voice_turns) {
+    if !COMMENTATOR_DAYDREAM_ENABLED || !commentator_repetition_detected(recent_voice_turns) {
         return "Continue the Commentator stream now. Emit at least one short first-person observation as ordinary text. Do not use <say> tags or attempt to speak aloud.".to_string();
     }
 
@@ -1718,18 +1925,20 @@ fn build_dialogue_voice_messages(
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> Vec<ChatMessage> {
+    let mut system = String::new();
+    system.push_str(dialogue_voice_system_prompt());
+    system.push_str("\n\n");
+    system.push_str(DIALOGUE_VOICE_TURN_PROMPT);
+    system.push_str("\n\n");
+    system.push_str(&build_dialogue_voice_context_prompt(
+        recent_experiences,
+        recent_finalized_asr,
+        recent_thoughts,
+        recent_speech_feedback,
+    ));
+
     let mut messages = Vec::new();
-    append_chat_message(&mut messages, "system", dialogue_voice_system_prompt());
-    append_chat_message(
-        &mut messages,
-        "user",
-        build_dialogue_voice_context_prompt(
-            recent_experiences,
-            recent_finalized_asr,
-            recent_thoughts,
-            recent_speech_feedback,
-        ),
-    );
+    append_chat_message(&mut messages, "system", system);
 
     for turn in conversation {
         let mut text = turn.text.trim().to_string();
@@ -1743,12 +1952,6 @@ fn build_dialogue_voice_messages(
         };
         append_chat_message(&mut messages, role, text);
     }
-
-    append_chat_message(
-        &mut messages,
-        "user",
-        "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice. Leave the response empty to stay silent.",
-    );
     messages
 }
 
@@ -2012,6 +2215,19 @@ fn voice_user_turn_count(turns: &VecDeque<VoiceConversationTurn>) -> usize {
         .count()
 }
 
+fn spoken_voice_echoes_latest_user_turn(
+    text: &str,
+    turns: &VecDeque<VoiceConversationTurn>,
+) -> bool {
+    let reply = normalized_signature(text);
+    !reply.is_empty()
+        && turns
+            .iter()
+            .rev()
+            .find(|turn| turn.role == VoiceConversationRole::User)
+            .is_some_and(|turn| normalized_signature(&turn.text) == reply)
+}
+
 fn voice_turn_or_silence(text: String) -> String {
     if voice_turn_has_observation(&text) {
         text
@@ -2040,6 +2256,7 @@ fn voice_llm_stop_markers() -> Vec<String> {
         "<end_of_turn>".to_string(),
         "<start_of_turn>user".to_string(),
         "<turn|>".to_string(),
+        DIALOGUE_VOICE_TURN_PROMPT_PREFIX.to_string(),
     ]
 }
 
@@ -2099,7 +2316,9 @@ fn strip_leading_thought_marker(text: &str) -> Option<&str> {
 }
 
 fn clean_generated_voice_text(text: &str) -> String {
-    let mut cleaned = truncate_at_chat_template_marker(text).trim().to_string();
+    let mut cleaned = truncate_at_prompt_echo_marker(truncate_at_chat_template_marker(text))
+        .trim()
+        .to_string();
     for (from, to) in [
         ("<say>", ""),
         ("</say>", ""),
@@ -2116,6 +2335,20 @@ fn clean_generated_voice_text(text: &str) -> String {
         .trim_matches('"')
         .trim()
         .to_string()
+}
+
+fn truncate_at_prompt_echo_marker(text: &str) -> &str {
+    let first_marker = [
+        DIALOGUE_VOICE_TURN_PROMPT_PREFIX,
+        "Keep it brief and give the interlocutor a chance to speak.",
+        "Your response text will be spoken aloud exactly as your Voice.",
+        "Leave the response empty to stay silent.",
+    ]
+    .iter()
+    .filter_map(|marker| text.find(marker))
+    .min()
+    .unwrap_or(text.len());
+    text[..first_marker].trim()
 }
 
 fn voice_observation_text(text: &str) -> Option<VoiceThought> {
@@ -3365,6 +3598,54 @@ mod tests {
     }
 
     #[test]
+    fn dialogue_voice_routes_only_actual_dialogue_as_user_messages() {
+        let mut conversation = VecDeque::new();
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "No, I said, oh good.".to_string(),
+            },
+        );
+
+        let messages = build_dialogue_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &conversation,
+            &VecDeque::new(),
+        );
+
+        let system = messages
+            .iter()
+            .find(|message| message.role == "system")
+            .expect("dialogue voice system prompt is present");
+        assert!(system.content.contains(DIALOGUE_VOICE_TURN_PROMPT));
+        assert!(
+            system
+                .content
+                .contains("Current known ContextFrame fields:")
+        );
+
+        let user_messages = messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .collect::<Vec<_>>();
+        assert_eq!(user_messages.len(), 1);
+        assert_eq!(user_messages[0].content, "No, I said, oh good.");
+        assert!(
+            !user_messages[0]
+                .content
+                .contains(DIALOGUE_VOICE_TURN_PROMPT)
+        );
+        assert!(
+            !user_messages[0]
+                .content
+                .contains("Recent finalized ASR transcripts heard directly:")
+        );
+    }
+
+    #[test]
     fn dialogue_voice_messages_include_recent_finalized_asr_updates() {
         let observed_at = chrono::Utc::now();
         let mut asr = VecDeque::new();
@@ -3478,6 +3759,45 @@ mod tests {
     }
 
     #[test]
+    fn spoken_voice_echo_detection_matches_only_latest_user_turn() {
+        let mut conversation = VecDeque::new();
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "I'll climb!".to_string(),
+            },
+        );
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::Assistant,
+                text: "I am not sure I heard that right.".to_string(),
+            },
+        );
+        remember_voice_conversation_turn(
+            &mut conversation,
+            VoiceConversationTurn {
+                role: VoiceConversationRole::User,
+                text: "No, I said, oh good.".to_string(),
+            },
+        );
+
+        assert!(spoken_voice_echoes_latest_user_turn(
+            "No, I said oh good.",
+            &conversation
+        ));
+        assert!(!spoken_voice_echoes_latest_user_turn(
+            "I heard you say oh good.",
+            &conversation
+        ));
+        assert!(!spoken_voice_echoes_latest_user_turn(
+            "I'll climb!",
+            &conversation
+        ));
+    }
+
+    #[test]
     fn voice_reply_from_generated_passes_thought_marker_without_speech() {
         assert_eq!(
             voice_reply_from_generated("<thought/> I should wait."),
@@ -3491,6 +3811,25 @@ mod tests {
             voice_reply_from_generated("<say>I should not keep tags.</say>"),
             Some(VoiceReply::Spoken("I should not keep tags.".to_string()))
         );
+    }
+
+    #[test]
+    fn voice_reply_from_generated_truncates_dialogue_prompt_echo() {
+        assert_eq!(
+            voice_reply_from_generated(
+                "Yes I hear you. Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak."
+            ),
+            Some(VoiceReply::Spoken("Yes I hear you.".to_string()))
+        );
+        assert_eq!(
+            voice_reply_from_generated("Respond now only if it is your turn."),
+            None
+        );
+    }
+
+    #[test]
+    fn voice_stop_markers_include_dialogue_prompt_prefix() {
+        assert!(voice_llm_stop_markers().contains(&DIALOGUE_VOICE_TURN_PROMPT_PREFIX.to_string()));
     }
 
     #[test]
@@ -3509,7 +3848,7 @@ mod tests {
     }
 
     #[test]
-    fn repetitive_commentator_turns_switch_prompt_to_daydream_mode() {
+    fn repetitive_commentator_turns_continue_normal_prompt_while_daydreaming_disabled() {
         let mut turns = VecDeque::new();
         remember_recent_voice_turn(
             &mut turns,
@@ -3532,12 +3871,13 @@ mod tests {
             &VecDeque::new(),
         );
 
-        assert!(prompt.contains("DAYDREAM MODE"));
-        assert!(prompt.contains("three randomly generated words"));
-        assert!(prompt.contains("Imagine Pete encountered them"));
-        assert!(prompt.contains("story form"));
-        assert!(prompt.contains("lots of sensory details"));
-        assert!(prompt.contains("not real-world facts"));
+        assert!(prompt.contains("Continue the Commentator stream now"));
+        assert!(!prompt.contains("DAYDREAM MODE"));
+        assert!(!prompt.contains("three randomly generated words"));
+        assert!(!prompt.contains("Imagine Pete encountered them"));
+        assert!(!prompt.contains("story form"));
+        assert!(!prompt.contains("lots of sensory details"));
+        assert!(!prompt.contains("not real-world facts"));
     }
 
     #[test]
@@ -3555,7 +3895,7 @@ mod tests {
         assert!(prompt.contains("contemplate the present situation"));
         assert!(prompt.contains("life in general"));
         assert!(prompt.contains("your own existence"));
-        assert!(prompt.contains("daydream, associate, or explore an idea"));
+        assert!(!prompt.contains("daydream, associate, or explore an idea"));
     }
 
     #[test]
