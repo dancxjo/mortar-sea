@@ -1,11 +1,9 @@
-use std::collections::{HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use chrono::{DateTime, Utc};
-use mortar_sea::speak::SpeechSynthesisArtifact;
 #[cfg(test)]
 use mortar_sea::voice_stream::parse_voice_stream;
 #[cfg(test)]
@@ -39,7 +37,12 @@ const VOICE_MOUTH_FEEDBACK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const VOICE_MOUTH_FEEDBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const VOICE_SPEECH_AUDIO_TIMEOUT: Duration = Duration::from_secs(180);
 const VOICE_MAX_TOKENS_PER_TURN: usize = 220;
+const VOICE_DAYDREAM_MAX_TOKENS_PER_TURN: usize = 420;
 const DIALOGUE_VOICE_MAX_TOKENS_PER_TURN: usize = 96;
+const COMMENTATOR_REPETITION_RECENT_TURNS: usize = 4;
+const COMMENTATOR_REPETITION_MIN_SENTENCES: usize = 6;
+const COMMENTATOR_REPETITION_MIN_SENTENCE_WORDS: usize = 4;
+const COMMENTATOR_REPETITION_SIMILARITY_THRESHOLD: f32 = 0.50;
 
 pub(crate) fn mouth_audio_dir() -> PathBuf {
     PathBuf::from("target/face-mouth")
@@ -1206,8 +1209,15 @@ fn synthesize_voice_speech_audio(
         let wav = tokio::task::spawn_blocking(move || {
             let result = (|| -> anyhow::Result<_> {
                 let output_path = mouth_audio_dir().join(mouth_audio_filename(utterance_id));
-                let artifact =
-                    synthesize_text_with_piper_command_to_wav(&text_for_task, &output_path)?;
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create {}", parent.display()))?;
+                }
+                let artifact = mortar_sea::speak::synthesize_text_with_piper_to_wav(
+                    &text_for_task,
+                    "en-US",
+                    &output_path,
+                )?;
                 let byte_len = std::fs::metadata(&artifact.path)?.len();
                 Ok((byte_len, artifact))
             })();
@@ -1279,152 +1289,6 @@ fn synthesize_voice_speech_audio(
     });
 }
 
-fn synthesize_text_with_piper_command_to_wav(
-    text: &str,
-    output_path: &Path,
-) -> anyhow::Result<SpeechSynthesisArtifact> {
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let binary = mortar_sea_command_binary();
-    let output = Command::new(&binary)
-        .arg("speak")
-        .arg("--backend")
-        .arg("piper")
-        .arg("--output")
-        .arg(output_path)
-        .arg(text)
-        .output()
-        .with_context(|| format!("failed to run {}", binary.display()))?;
-
-    if !output.status.success() {
-        bail!(
-            "{} speak --backend piper exited with status {}\nstdout:\n{}\nstderr:\n{}",
-            binary.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    wav_artifact_from_path(output_path)
-}
-
-fn mortar_sea_command_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("MORTAR_FACE_PIPER_SYNTHESIS_BIN") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
-    }
-
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(parent) = current_exe.parent()
-    {
-        let sibling = parent.join(if cfg!(windows) {
-            "mortar-sea.exe"
-        } else {
-            "mortar-sea"
-        });
-        if sibling.is_file() {
-            return sibling;
-        }
-    }
-
-    PathBuf::from("mortar-sea")
-}
-
-fn wav_artifact_from_path(path: &Path) -> anyhow::Result<SpeechSynthesisArtifact> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        bail!("{} is not a RIFF/WAVE file", path.display());
-    }
-
-    let mut offset = 12usize;
-    let mut sample_rate_hz = None::<u32>;
-    let mut channels = None::<u16>;
-    let mut bits_per_sample = None::<u16>;
-    let mut data_bytes = None::<usize>;
-
-    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
-        let chunk_id = &bytes[offset..offset + 4];
-        let chunk_size = u32::from_le_bytes(
-            bytes[offset + 4..offset + 8]
-                .try_into()
-                .expect("chunk size slice has four bytes"),
-        ) as usize;
-        offset += 8;
-        let Some(chunk_end) = offset.checked_add(chunk_size) else {
-            bail!("{} has an overflowing WAV chunk size", path.display());
-        };
-        if chunk_end > bytes.len() {
-            bail!("{} has a truncated WAV chunk", path.display());
-        }
-
-        match chunk_id {
-            b"fmt " if chunk_size >= 16 => {
-                let audio_format = u16::from_le_bytes(
-                    bytes[offset..offset + 2]
-                        .try_into()
-                        .expect("audio format slice has two bytes"),
-                );
-                if audio_format != 1 {
-                    bail!(
-                        "{} uses unsupported WAV audio format {}",
-                        path.display(),
-                        audio_format
-                    );
-                }
-                channels = Some(u16::from_le_bytes(
-                    bytes[offset + 2..offset + 4]
-                        .try_into()
-                        .expect("channel slice has two bytes"),
-                ));
-                sample_rate_hz = Some(u32::from_le_bytes(
-                    bytes[offset + 4..offset + 8]
-                        .try_into()
-                        .expect("sample-rate slice has four bytes"),
-                ));
-                bits_per_sample = Some(u16::from_le_bytes(
-                    bytes[offset + 14..offset + 16]
-                        .try_into()
-                        .expect("bit-depth slice has two bytes"),
-                ));
-            }
-            b"data" => {
-                data_bytes = Some(chunk_size);
-            }
-            _ => {}
-        }
-
-        offset = chunk_end + (chunk_size % 2);
-    }
-
-    let sample_rate_hz = sample_rate_hz.context("WAV missing fmt sample rate")?;
-    let channels = channels.context("WAV missing channel count")?;
-    let bits_per_sample = bits_per_sample.context("WAV missing bit depth")?;
-    let data_bytes = data_bytes.context("WAV missing data chunk")?;
-    let bytes_per_sample = usize::from(bits_per_sample)
-        .checked_div(8)
-        .filter(|value| *value > 0)
-        .context("invalid WAV bit depth")?;
-    let frame_bytes = bytes_per_sample
-        .checked_mul(usize::from(channels))
-        .context("WAV frame byte size overflow")?;
-    if frame_bytes == 0 {
-        bail!("invalid WAV channel count");
-    }
-    let samples = data_bytes / frame_bytes;
-
-    Ok(SpeechSynthesisArtifact {
-        path: path.to_path_buf(),
-        sample_rate_hz,
-        samples,
-    })
-}
-
 fn remember_speech_feedback(
     recent_speech_feedback: &mut VecDeque<VoiceSpeechFeedback>,
     feedback: VoiceSpeechFeedback,
@@ -1446,6 +1310,7 @@ fn start_voice_generation(
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> ActiveVoiceGeneration {
     let generation_id = Uuid::new_v4();
+    let daydream_mode = commentator_repetition_detected(recent_voice_turns);
     let experience_ids = recent_experiences
         .iter()
         .map(|experience| experience.id)
@@ -1461,7 +1326,11 @@ fn start_voice_generation(
             recent_speech_feedback,
         ),
         images: Vec::new(),
-        max_tokens: Some(VOICE_MAX_TOKENS_PER_TURN),
+        max_tokens: Some(if daydream_mode {
+            VOICE_DAYDREAM_MAX_TOKENS_PER_TURN
+        } else {
+            VOICE_MAX_TOKENS_PER_TURN
+        }),
         stop: voice_llm_stop_markers(),
     };
 
@@ -1583,6 +1452,183 @@ fn voice_mouth_guidance_prompt() -> &'static str {
      These thoughts are reported to the Wits as internal observations.\n"
 }
 
+fn commentator_continue_prompt(recent_voice_turns: &VecDeque<String>) -> String {
+    if !commentator_repetition_detected(recent_voice_turns) {
+        return "Continue the Commentator stream now. Emit at least one short first-person observation as ordinary text. Do not use <say> tags or attempt to speak aloud.".to_string();
+    }
+
+    let words = daydream_words();
+    format!(
+        "DAYDREAM MODE: The recent Commentator stream has become repetitive, so break the loop with an explicitly imagined scene.\n\
+         These three randomly generated words are daydream prompts, not real-world facts. Imagine Pete encountered them:\n\
+         - {first}\n\
+         - {second}\n\
+         - {third}\n\
+         Write in first person as Pete, in story form, describing the encounter as an internal daydream. Include lots of sensory details: color, texture, sound, smell, taste, temperature, weight, motion, and body feeling. Keep the imagined material distinct from the real-world context. Do not use <say> tags or attempt to speak aloud.",
+        first = words[0],
+        second = words[1],
+        third = words[2],
+    )
+}
+
+fn commentator_repetition_detected(recent_voice_turns: &VecDeque<String>) -> bool {
+    let recent = recent_voice_turns
+        .iter()
+        .rev()
+        .take(COMMENTATOR_REPETITION_RECENT_TURNS)
+        .collect::<Vec<_>>();
+    if recent.is_empty() {
+        return false;
+    }
+
+    if commentator_turn_repeats_itself(recent[0]) {
+        return true;
+    }
+
+    let mut sentence_counts = HashMap::<String, usize>::new();
+    let mut sentence_total = 0usize;
+    for turn in &recent {
+        for sentence in commentator_sentence_signatures(turn) {
+            sentence_total += 1;
+            *sentence_counts.entry(sentence).or_default() += 1;
+        }
+    }
+    if sentence_total >= COMMENTATOR_REPETITION_MIN_SENTENCES {
+        let repeated_instances = sentence_counts
+            .values()
+            .map(|count| count.saturating_sub(1))
+            .sum::<usize>();
+        if repeated_instances >= 2 || sentence_counts.values().any(|count| *count >= 3) {
+            return true;
+        }
+    }
+
+    if recent.len() < 3 {
+        return false;
+    }
+
+    let latest_words = commentator_content_words(recent[0]);
+    if latest_words.len() < 5 {
+        return false;
+    }
+
+    let similar_prior_turns = recent
+        .iter()
+        .skip(1)
+        .filter(|turn| {
+            let words = commentator_content_words(turn);
+            words.len() >= 5
+                && jaccard_similarity(&latest_words, &words)
+                    >= COMMENTATOR_REPETITION_SIMILARITY_THRESHOLD
+        })
+        .count();
+
+    similar_prior_turns >= 2
+}
+
+fn commentator_turn_repeats_itself(turn: &str) -> bool {
+    let sentences = commentator_sentence_signatures(turn);
+    if sentences.len() < COMMENTATOR_REPETITION_MIN_SENTENCES {
+        return false;
+    }
+
+    let mut counts = HashMap::<String, usize>::new();
+    for sentence in sentences {
+        *counts.entry(sentence).or_default() += 1;
+    }
+
+    counts.values().any(|count| *count >= 3)
+        || counts
+            .values()
+            .map(|count| count.saturating_sub(1))
+            .sum::<usize>()
+            >= 3
+}
+
+fn commentator_sentence_signatures(text: &str) -> Vec<String> {
+    text.split(|ch| matches!(ch, '.' | '!' | '?' | '\n'))
+        .map(normalized_signature)
+        .filter(|signature| {
+            signature.split_whitespace().count() >= COMMENTATOR_REPETITION_MIN_SENTENCE_WORDS
+        })
+        .collect()
+}
+
+fn commentator_content_words(text: &str) -> HashSet<String> {
+    normalized_signature(text)
+        .split_whitespace()
+        .filter(|word| word.len() > 2 && !is_commentator_similarity_stop_word(word))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_commentator_similarity_stop_word(word: &str) -> bool {
+    matches!(
+        word,
+        "about"
+            | "after"
+            | "again"
+            | "around"
+            | "because"
+            | "before"
+            | "being"
+            | "commentator"
+            | "could"
+            | "does"
+            | "everything"
+            | "from"
+            | "have"
+            | "here"
+            | "into"
+            | "just"
+            | "like"
+            | "more"
+            | "myself"
+            | "near"
+            | "only"
+            | "right"
+            | "seems"
+            | "some"
+            | "that"
+            | "their"
+            | "there"
+            | "these"
+            | "thing"
+            | "this"
+            | "through"
+            | "what"
+            | "when"
+            | "where"
+            | "while"
+            | "with"
+            | "within"
+            | "world"
+            | "would"
+            | "your"
+    )
+}
+
+fn jaccard_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f32 {
+    let intersection = left.intersection(right).count();
+    let union = left.union(right).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
+}
+
+fn daydream_words() -> [String; 3] {
+    let mut words = Vec::new();
+    while words.len() < 3 {
+        let word = random_word::get(random_word::Lang::En).to_string();
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words.try_into().expect("daydream word count is fixed")
+}
+
 fn build_voice_messages(
     recent_experiences: &VecDeque<ExperienceRecord>,
     recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
@@ -1616,7 +1662,7 @@ fn build_voice_messages(
     append_chat_message(
         &mut messages,
         "user",
-        "Continue the Commentator stream now. Emit at least one short first-person observation as ordinary text. Do not use <say> tags or attempt to speak aloud.",
+        commentator_continue_prompt(recent_voice_turns),
     );
     messages
 }
@@ -3416,6 +3462,38 @@ mod tests {
         assert!(prompt.contains("Continue the Commentator stream now"));
         assert!(prompt.contains("Do not use <say> tags or attempt to speak aloud"));
         assert!(!prompt.contains("<say>...</say>"));
+    }
+
+    #[test]
+    fn repetitive_commentator_turns_switch_prompt_to_daydream_mode() {
+        let mut turns = VecDeque::new();
+        remember_recent_voice_turn(
+            &mut turns,
+            "I am focusing on the steady presence of this perceived reality. I notice the quiet strength of this moment.".to_string(),
+        );
+        remember_recent_voice_turn(
+            &mut turns,
+            "I am focusing on the steady presence of this perceived reality. I feel the quiet strength of this moment.".to_string(),
+        );
+        remember_recent_voice_turn(
+            &mut turns,
+            "I am focusing on the steady presence of this perceived reality. I notice the quiet strength of this moment.".to_string(),
+        );
+
+        let prompt = rendered_voice_messages(
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &VecDeque::new(),
+            &turns,
+            &VecDeque::new(),
+        );
+
+        assert!(prompt.contains("DAYDREAM MODE"));
+        assert!(prompt.contains("three randomly generated words"));
+        assert!(prompt.contains("Imagine Pete encountered them"));
+        assert!(prompt.contains("story form"));
+        assert!(prompt.contains("lots of sensory details"));
+        assert!(prompt.contains("not real-world facts"));
     }
 
     #[test]

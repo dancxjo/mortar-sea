@@ -68,6 +68,7 @@ window.faceApp = function faceApp() {
     voiceSpeechLifecycleSeen: {},
     voiceUtteranceStartedAt: null,
     voiceMouthOpen: false,
+    voiceMouthUtteranceId: null,
     voicePlaybackResumeAfterGesture: null,
     conversationTurns: [],
     conversationSeen: {},
@@ -157,6 +158,7 @@ window.faceApp = function faceApp() {
         this.voiceAudioUrl = null;
       }
       this.voiceMouthOpen = false;
+      this.voiceMouthUtteranceId = null;
     },
 
     async unlockVoicePlayback() {
@@ -262,6 +264,10 @@ window.faceApp = function faceApp() {
           if (!this.voiceSpeechEventMatches(message)) return;
           if (this.rememberVoiceSpeechLifecycleEvent(message.type, message.utterance_id)) return;
           this.voiceStatus = 'speaking';
+          this.startVoiceMouth(message.utterance_id);
+          if (!this.voiceUtteranceStartedAt) {
+            this.voiceUtteranceStartedAt = performance.now();
+          }
           this.voicePlaybackEvents.started += 1;
           return;
         }
@@ -269,6 +275,7 @@ window.faceApp = function faceApp() {
           if (!this.voiceSpeechEventMatches(message)) return;
           if (this.rememberVoiceSpeechLifecycleEvent(message.type, message.utterance_id)) return;
           this.voiceStatus = 'thinking';
+          this.stopVoiceMouthFor(message.utterance_id);
           this.voicePlaybackEvents.finished += 1;
           this.rememberConversationTurn({
             key: `voice:${message.utterance_id}`,
@@ -289,6 +296,7 @@ window.faceApp = function faceApp() {
             this.voiceLastError = message.reason;
             this.voicePlaybackDetail = message.reason;
           }
+          this.stopVoiceMouthFor(message.utterance_id);
           if (matchesCurrentDraft) {
             this.discardVoiceDraft(this.voiceCurrentDraft);
           }
@@ -420,6 +428,20 @@ window.faceApp = function faceApp() {
       this.voiceLastError = '';
       this.voicePlaybackDetail = `Waiting for server audio for "${draft.text || ''}"`;
       this.voiceMouthOpen = false;
+      this.voiceMouthUtteranceId = null;
+    },
+
+    startVoiceMouth(utteranceId) {
+      this.voiceMouthOpen = true;
+      this.voiceMouthUtteranceId = utteranceId || null;
+    },
+
+    stopVoiceMouthFor(utteranceId) {
+      if (this.voiceMouthUtteranceId && utteranceId && this.voiceMouthUtteranceId !== utteranceId) {
+        return;
+      }
+      this.voiceMouthOpen = false;
+      this.voiceMouthUtteranceId = null;
     },
 
     clearVoicePlaybackGestureResume() {
@@ -514,7 +536,7 @@ window.faceApp = function faceApp() {
         const playbackDurationMs = this.voiceUtteranceStartedAt
           ? Math.max(0, Math.round(performance.now() - this.voiceUtteranceStartedAt))
           : null;
-        this.voiceMouthOpen = false;
+        this.stopVoiceMouthFor(draft.utterance_id);
         this.voicePlaybackDetail = `Playback finished after ${playbackDurationMs} ms`;
         this.sendVoiceMouthEvent('voice_speech_finished', draft, { duration_ms: playbackDurationMs });
         this.clearFinishedVoiceDraft(draft);
@@ -524,7 +546,7 @@ window.faceApp = function faceApp() {
         audio.removeEventListener('error', onError);
         if (this.voiceCurrentDraft !== draft) return;
         const detail = audio.error?.message || audio.error?.code || 'unknown audio error';
-        this.voiceMouthOpen = false;
+        this.stopVoiceMouthFor(draft.utterance_id);
         this.failVoicePlayback(draft, `Server WAV playback failed: ${detail}`);
       };
 
@@ -537,7 +559,7 @@ window.faceApp = function faceApp() {
         await audio.play();
         this.clearVoicePlaybackGestureResume();
         this.voiceUtteranceStartedAt = performance.now();
-        this.voiceMouthOpen = true;
+        this.startVoiceMouth(draft.utterance_id);
         this.voiceLastPlaybackUtteranceId = draft.utterance_id;
         this.voiceStatus = 'speaking';
         const reportedSeconds = durationMs ? (durationMs / 1000).toFixed(2) : '?';
@@ -549,7 +571,7 @@ window.faceApp = function faceApp() {
         });
         this.sendVoiceMouthEvent('voice_speech_started', draft);
       } catch (error) {
-        this.voiceMouthOpen = false;
+        this.stopVoiceMouthFor(draft.utterance_id);
         audio.removeEventListener('ended', onEnded);
         audio.removeEventListener('error', onError);
         if (error?.name === 'NotAllowedError') {
@@ -643,6 +665,7 @@ window.faceApp = function faceApp() {
       this.voiceCurrentDraft = null;
       this.voiceUtteranceStartedAt = null;
       this.voiceMouthOpen = false;
+      this.voiceMouthUtteranceId = null;
     },
 
     discardVoiceDraft(draft) {
@@ -650,6 +673,7 @@ window.faceApp = function faceApp() {
       this.voiceCurrentDraft = null;
       this.voiceUtteranceStartedAt = null;
       this.voiceMouthOpen = false;
+      this.voiceMouthUtteranceId = null;
       this.clearVoicePlaybackGestureResume();
       if (this.voiceAudio) {
         this.voiceAudio.pause();
