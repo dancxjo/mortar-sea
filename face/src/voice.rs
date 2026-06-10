@@ -46,8 +46,9 @@ const COMMENTATOR_REPETITION_RECENT_TURNS: usize = 4;
 const COMMENTATOR_REPETITION_MIN_SENTENCES: usize = 6;
 const COMMENTATOR_REPETITION_MIN_SENTENCE_WORDS: usize = 4;
 const COMMENTATOR_REPETITION_SIMILARITY_THRESHOLD: f32 = 0.50;
-const DIALOGUE_VOICE_TURN_PROMPT: &str = "Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak. Your response text will be spoken aloud exactly as your Voice. Leave the response empty to stay silent.";
-const DIALOGUE_VOICE_TURN_PROMPT_PREFIX: &str = "Respond now only if it is your turn.";
+const DIALOGUE_VOICE_TURN_PROMPT: &str = "Reply only when the latest user turn needs an answer. Keep it brief and give the other person a chance to speak. If no reply is needed, return an empty message.";
+const DIALOGUE_VOICE_TURN_PROMPT_PREFIX: &str =
+    "Reply only when the latest user turn needs an answer.";
 
 pub(crate) fn mouth_audio_dir() -> PathBuf {
     PathBuf::from("target/face-mouth")
@@ -1920,7 +1921,7 @@ fn build_voice_messages(
 
 fn build_dialogue_voice_messages(
     recent_experiences: &VecDeque<ExperienceRecord>,
-    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
+    _recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
@@ -1932,7 +1933,6 @@ fn build_dialogue_voice_messages(
     system.push_str("\n\n");
     system.push_str(&build_dialogue_voice_context_prompt(
         recent_experiences,
-        recent_finalized_asr,
         recent_thoughts,
         recent_speech_feedback,
     ));
@@ -1979,20 +1979,19 @@ fn append_chat_message(
 
 fn dialogue_voice_system_prompt() -> &'static str {
     "You are the spoken Voice of Pete Mortar-Sea. \
-     You converse through Mouth with the current interlocutor when finalized ASR turns show someone has spoken. \
+     You are in a normal chat conversation with the current interlocutor. \
      Do not use tools, execute functions, write JSON, or mention prompts, metadata, ids, frames, logs, or the fact that you are an LLM. \
      Write from the embodied system's own perspective using I, me, and my. \
      Keep responses brief, plain, and conversational. \
      Give the interlocutor a chance to speak; do not monologue. \
-     Whatever you write is spoken aloud verbatim by Mouth, so do not wrap speech in <say> tags. \
-     If it is better to wait, listen, or pass the turn, leave the response empty; empty responses are treated as silence. \
+     If it is better to wait, listen, or pass the turn, return an empty message; empty messages are treated as silence. \
      Treat only the structured context and conversation turns as external fact. \
+     Do not repeat the user's words back as your whole reply. \
      Preserve uncertainty and do not invent new external events, people, objects, or intentions."
 }
 
 fn build_dialogue_voice_context_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
-    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> String {
@@ -2017,15 +2016,6 @@ fn build_dialogue_voice_context_prompt(
                 experience.confidence,
                 prompt_json_string(&experience.what)
             ));
-        }
-    }
-    prompt.push('\n');
-    prompt.push_str("Recent finalized ASR transcripts heard directly:\n");
-    if recent_finalized_asr.is_empty() {
-        prompt.push_str("- None yet.\n");
-    } else {
-        for update in recent_finalized_asr {
-            prompt.push_str(&format_finalized_asr_update(update));
         }
     }
     prompt.push('\n');
@@ -2340,9 +2330,8 @@ fn clean_generated_voice_text(text: &str) -> String {
 fn truncate_at_prompt_echo_marker(text: &str) -> &str {
     let first_marker = [
         DIALOGUE_VOICE_TURN_PROMPT_PREFIX,
-        "Keep it brief and give the interlocutor a chance to speak.",
-        "Your response text will be spoken aloud exactly as your Voice.",
-        "Leave the response empty to stay silent.",
+        "Keep it brief and give the other person a chance to speak.",
+        "If no reply is needed, return an empty message.",
     ]
     .iter()
     .filter_map(|marker| text.find(marker))
@@ -3550,14 +3539,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        assert!(prompt.contains("Whatever you write is spoken aloud verbatim"));
-        assert!(prompt.contains("do not wrap speech in <say> tags"));
+        assert!(prompt.contains("normal chat conversation"));
         assert!(prompt.contains("Keep responses brief"));
         assert!(prompt.contains("Give the interlocutor a chance to speak"));
-        assert!(prompt.contains("Leave the response empty to stay silent"));
-        assert!(prompt.contains("empty responses are treated as silence"));
+        assert!(prompt.contains("return an empty message"));
+        assert!(prompt.contains("empty messages are treated as silence"));
+        assert!(prompt.contains("Do not repeat the user's words back as your whole reply"));
         assert!(!prompt.contains("Start with <thought/>"));
         assert!(!prompt.contains("<thought/> to pass the turn"));
+        assert!(!prompt.contains("<say"));
     }
 
     #[test]
@@ -3646,7 +3636,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_voice_messages_include_recent_finalized_asr_updates() {
+    fn dialogue_voice_messages_do_not_duplicate_asr_context() {
         let observed_at = chrono::Utc::now();
         let mut asr = VecDeque::new();
         asr.push_back(FinalizedAsrUpdate {
@@ -3671,9 +3661,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        assert!(prompt.contains("Recent finalized ASR transcripts heard directly:"));
-        assert!(prompt.contains("My name is Travis."));
-        assert!(prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
+        assert!(!prompt.contains("Recent finalized ASR transcripts heard directly:"));
+        assert!(!prompt.contains("My name is Travis."));
+        assert!(!prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
     }
 
     #[test]
@@ -3817,12 +3807,12 @@ mod tests {
     fn voice_reply_from_generated_truncates_dialogue_prompt_echo() {
         assert_eq!(
             voice_reply_from_generated(
-                "Yes I hear you. Respond now only if it is your turn. Keep it brief and give the interlocutor a chance to speak."
+                "Yes I hear you. Reply only when the latest user turn needs an answer. Keep it brief and give the other person a chance to speak."
             ),
             Some(VoiceReply::Spoken("Yes I hear you.".to_string()))
         );
         assert_eq!(
-            voice_reply_from_generated("Respond now only if it is your turn."),
+            voice_reply_from_generated("Reply only when the latest user turn needs an answer."),
             None
         );
     }

@@ -171,7 +171,10 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> Result<PiperPhonemeSequ
                 continue;
             } else {
                 let symbol = piper_symbol_for_phone(token).with_context(|| {
-                    format!("cannot lower phone `{}` to a Piper ARPAbet symbol", phone_id.0)
+                    format!(
+                        "cannot lower phone `{}` to a Piper ARPAbet symbol",
+                        phone_id.0
+                    )
                 })?;
                 push_symbol(&mut symbols, &symbol);
                 in_word = true;
@@ -191,7 +194,10 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> Result<PiperPhonemeSequ
                 continue;
             };
             let symbol = piper_symbol_for_phoneme(token).with_context(|| {
-                format!("cannot lower phoneme `{}` to a Piper ARPAbet symbol", phoneme_id.0)
+                format!(
+                    "cannot lower phoneme `{}` to a Piper ARPAbet symbol",
+                    phoneme_id.0
+                )
             })?;
             push_symbol(&mut symbols, &symbol);
         }
@@ -496,6 +502,7 @@ fn punctuation_symbol(text: &str) -> Option<&'static str> {
 impl PiperPhonemeSequence {
     pub fn to_symbols_compatible(&self, config: &PiperVoiceConfig) -> Result<Self> {
         let text_sequence = self.with_utterance_termination(config);
+        validate_piper_plan_sequence(&text_sequence)?;
         if text_sequence
             .symbols
             .iter()
@@ -509,6 +516,7 @@ impl PiperPhonemeSequence {
 
     pub fn to_text_ids_compatible(&self, config: &PiperVoiceConfig) -> Result<PiperIdSequence> {
         let text_sequence = self.with_utterance_termination(config);
+        validate_piper_plan_sequence(&text_sequence)?;
         if config_has_piper_framing(config) {
             return text_sequence.to_framed_ids(config).or_else(|_| {
                 text_sequence
@@ -911,6 +919,34 @@ fn can_encode_piper_symbol(symbol: &str, config: &PiperVoiceConfig) -> bool {
     config.phoneme_id_map.contains_key(symbol) || expand_espeak_phoneme(symbol, config).is_some()
 }
 
+fn validate_piper_plan_sequence(sequence: &PiperPhonemeSequence) -> Result<()> {
+    for symbol in &sequence.symbols {
+        ensure!(
+            is_piper_plan_symbol(symbol),
+            "unsupported pre-compat Piper symbol `{symbol}`; expected ARPAbet, space, or punctuation"
+        );
+    }
+    Ok(())
+}
+
+fn is_piper_plan_symbol(symbol: &str) -> bool {
+    if matches!(symbol, " " | "|" | "." | "!" | "?" | "," | ";" | ":") {
+        return true;
+    }
+    let (base, stress) = split_arpabet_stress(symbol);
+    if stress.is_some() && !is_arpabet_vowel(base) {
+        return false;
+    }
+    is_piper_arpabet_symbol(base)
+}
+
+fn split_arpabet_stress(symbol: &str) -> (&str, Option<char>) {
+    match symbol.chars().last() {
+        Some(stress @ ('0' | '1' | '2')) => (&symbol[..symbol.len() - 1], Some(stress)),
+        _ => (symbol, None),
+    }
+}
+
 fn compatible_terminal_symbol<'a>(
     requested: Option<&'a str>,
     config: &PiperVoiceConfig,
@@ -947,6 +983,21 @@ fn expand_espeak_phoneme(symbol: &str, config: &PiperVoiceConfig) -> Option<Vec<
         .strip_suffix(['0', '1', '2'])
         .filter(|base| is_arpabet_vowel(base))
         .unwrap_or(symbol);
+
+    if base_symbol != symbol && config.phoneme_id_map.contains_key(base_symbol) {
+        let mut output = Vec::new();
+        if let Some(marker) = stress_marker
+            && config.phoneme_id_map.contains_key(marker)
+        {
+            output.push(marker.to_string());
+        }
+        output.push(base_symbol.to_string());
+        return Some(output);
+    }
+
+    if config.phoneme_id_map.contains_key(symbol) {
+        return Some(vec![symbol.to_string()]);
+    }
 
     let expanded = match (symbol, base_symbol) {
         ("AH0", _) => &["ə"][..],
@@ -993,7 +1044,6 @@ fn expand_espeak_phoneme(symbol: &str, config: &PiperVoiceConfig) -> Option<Vec<
         (_, "Z") => &["z"],
         (_, "ZH") => &["ʒ"],
         (_, "|") => &["."],
-        _ if config.phoneme_id_map.contains_key(symbol) => return Some(vec![symbol.to_string()]),
         _ => return None,
     };
 
@@ -1400,6 +1450,16 @@ mod tests {
         PiperVoiceConfig::from_json_str(json).expect("config")
     }
 
+    fn assert_piper_sequence_uses_only_arpabet_and_punctuation(sequence: &PiperPhonemeSequence) {
+        for symbol in &sequence.symbols {
+            assert!(
+                is_piper_plan_symbol(symbol),
+                "Piper plan sequence should not contain raw IPA/backend symbols: {symbol:?} in {:?}",
+                sequence.symbols
+            );
+        }
+    }
+
     #[test]
     fn piper_sequence_lowers_dark_l_to_regular_piper_l() {
         assert_eq!(piper_symbol_for_phone_id("ipa.phone.ɫ"), Some("L"));
@@ -1470,9 +1530,7 @@ mod tests {
         let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
         assert_eq!(
             sequence.symbols,
-            vec![
-                "HH", "AH0", "L", "OW1", " ", "W", "ER1", "L", "D", "."
-            ]
+            vec!["HH", "AH0", "L", "OW1", " ", "W", "ER1", "L", "D", "."]
         );
         assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
@@ -1537,9 +1595,11 @@ mod tests {
         assert_eq!(
             sequence.symbols,
             vec![
-                "HH", "ə", "L", "OW", " ", "W", "ER", "L", "D", ",", " ", "OW", "K", "EY", "."
+                "HH", "AH0", "L", "OW1", " ", "W", "ER1", "L", "D", ",", " ", "OW2", "K", "EY1",
+                "."
             ]
         );
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
@@ -1567,9 +1627,9 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
-        assert_eq!(sequence.symbols, vec!["AY", "Y", "AA", "R", "."]);
+        assert_eq!(sequence.symbols, vec!["AY1", "Y", "AA1", "R", "."]);
 
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
@@ -1594,13 +1654,14 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
-        assert_eq!(sequence.symbols, vec!["AY", "Y", "AA", "R", "."]);
+        assert_eq!(sequence.symbols, vec!["AY1", "Y", "AA1", "R", "."]);
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
-    fn piper_sequence_preserves_schwa_for_word_initial_reduced_vowels() {
+    fn piper_sequence_marks_reduced_vowels_with_arpabet_stress() {
         let phonemicized = EnglishPhonemicizer
             .phonemicize(&PhonemicizeRequest {
                 text: "a adjacent current phonological".into(),
@@ -1624,15 +1685,16 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
         assert_eq!(
             sequence.symbols,
             vec![
-                "ə", " ", "ə", "JH", "EY", "S", "ə", "N", "T", " ", "K", "ER", "ə", "N", "T", " ",
-                "F", "OW", "N", "ə", "L", "AA", "JH", "IH", "K", "ə", "L", "."
+                "AH0", " ", "AH0", "JH", "EY1", "S", "AH0", "N", "T", " ", "K", "ER1", "AH0", "N",
+                "T", " ", "F", "OW2", "N", "AH0", "L", "AA1", "JH", "IH0", "K", "AH0", "L", "."
             ]
         );
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
@@ -1660,9 +1722,13 @@ mod tests {
             provenance: phonemicized.provenance,
         };
 
-        let sequence = piper_sequence_from_plan(&plan);
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 
-        assert_eq!(sequence.symbols, vec!["D", "IH", "S", "K", "AH1", "S", "."]);
+        assert_eq!(
+            sequence.symbols,
+            vec!["D", "IH0", "S", "K", "AH1", "S", "."]
+        );
+        assert_piper_sequence_uses_only_arpabet_and_punctuation(&sequence);
     }
 
     #[test]
@@ -1782,6 +1848,31 @@ mod tests {
     }
 
     #[test]
+    fn compatible_ids_strip_vowel_stress_for_arpabet_base_configs() {
+        let config = config_from_json(
+            r#"
+            {
+              "audio": { "sample_rate": 22050 },
+              "phoneme_id_map": {
+                ".": [1],
+                "AH": [2],
+                "OW": [3],
+                "S": [4]
+              }
+            }
+            "#,
+        );
+
+        let ids = PiperPhonemeSequence {
+            symbols: vec!["AH0".into(), "OW1".into(), "S".into()],
+        }
+        .to_text_ids_compatible(&config)
+        .expect("ids");
+
+        assert_eq!(ids.ids, vec![2, 3, 4, 1]);
+    }
+
+    #[test]
     fn compatible_symbols_show_actual_espeak_lowering_for_piper() {
         let config = config_from_json(
             r#"
@@ -1803,12 +1894,49 @@ mod tests {
         );
 
         let sequence = PiperPhonemeSequence {
-            symbols: vec!["DH".into(), "AE".into(), "T".into(), " ".into(), "ə".into()],
+            symbols: vec![
+                "DH".into(),
+                "AE".into(),
+                "T".into(),
+                " ".into(),
+                "AH0".into(),
+            ],
         }
         .to_symbols_compatible(&config)
         .expect("compatible symbols");
 
         assert_eq!(sequence.symbols, vec!["ð", "æ", "t", " ", "ə", "."]);
+    }
+
+    #[test]
+    fn compatible_ids_reject_raw_ipa_before_model_mapping() {
+        let config = config_from_json(
+            r#"
+            {
+              "audio": { "sample_rate": 22050 },
+              "phoneme_id_map": {
+                "^": [1],
+                "_": [2],
+                "$": [3],
+                ".": [4],
+                "ə": [5]
+              }
+            }
+            "#,
+        );
+
+        let error = PiperPhonemeSequence {
+            symbols: vec!["ə".into()],
+        }
+        .to_text_ids_compatible(&config)
+        .expect_err("raw IPA should not bypass ARPAbet lowering");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported pre-compat Piper symbol `ə`"),
+            "{error:?}"
+        );
     }
 
     #[test]
