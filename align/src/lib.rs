@@ -36,7 +36,7 @@ struct PhonemicizeRequestBody {
     variety: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SynthesizeRequestBody {
     text: String,
     #[serde(default = "default_variety")]
@@ -77,7 +77,7 @@ enum AlignBackend {
     Styletts2,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct PhonemicizeResponse {
     text: String,
     variety: String,
@@ -88,7 +88,7 @@ struct PhonemicizeResponse {
     ir: PhonemicizeOutput,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SyllableSummary {
     label: String,
     stress: String,

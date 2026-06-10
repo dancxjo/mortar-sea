@@ -18,7 +18,9 @@ use crate::realize::{
 use crate::segment::{BoundaryKind, PauseKind, SpeechBoundaryToken, TerminalPunctuation};
 use crate::spec::Spec;
 use crate::syllabify::syllabify_phones;
-use crate::syntax::{HeuristicLinkGrammarParser, LinkGrammarParser, SentenceSyntaxAnalysis};
+use crate::syntax::{
+    HeuristicLinkGrammarParser, LinkGrammarParser, PartOfSpeech, SentenceSyntaxAnalysis,
+};
 use crate::time::{TextSpan, TimeSpan};
 use crate::variety::{
     LinguisticVariety, OrthographicUnitKind, WeakFormFollowingContext, WeakFormRule,
@@ -90,6 +92,9 @@ pub trait PronunciationPipeline {
                     add_letter_name_feature(&mut features);
                 }
                 add_word_index_feature(&mut features, word_index);
+                if let Some(part_of_speech) = pronunciation.part_of_speech {
+                    add_part_of_speech_feature(&mut features, part_of_speech);
+                }
                 PhonemeToken {
                     phoneme: Spec::Known(arpabet::phoneme_id(&variety_id.0, &raw_symbol)),
                     span: None,
@@ -173,6 +178,7 @@ pub trait PronunciationPipeline {
                     .get(word_index + 1)
                     .is_some_and(|next| self.next_word_starts_with_vowelish(next, &variety)),
                 careful_style,
+                part_of_speech: syntax.tokens.get(word_index).map(|token| token.pos),
             };
             let pronunciation = self.token_classifier(word, &variety, context);
             warnings.extend(pronunciation.warnings.clone());
@@ -236,6 +242,7 @@ pub trait PronunciationPipeline {
                 TokenPronunciationContext {
                     next_starts_with_vowelish: false,
                     careful_style: true,
+                    part_of_speech: None,
                 },
             )
             .candidates
@@ -437,6 +444,7 @@ impl PronunciationPipeline for EnglishPhonemicizer {
                     TokenPronunciationContext {
                         next_starts_with_vowelish: false,
                         careful_style: true,
+                        part_of_speech: None,
                     },
                 )
                 .candidates
@@ -1044,12 +1052,14 @@ pub struct WordPronunciation {
     pub warnings: Vec<PronunciationWarning>,
     pub letter_break_offsets: Vec<usize>,
     pub letter_indices: Vec<usize>,
+    pub part_of_speech: Option<PartOfSpeech>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenPronunciationContext {
     pub next_starts_with_vowelish: bool,
     pub careful_style: bool,
+    pub part_of_speech: Option<PartOfSpeech>,
 }
 
 fn pronunciation_for_word(
@@ -1090,13 +1100,23 @@ fn pronunciation_for_word(
 
     let entry = cmudict::bundled().lookup_entry(&word.normalized);
     if !entry.candidates.is_empty() {
+        let selection = choose_pos_sensitive_candidates(
+            &entry.lookup,
+            entry.candidates,
+            context.part_of_speech,
+        );
         return WordPronunciation {
-            candidates: entry.candidates,
+            candidates: selection.candidates,
             status: entry.status,
-            provenance: pronunciation_provenance(entry.status),
+            provenance: cmudict_pronunciation_provenance(
+                entry.status,
+                context.part_of_speech,
+                selection.applied_pos,
+            ),
             warnings: Vec::new(),
             letter_break_offsets: Vec::new(),
             letter_indices: Vec::new(),
+            part_of_speech: context.part_of_speech,
         };
     }
 
@@ -1113,6 +1133,7 @@ fn pronunciation_for_word(
             }],
             letter_break_offsets: Vec::new(),
             letter_indices: Vec::new(),
+            part_of_speech: context.part_of_speech,
         }
     } else {
         WordPronunciation {
@@ -1126,8 +1147,199 @@ fn pronunciation_for_word(
             }],
             letter_break_offsets: Vec::new(),
             letter_indices: Vec::new(),
+            part_of_speech: context.part_of_speech,
         }
     }
+}
+
+#[derive(Debug)]
+struct CandidateSelection {
+    candidates: Vec<Vec<CmuPhoneme>>,
+    applied_pos: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PosSensitivePronunciation {
+    word: &'static str,
+    part_of_speech: PartOfSpeech,
+    symbols: &'static [&'static str],
+}
+
+const POS_SENSITIVE_PRONUNCIATIONS: &[PosSensitivePronunciation] = &[
+    pos_pronunciation("close", PartOfSpeech::Adjective, &["K", "L", "OW1", "S"]),
+    pos_pronunciation("close", PartOfSpeech::Verb, &["K", "L", "OW1", "Z"]),
+    pos_pronunciation(
+        "conduct",
+        PartOfSpeech::Noun,
+        &["K", "AA1", "N", "D", "AH0", "K", "T"],
+    ),
+    pos_pronunciation(
+        "conduct",
+        PartOfSpeech::Verb,
+        &["K", "AA0", "N", "D", "AH1", "K", "T"],
+    ),
+    pos_pronunciation(
+        "console",
+        PartOfSpeech::Noun,
+        &["K", "AA1", "N", "S", "OW0", "L"],
+    ),
+    pos_pronunciation(
+        "console",
+        PartOfSpeech::Verb,
+        &["K", "AH0", "N", "S", "OW1", "L"],
+    ),
+    pos_pronunciation(
+        "object",
+        PartOfSpeech::Noun,
+        &["AA1", "B", "JH", "EH0", "K", "T"],
+    ),
+    pos_pronunciation(
+        "object",
+        PartOfSpeech::Verb,
+        &["AH0", "B", "JH", "EH1", "K", "T"],
+    ),
+    pos_pronunciation("permit", PartOfSpeech::Noun, &["P", "ER1", "M", "IH2", "T"]),
+    pos_pronunciation("permit", PartOfSpeech::Verb, &["P", "ER0", "M", "IH1", "T"]),
+    pos_pronunciation(
+        "present",
+        PartOfSpeech::Adjective,
+        &["P", "R", "EH1", "Z", "AH0", "N", "T"],
+    ),
+    pos_pronunciation(
+        "present",
+        PartOfSpeech::Noun,
+        &["P", "R", "EH1", "Z", "AH0", "N", "T"],
+    ),
+    pos_pronunciation(
+        "present",
+        PartOfSpeech::Verb,
+        &["P", "R", "IY0", "Z", "EH1", "N", "T"],
+    ),
+    pos_pronunciation(
+        "produce",
+        PartOfSpeech::Noun,
+        &["P", "R", "OW1", "D", "UW0", "S"],
+    ),
+    pos_pronunciation(
+        "produce",
+        PartOfSpeech::Verb,
+        &["P", "R", "AH0", "D", "UW1", "S"],
+    ),
+    pos_pronunciation(
+        "project",
+        PartOfSpeech::Noun,
+        &["P", "R", "AA1", "JH", "EH0", "K", "T"],
+    ),
+    pos_pronunciation(
+        "project",
+        PartOfSpeech::Verb,
+        &["P", "R", "AH0", "JH", "EH1", "K", "T"],
+    ),
+    pos_pronunciation("rebel", PartOfSpeech::Noun, &["R", "EH1", "B", "AH0", "L"]),
+    pos_pronunciation("rebel", PartOfSpeech::Verb, &["R", "IH0", "B", "EH1", "L"]),
+    pos_pronunciation("record", PartOfSpeech::Noun, &["R", "EH1", "K", "ER0", "D"]),
+    pos_pronunciation(
+        "record",
+        PartOfSpeech::Verb,
+        &["R", "AH0", "K", "AO1", "R", "D"],
+    ),
+    pos_pronunciation(
+        "refuse",
+        PartOfSpeech::Noun,
+        &["R", "EH1", "F", "Y", "UW2", "Z"],
+    ),
+    pos_pronunciation(
+        "refuse",
+        PartOfSpeech::Verb,
+        &["R", "AH0", "F", "Y", "UW1", "Z"],
+    ),
+    pos_pronunciation(
+        "subject",
+        PartOfSpeech::Noun,
+        &["S", "AH1", "B", "JH", "IH0", "K", "T"],
+    ),
+    pos_pronunciation(
+        "subject",
+        PartOfSpeech::Verb,
+        &["S", "AH0", "B", "JH", "EH1", "K", "T"],
+    ),
+    pos_pronunciation("wind", PartOfSpeech::Noun, &["W", "IH1", "N", "D"]),
+    pos_pronunciation("wind", PartOfSpeech::Verb, &["W", "AY1", "N", "D"]),
+];
+
+const fn pos_pronunciation(
+    word: &'static str,
+    part_of_speech: PartOfSpeech,
+    symbols: &'static [&'static str],
+) -> PosSensitivePronunciation {
+    PosSensitivePronunciation {
+        word,
+        part_of_speech,
+        symbols,
+    }
+}
+
+fn choose_pos_sensitive_candidates(
+    lookup: &str,
+    candidates: Vec<Vec<CmuPhoneme>>,
+    part_of_speech: Option<PartOfSpeech>,
+) -> CandidateSelection {
+    let Some(part_of_speech) = part_of_speech else {
+        return CandidateSelection {
+            candidates,
+            applied_pos: false,
+        };
+    };
+    let Some(preferred) = pos_sensitive_pronunciation(lookup, part_of_speech) else {
+        return CandidateSelection {
+            candidates,
+            applied_pos: false,
+        };
+    };
+    let Some(position) = candidates
+        .iter()
+        .position(|candidate| candidate_matches_symbols(candidate, preferred.symbols))
+    else {
+        return CandidateSelection {
+            candidates,
+            applied_pos: false,
+        };
+    };
+
+    let mut candidates = candidates;
+    if position > 0 {
+        let preferred = candidates.remove(position);
+        candidates.insert(0, preferred);
+    }
+    CandidateSelection {
+        candidates,
+        applied_pos: true,
+    }
+}
+
+fn pos_sensitive_pronunciation(
+    lookup: &str,
+    part_of_speech: PartOfSpeech,
+) -> Option<&'static PosSensitivePronunciation> {
+    let part_of_speech = canonical_pronunciation_pos(part_of_speech);
+    POS_SENSITIVE_PRONUNCIATIONS
+        .iter()
+        .find(|entry| entry.word == lookup && entry.part_of_speech == part_of_speech)
+}
+
+fn canonical_pronunciation_pos(part_of_speech: PartOfSpeech) -> PartOfSpeech {
+    match part_of_speech {
+        PartOfSpeech::Auxiliary => PartOfSpeech::Verb,
+        other => other,
+    }
+}
+
+fn candidate_matches_symbols(candidate: &[CmuPhoneme], symbols: &[&str]) -> bool {
+    candidate.len() == symbols.len()
+        && candidate
+            .iter()
+            .zip(symbols)
+            .all(|(phoneme, symbol)| *phoneme == CmuPhoneme::parse(symbol))
 }
 
 fn weak_form_rule_applies(
@@ -1169,6 +1381,7 @@ fn weak_form_pronunciation(rule: &WeakFormRule) -> WordPronunciation {
         warnings: Vec::new(),
         letter_break_offsets: Vec::new(),
         letter_indices: Vec::new(),
+        part_of_speech: None,
     }
 }
 
@@ -1197,6 +1410,7 @@ fn acronym_pronunciation(surface: &str, variety: &LinguisticVariety) -> WordPron
         }],
         letter_break_offsets,
         letter_indices,
+        part_of_speech: None,
     }
 }
 
@@ -1229,6 +1443,7 @@ fn mixed_alphanumeric_pronunciation(
             }],
             letter_break_offsets,
             letter_indices,
+            part_of_speech: None,
         };
     } else {
         candidate.extend(guess_pronunciation(&word.normalized));
@@ -1248,6 +1463,7 @@ fn mixed_alphanumeric_pronunciation(
         }],
         letter_break_offsets: Vec::new(),
         letter_indices: Vec::new(),
+        part_of_speech: None,
     }
 }
 
@@ -1344,6 +1560,7 @@ fn orthographic_unit_pronunciation(
         warnings: Vec::new(),
         letter_break_offsets: Vec::new(),
         letter_indices,
+        part_of_speech: None,
     }
 }
 
@@ -1561,6 +1778,32 @@ fn add_word_index_feature(features: &mut FeatureBundle, word_index: usize) {
     );
 }
 
+fn add_part_of_speech_feature(features: &mut FeatureBundle, part_of_speech: PartOfSpeech) {
+    features.values.insert(
+        FeatureId("syntax.part_of_speech".into()),
+        Spec::Known(FeatureValue::Category(
+            part_of_speech_feature_value(part_of_speech).into(),
+        )),
+    );
+}
+
+fn part_of_speech_feature_value(part_of_speech: PartOfSpeech) -> &'static str {
+    match part_of_speech {
+        PartOfSpeech::Noun => "noun",
+        PartOfSpeech::Verb => "verb",
+        PartOfSpeech::Auxiliary => "auxiliary",
+        PartOfSpeech::Determiner => "determiner",
+        PartOfSpeech::Preposition => "preposition",
+        PartOfSpeech::Pronoun => "pronoun",
+        PartOfSpeech::Adverb => "adverb",
+        PartOfSpeech::Adjective => "adjective",
+        PartOfSpeech::Conjunction => "conjunction",
+        PartOfSpeech::Particle => "particle",
+        PartOfSpeech::ProperName => "proper_name",
+        PartOfSpeech::Unknown => "unknown",
+    }
+}
+
 fn confidence_for_status(status: PronunciationStatus) -> f32 {
     match status {
         PronunciationStatus::Exact => 1.0,
@@ -1568,6 +1811,25 @@ fn confidence_for_status(status: PronunciationStatus) -> f32 {
         PronunciationStatus::Guessed => 0.55,
         PronunciationStatus::Missing => 0.0,
     }
+}
+
+fn cmudict_pronunciation_provenance(
+    status: PronunciationStatus,
+    part_of_speech: Option<PartOfSpeech>,
+    applied_pos: bool,
+) -> EvidenceProvenance {
+    if applied_pos {
+        let mut provenance = pronunciation_provenance(status);
+        if let Some(part_of_speech) = part_of_speech {
+            provenance.method = format!(
+                "{} + link-grammar POS {}",
+                provenance.method,
+                part_of_speech_feature_value(part_of_speech)
+            );
+        }
+        return provenance;
+    }
+    pronunciation_provenance(status)
 }
 
 fn pronunciation_provenance(status: PronunciationStatus) -> EvidenceProvenance {
@@ -1665,11 +1927,38 @@ mod tests {
             .collect()
     }
 
+    fn cmudict_symbols_for_word(output: &PhonemicizeOutput, word_index: usize) -> Vec<String> {
+        output
+            .phonemes
+            .iter()
+            .filter(|token| {
+                phoneme_usize_feature(token, "orthography.word_index") == Some(word_index)
+            })
+            .filter_map(|token| {
+                let base = phoneme_feature_category(token, "phonology.base_symbol")?;
+                let stress = phoneme_feature_category(token, "phonology.stress")
+                    .and_then(cmu_stress_digit)
+                    .unwrap_or_default();
+                Some(format!("{base}{stress}"))
+            })
+            .collect()
+    }
+
     fn phoneme_feature_category<'a>(token: &'a PhonemeToken, feature_id: &str) -> Option<&'a str> {
         let value = token.features.values.get(&FeatureId(feature_id.into()))?;
         match value {
             Spec::Known(FeatureValue::Category(value)) | Spec::Known(FeatureValue::Text(value)) => {
                 Some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn phoneme_usize_feature(token: &PhonemeToken, feature_id: &str) -> Option<usize> {
+        let value = token.features.values.get(&FeatureId(feature_id.into()))?;
+        match value {
+            Spec::Known(FeatureValue::Number(value)) if value.is_finite() && *value >= 0.0 => {
+                Some(*value as usize)
             }
             _ => None,
         }
@@ -1711,6 +2000,52 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn link_grammar_pos_disambiguates_cmudict_heteronyms() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("I record the permit.", "en-US"))
+            .expect("heteronyms should phonemicize");
+
+        assert_eq!(output.syntax.tokens[1].pos, PartOfSpeech::Verb);
+        assert_eq!(output.syntax.tokens[3].pos, PartOfSpeech::Noun);
+        assert_eq!(
+            cmudict_symbols_for_word(&output, 1),
+            ["R", "AH0", "K", "AO1", "R", "D"]
+        );
+        assert_eq!(
+            cmudict_symbols_for_word(&output, 3),
+            ["P", "ER1", "M", "IH2", "T"]
+        );
+        assert_eq!(
+            phoneme_feature_category(&output.phonemes[1], "syntax.part_of_speech"),
+            Some("verb")
+        );
+        assert!(
+            output.phonemes[1]
+                .provenance
+                .method
+                .contains("link-grammar POS verb")
+        );
+    }
+
+    #[test]
+    fn link_grammar_pos_can_select_noun_then_verb_for_same_spelling() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("The object will object.", "en-US"))
+            .expect("heteronyms should phonemicize");
+
+        assert_eq!(output.syntax.tokens[1].pos, PartOfSpeech::Noun);
+        assert_eq!(output.syntax.tokens[3].pos, PartOfSpeech::Verb);
+        assert_eq!(
+            cmudict_symbols_for_word(&output, 1),
+            ["AA1", "B", "JH", "EH0", "K", "T"]
+        );
+        assert_eq!(
+            cmudict_symbols_for_word(&output, 3),
+            ["AH0", "B", "JH", "EH1", "K", "T"]
+        );
     }
 
     #[test]

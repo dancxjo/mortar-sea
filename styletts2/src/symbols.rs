@@ -419,6 +419,14 @@ impl SymbolSet {
             return false;
         }
         if let Some(symbol) = boundary_symbol(boundary) {
+            if boundary.pause == Some(PauseKind::AlternativeQuestionRise)
+                && self.symbols.contains("↗")
+            {
+                lowered.push(StyleTts2SymbolToken {
+                    symbol: "↗".to_string(),
+                    source: StyleTts2SymbolSource::Prosody,
+                });
+            }
             return self.push_boundary_symbol(lowered, symbol, boundary_symbol_source(boundary));
         }
         false
@@ -912,7 +920,6 @@ impl IntonationMarker {
     fn compatible_with(&self, punctuation: &str) -> bool {
         match &self.contour {
             ProsodicLabelKind::QuestionRise => punctuation == "?",
-            ProsodicLabelKind::AlternativeQuestionRise => punctuation == "|",
             ProsodicLabelKind::AlternativeQuestionFall => punctuation == "?",
             ProsodicLabelKind::ContinuationRise => matches!(punctuation, "," | ";" | ":"),
             ProsodicLabelKind::FinalFall => matches!(punctuation, "." | "!" | "?"),
@@ -924,7 +931,6 @@ impl IntonationMarker {
 fn intonation_marker_for_label(kind: &ProsodicLabelKind) -> Option<IntonationMarker> {
     let symbol = match kind {
         ProsodicLabelKind::QuestionRise => "↗",
-        ProsodicLabelKind::AlternativeQuestionRise => "↗",
         ProsodicLabelKind::AlternativeQuestionFall => "↘",
         ProsodicLabelKind::ContinuationRise => "→",
         ProsodicLabelKind::FinalFall => "↘",

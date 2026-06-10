@@ -845,9 +845,12 @@ fn is_likely_verb(word: &str) -> bool {
             | "chase"
             | "chased"
             | "choose"
+            | "close"
             | "coming"
             | "come"
             | "comply"
+            | "conduct"
+            | "console"
             | "contrast"
             | "contrasted"
             | "decide"
@@ -880,14 +883,22 @@ fn is_likely_verb(word: &str) -> bool {
             | "make"
             | "meet"
             | "met"
+            | "object"
             | "operate"
             | "parse"
+            | "permit"
+            | "present"
+            | "produce"
+            | "project"
             | "put"
             | "ran"
             | "read"
             | "realize"
+            | "rebel"
+            | "record"
             | "remember"
             | "result"
+            | "refuse"
             | "rose"
             | "run"
             | "runs"
@@ -899,6 +910,7 @@ fn is_likely_verb(word: &str) -> bool {
             | "seems"
             | "seen"
             | "smiled"
+            | "subject"
             | "talk"
             | "tell"
             | "think"
@@ -912,6 +924,7 @@ fn is_likely_verb(word: &str) -> bool {
             | "wants"
             | "went"
             | "win"
+            | "wind"
             | "work"
             | "works"
     ) || word.ends_with("ed")
@@ -1280,6 +1293,79 @@ mod tests {
 
         for (sentence, expected_links) in samples {
             let analysis = parse_english_link_grammar(&words(sentence), None);
+            for expected_link in expected_links {
+                assert_link(&analysis, expected_link);
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_ambiguous_verb_lexemes_emit_clause_links() {
+        // Classic Link Grammar ambiguous noun/verb examples from data/en/words.
+        // The heuristic parser only needs enough of this surface ambiguity to
+        // preserve clause structure for downstream prosody rules.
+        let samples = [
+            (
+                "we close the account",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we conduct the review",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we console the child",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we object to the plan",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Preposition],
+            ),
+            (
+                "we permit the request",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we present the case",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we produce the record",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we project the result",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we rebel against the order",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Preposition],
+            ),
+            (
+                "we refuse the offer",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+            (
+                "we subject the sample to heat",
+                vec![
+                    SyntacticLinkKind::Subject,
+                    SyntacticLinkKind::Object,
+                    SyntacticLinkKind::Preposition,
+                ],
+            ),
+            (
+                "we wind the clock",
+                vec![SyntacticLinkKind::Subject, SyntacticLinkKind::Object],
+            ),
+        ];
+
+        for (sentence, expected_links) in samples {
+            let analysis = parse_english_link_grammar(&words(sentence), None);
+            assert_eq!(
+                analysis.tokens[1].pos,
+                PartOfSpeech::Verb,
+                "expected ambiguous lexeme to be usable as verb in {sentence:?}: {analysis:#?}"
+            );
             for expected_link in expected_links {
                 assert_link(&analysis, expected_link);
             }

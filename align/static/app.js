@@ -14,6 +14,9 @@ const DEFAULT_PREFERENCES = {
 
 const state = {
   audioContext: null,
+  synthesisAudioContext: null,
+  synthesisNextTime: 0,
+  synthesisSources: [],
   source: null,
   processor: null,
   mediaStream: null,
@@ -404,7 +407,7 @@ async function phonemicize() {
 
 async function synthesize() {
   const synthesisInputVersion = state.inputVersion;
-  const synthesized = await runJsonAction('/api/synthesize', {
+  const synthesized = await runSynthesisStream({
     text: elements.text.value,
     variety: elements.variety.value || 'en-US',
     backend: elements.backend.value,
@@ -416,20 +419,149 @@ async function synthesize() {
     styletts2_embedding_scale: numericControlValue('styletts2-embedding-scale', DEFAULT_PREFERENCES.styletts2EmbeddingScale),
     styletts2_speed: numericControlValue('styletts2-speed', DEFAULT_PREFERENCES.styletts2Speed),
     styletts2_seed: numericControlValue('styletts2-seed', DEFAULT_PREFERENCES.styletts2Seed),
-  }, async (payload) => {
-    renderPhonemicization(payload.phonemicization);
-    await setAudio(payload.audio_url, `${payload.duration_ms} ms, ${payload.samples} samples`);
-    if (synthesisInputVersion !== state.inputVersion) {
-      setStatus('Inputs changed; run again');
-      return;
-    }
-    setStatus(`Synthesized with ${elements.backend.value}`);
-  }, {
-    progressControl: elements.synthesize,
   });
   if (synthesized && synthesisInputVersion === state.inputVersion) {
     await alignAudio();
   }
+}
+
+async function runSynthesisStream(body) {
+  const actionId = state.nextActionId + 1;
+  state.nextActionId = actionId;
+  state.latestActionId = actionId;
+  const requestInputVersion = state.inputVersion;
+  let completed = false;
+  resetSynthesisPlayback();
+  setControlProgress(elements.synthesize, true);
+  setBusy(true);
+  setStatus('Synthesizing');
+  elements['audio-detail'].textContent = 'Streaming audio...';
+  clearAlignment();
+
+  try {
+    const response = await fetch('/api/synthesize/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || response.statusText);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        const line = pending.slice(0, newline).trim();
+        pending = pending.slice(newline + 1);
+        if (line) {
+          const event = JSON.parse(line);
+          await handleSynthesisStreamEvent(event, actionId, requestInputVersion);
+          if (event.type === 'done') completed = true;
+        }
+        newline = pending.indexOf('\n');
+      }
+    }
+    pending += decoder.decode();
+    if (pending.trim()) {
+      const event = JSON.parse(pending.trim());
+      await handleSynthesisStreamEvent(event, actionId, requestInputVersion);
+      if (event.type === 'done') completed = true;
+    }
+    if (!completed && actionId === state.latestActionId) {
+      throw new Error('synthesis stream ended before final audio was ready');
+    }
+    return completed && requestInputVersion === state.inputVersion;
+  } catch (error) {
+    if (actionId === state.latestActionId) setStatus(error.message || String(error), 'error');
+    return false;
+  } finally {
+    setControlProgress(elements.synthesize, false);
+    setBusy(false);
+  }
+}
+
+async function handleSynthesisStreamEvent(event, actionId, requestInputVersion) {
+  if (actionId !== state.latestActionId) return;
+  if (event.type === 'error') {
+    throw new Error(event.error || 'synthesis failed');
+  }
+  if (requestInputVersion !== state.inputVersion) {
+    setStatus('Inputs changed; run again');
+    return;
+  }
+  if (event.type === 'phonemicized') {
+    renderPhonemicization(event.phonemicization);
+    setStatus('Synthesizing audio');
+    return;
+  }
+  if (event.type === 'audio_chunk') {
+    await playSynthesisChunk(event);
+    elements['audio-detail'].textContent = `Streaming chunk ${event.chunk_index + 1}, ${event.samples} samples`;
+    setStatus(`Streaming chunk ${event.chunk_index + 1}`);
+    return;
+  }
+  if (event.type === 'done') {
+    renderPhonemicization(event.phonemicization);
+    await setAudio(event.audio_url, `${event.duration_ms} ms, ${event.samples} samples`);
+    setStatus(`Synthesized with ${elements.backend.value}`);
+  }
+}
+
+function resetSynthesisPlayback() {
+  for (const source of state.synthesisSources) {
+    try {
+      source.stop();
+    } catch (_error) {
+      // Already ended.
+    }
+  }
+  state.synthesisSources = [];
+  state.synthesisNextTime = 0;
+}
+
+async function playSynthesisChunk(event) {
+  if (!event.pcm_s16le_base64 || !event.sample_rate_hz || !event.samples) return;
+  const context = state.synthesisAudioContext || new AudioContext();
+  state.synthesisAudioContext = context;
+  if (context.state === 'suspended') {
+    await context.resume();
+  }
+
+  const samples = decodePcmS16LeBase64(event.pcm_s16le_base64);
+  if (!samples.length) return;
+  const buffer = context.createBuffer(1, samples.length, event.sample_rate_hz);
+  buffer.copyToChannel(samples, 0);
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  const startAt = Math.max(context.currentTime + 0.03, state.synthesisNextTime || 0);
+  source.start(startAt);
+  state.synthesisNextTime = startAt + buffer.duration;
+  state.synthesisSources.push(source);
+  source.onended = () => {
+    state.synthesisSources = state.synthesisSources.filter((item) => item !== source);
+  };
+}
+
+function decodePcmS16LeBase64(encoded) {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const samples = new Float32Array(Math.floor(bytes.byteLength / 2));
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = view.getInt16(index * 2, true) / 32768;
+  }
+  return samples;
 }
 
 async function loadStyleTts2Voices(options = {}) {

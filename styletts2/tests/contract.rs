@@ -708,7 +708,7 @@ fn english_would_you_rather_question_lowers_first_option_rise_and_final_fall() {
     let actual = styletts2_text_from_english("Would you rather marry or fly an airplane?");
 
     assert!(
-        actual.contains("↗ |"),
+        actual.contains("mɛɹiː↗ ɔːɹ"),
         "first linked option should lower with a rise before the coordinator boundary: {actual}"
     );
     assert!(

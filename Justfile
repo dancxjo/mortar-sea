@@ -37,6 +37,9 @@ models-path *args:
     cargo run -- models path "$@"
 
 # Fetch default runtime models, or a named model.
+fetch *args:
+    cargo run -- models fetch "$@"
+
 models-fetch *args:
     cargo run -- models fetch "$@"
 
@@ -70,3 +73,7 @@ llm-test *args:
 
 prepare-llama-cpp-sys:
     cargo run --manifest-path xtask/Cargo.toml -- prepare-llama-cpp-sys
+
+# Build/cache upstream Link Grammar and compare it with the local heuristic parser.
+compare-lcg *args:
+    cargo run --manifest-path xtask/Cargo.toml -- compare-lcg "$@"
