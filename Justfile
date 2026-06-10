@@ -71,6 +71,9 @@ mouth *args:
 llm-test *args:
     cargo run -- llm-test "$@"
 
+prepare:
+    cargo run --manifest-path xtask/Cargo.toml -- prepare-llama-cpp-sys
+
 prepare-llama-cpp-sys:
     cargo run --manifest-path xtask/Cargo.toml -- prepare-llama-cpp-sys
 
