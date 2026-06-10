@@ -31,6 +31,7 @@ use crate::piper::{
 
 const DEFAULT_STYLE_ALPHA: f32 = 0.3;
 const DEFAULT_STYLE_BETA: f32 = 0.1;
+const DEFAULT_SPEED: f64 = 1.0;
 
 #[derive(Debug, Args)]
 pub struct SpeakCommand {
@@ -52,14 +53,40 @@ pub struct SpeakCommand {
     pub quality: SpeakQuality,
     #[arg(long)]
     pub diffusion_steps: Option<usize>,
-    #[arg(long, default_value_t = DEFAULT_STYLE_ALPHA)]
+    #[arg(
+        long,
+        visible_alias = "voice-strength",
+        help = "Reference voice strength in 0..=1; higher keeps more speaker timbre from --voice-wav"
+    )]
+    pub speaker_reference_strength: Option<f32>,
+    #[arg(
+        long,
+        visible_alias = "style-strength",
+        help = "Reference style strength in 0..=1; higher keeps more style/prosody from --style-wav"
+    )]
+    pub style_reference_strength: Option<f32>,
+    #[arg(
+        long,
+        default_value_t = DEFAULT_STYLE_ALPHA,
+        help = "Raw StyleTTS2 alpha blend; higher uses more predicted speaker/timbre and less reference"
+    )]
     pub style_alpha: f32,
-    #[arg(long, default_value_t = DEFAULT_STYLE_BETA)]
+    #[arg(
+        long,
+        default_value_t = DEFAULT_STYLE_BETA,
+        help = "Raw StyleTTS2 beta blend; higher uses more predicted style/prosody and less reference"
+    )]
     pub style_beta: f32,
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "StyleTTS2 diffusion embedding scale"
+    )]
     pub embedding_scale: f64,
     #[arg(long, default_value_t = 0)]
     pub style_seed: u64,
+    #[arg(long, default_value_t = DEFAULT_SPEED, help = "StyleTTS2 decoder speed multiplier")]
+    pub speed: f64,
     #[arg(long)]
     pub debug_pronunciation: bool,
     #[arg(long)]
@@ -99,6 +126,22 @@ impl SpeakCommand {
         self.diffusion_steps
             .unwrap_or_else(|| self.quality.diffusion_steps())
     }
+
+    pub fn resolved_style_alpha(&self) -> f32 {
+        self.speaker_reference_strength
+            .map(reference_strength_to_blend)
+            .unwrap_or(self.style_alpha)
+    }
+
+    pub fn resolved_style_beta(&self) -> f32 {
+        self.style_reference_strength
+            .map(reference_strength_to_blend)
+            .unwrap_or(self.style_beta)
+    }
+}
+
+fn reference_strength_to_blend(strength: f32) -> f32 {
+    1.0 - strength
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +172,7 @@ pub struct SpeechSynthesisOptions {
     pub style_beta: f32,
     pub embedding_scale: f64,
     pub style_seed: u64,
+    pub speed: f64,
     pub max_tts_symbols: usize,
     pub no_tts_chunking: bool,
 }
@@ -144,6 +188,7 @@ impl Default for SpeechSynthesisOptions {
             style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
+            speed: DEFAULT_SPEED,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
             no_tts_chunking: false,
         }
@@ -157,10 +202,11 @@ impl From<&SpeakCommand> for SpeechSynthesisOptions {
             voice_wav: command.voice_wav.clone(),
             style_wav: command.style_wav.clone(),
             diffusion_steps: command.resolved_diffusion_steps(),
-            style_alpha: command.style_alpha,
-            style_beta: command.style_beta,
+            style_alpha: command.resolved_style_alpha(),
+            style_beta: command.resolved_style_beta(),
             embedding_scale: command.embedding_scale,
             style_seed: command.style_seed,
+            speed: command.speed,
             max_tts_symbols: command.max_tts_symbols,
             no_tts_chunking: command.no_tts_chunking,
         }
@@ -250,7 +296,9 @@ impl StyleTts2TextSynthesizer {
         let backend = StyleTts2OnnxBackend::from_model_dir(model_dir)
             .context("failed to load native StyleTTS2 ONNX backend")?
             .with_diffusion_options(styletts2_diffusion_options_from(&options))
-            .context("invalid StyleTTS2 diffusion options")?;
+            .context("invalid StyleTTS2 diffusion options")?
+            .with_speed(options.speed)
+            .context("invalid StyleTTS2 speed")?;
         let default_references = ensure_styletts2_default_reference_audio_available()
             .context("failed to prepare default StyleTTS2 reference audio")?;
 
@@ -495,6 +543,24 @@ pub fn run(command: SpeakCommand) -> Result<()> {
     }
     println!("phones: {}", format_phones(&phonemicized));
     println!("backend_symbols: {backend_symbols}");
+    if matches!(command.backend, SpeakBackend::Styletts2) {
+        let options = SpeechSynthesisOptions::from(&command);
+        println!("styletts2_controls:");
+        println!("  diffusion_steps: {}", options.diffusion_steps);
+        println!(
+            "  speaker_reference_strength: {:.3}",
+            1.0 - options.style_alpha
+        );
+        println!(
+            "  style_reference_strength: {:.3}",
+            1.0 - options.style_beta
+        );
+        println!("  alpha: {:.3}", options.style_alpha);
+        println!("  beta: {:.3}", options.style_beta);
+        println!("  embedding_scale: {:.3}", options.embedding_scale);
+        println!("  style_seed: {}", options.style_seed);
+        println!("  speed: {:.3}", options.speed);
+    }
     if let Some(plan) = &styletts2_plan {
         println!("chunks:");
         for (index, chunk) in plan.chunks.iter().enumerate() {
@@ -950,10 +1016,13 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Balanced,
             diffusion_steps: None,
+            speaker_reference_strength: None,
+            style_reference_strength: None,
             style_alpha: DEFAULT_STYLE_ALPHA,
             style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
+            speed: DEFAULT_SPEED,
             debug_pronunciation: false,
             timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
@@ -977,10 +1046,13 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Fast,
             diffusion_steps: None,
+            speaker_reference_strength: None,
+            style_reference_strength: None,
             style_alpha: DEFAULT_STYLE_ALPHA,
             style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
+            speed: DEFAULT_SPEED,
             debug_pronunciation: false,
             timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
@@ -996,6 +1068,43 @@ mod tests {
     fn default_style_beta_keeps_reference_prosody_audible() {
         assert_eq!(SpeechSynthesisOptions::default().style_alpha, 0.3);
         assert_eq!(SpeechSynthesisOptions::default().style_beta, 0.1);
+        assert_eq!(SpeechSynthesisOptions::default().speed, 1.0);
+    }
+
+    #[test]
+    fn reference_strength_options_resolve_to_backend_blend_values() {
+        let command = SpeakCommand {
+            text: "hello world".into(),
+            variety: "en-US".into(),
+            backend: SpeakBackend::Mock,
+            output: PathBuf::from("target/style-strength.wav"),
+            sample_rate_hz: 24_000,
+            voice_wav: None,
+            style_wav: None,
+            quality: SpeakQuality::Balanced,
+            diffusion_steps: None,
+            speaker_reference_strength: Some(0.75),
+            style_reference_strength: Some(1.0),
+            style_alpha: 0.9,
+            style_beta: 0.8,
+            embedding_scale: 1.25,
+            style_seed: 42,
+            speed: 0.92,
+            debug_pronunciation: false,
+            timings: false,
+            max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,
+            no_tts_chunking: false,
+            fail_on_guessed_pronunciation: false,
+        };
+        let options = SpeechSynthesisOptions::from(&command);
+
+        assert_eq!(command.resolved_style_alpha(), 0.25);
+        assert_eq!(command.resolved_style_beta(), 0.0);
+        assert_eq!(options.style_alpha, 0.25);
+        assert_eq!(options.style_beta, 0.0);
+        assert_eq!(options.embedding_scale, 1.25);
+        assert_eq!(options.style_seed, 42);
+        assert_eq!(options.speed, 0.92);
     }
 
     #[test]
@@ -1010,10 +1119,13 @@ mod tests {
             style_wav: None,
             quality: SpeakQuality::Fast,
             diffusion_steps: Some(4),
+            speaker_reference_strength: None,
+            style_reference_strength: None,
             style_alpha: DEFAULT_STYLE_ALPHA,
             style_beta: DEFAULT_STYLE_BETA,
             embedding_scale: 1.0,
             style_seed: 0,
+            speed: DEFAULT_SPEED,
             debug_pronunciation: false,
             timings: false,
             max_tts_symbols: DEFAULT_MAX_TTS_SYMBOLS,

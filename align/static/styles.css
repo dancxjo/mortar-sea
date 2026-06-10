@@ -477,6 +477,49 @@ h2 {
   white-space: nowrap;
 }
 
+.styletts2-controls {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(94px, 1fr));
+  align-items: end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.knob-field,
+.compact-number-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.knob-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.knob-label-row output {
+  color: var(--ink);
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.styletts2-controls input[type="range"] {
+  width: 100%;
+  height: 32px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.styletts2-controls input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+}
+
 .field-group {
   display: grid;
   align-content: start;
@@ -835,6 +878,10 @@ pre {
     display: block;
     margin-top: 4px;
     text-align: left;
+  }
+
+  .styletts2-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .transcript-controls span {

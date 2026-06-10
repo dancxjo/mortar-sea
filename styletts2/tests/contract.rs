@@ -555,6 +555,7 @@ fn speech_spine_lowers_to_ipa_text_without_lexical_stress_for_styletts2() {
         ("current", "kɝənt"),
         ("derived", "dɚaɪvd"),
         ("surface", "sɝfəs"),
+        ("service", "sɚvəs"),
         (
             "Tomorrow I will align the tires",
             "təmɑːɹoʊ aɪ wɪl ɐlaɪn ðə taɪɚz",

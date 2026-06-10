@@ -579,6 +579,9 @@ impl PhoneBackedPhonemeSymbols {
         if phone_should_lower_as_underlying_phoneme(phone) {
             return candidate.underlying_symbol;
         }
+        if styletts2_prefers_service_r_colored_schwa(phone, &candidate.phoneme, &self.queued) {
+            return Some("ɚ".into());
+        }
         if styletts2_prefers_open_central_reduced_vowel(phone, &candidate.phoneme, word_initial) {
             return Some("ɐ".into());
         }
@@ -608,6 +611,31 @@ fn styletts2_prefers_open_central_reduced_vowel(
         && phoneme.provenance.source == EvidenceSource::Lexicon
         && phone_feature_category(phone, "phonology.base_symbol") == Some("AH")
         && phone_feature_category(phone, "phonology.stress") == Some("unstressed")
+}
+
+fn styletts2_prefers_service_r_colored_schwa(
+    phone: &PhoneToken,
+    phoneme: &PhonemeToken,
+    following: &VecDeque<PhoneBackedPhonemeSymbol>,
+) -> bool {
+    matches!(&phone.phone, Spec::Known(id) if id.as_str() == "ipa.phone.ɝ")
+        && phoneme.provenance.source == EvidenceSource::Lexicon
+        && phoneme_feature_category(phoneme, "phonology.base_symbol") == Some("ER")
+        && phoneme_feature_category(phoneme, "phonology.stress") == Some("primary")
+        && following_phone_ids(following, ["ipa.phone.v", "ipa.phone.ə", "ipa.phone.s"])
+}
+
+fn following_phone_ids<const N: usize>(
+    following: &VecDeque<PhoneBackedPhonemeSymbol>,
+    expected: [&str; N],
+) -> bool {
+    following
+        .iter()
+        .take(N)
+        .map(|symbol| spec_token_id(&symbol.phone.phone))
+        .zip(expected)
+        .all(|(actual, expected)| actual == Some(expected))
+        && following.len() >= N
 }
 
 fn is_r_colored_vowel_phone(phone: &PhoneToken) -> bool {

@@ -3,6 +3,12 @@ const DEFAULT_PREFERENCES = {
   backend: 'styletts2',
   styletts2Voice: '',
   styletts2Style: '',
+  styletts2StyleStrength: 0.9,
+  styletts2VoiceStrength: 0.7,
+  styletts2DiffusionSteps: 5,
+  styletts2EmbeddingScale: 1.0,
+  styletts2Speed: 1.0,
+  styletts2Seed: 0,
   variety: 'en-US',
 };
 
@@ -95,6 +101,16 @@ window.addEventListener('DOMContentLoaded', () => {
     'backend',
     'styletts2-voice',
     'styletts2-style',
+    'styletts2-style-strength',
+    'styletts2-style-strength-value',
+    'styletts2-voice-strength',
+    'styletts2-voice-strength-value',
+    'styletts2-diffusion-steps',
+    'styletts2-embedding-scale',
+    'styletts2-embedding-scale-value',
+    'styletts2-speed',
+    'styletts2-speed-value',
+    'styletts2-seed',
     'refresh-voices',
     'styletts2-voice-upload-control',
     'styletts2-voice-file',
@@ -165,6 +181,26 @@ window.addEventListener('DOMContentLoaded', () => {
     savePreferences();
     markActionInputsChanged();
   });
+  for (const id of [
+    'styletts2-style-strength',
+    'styletts2-voice-strength',
+    'styletts2-diffusion-steps',
+    'styletts2-embedding-scale',
+    'styletts2-speed',
+    'styletts2-seed',
+  ]) {
+    elements[id].addEventListener('input', () => {
+      updateStyleTts2ControlLabels();
+      savePreferences();
+      markActionInputsChanged();
+    });
+    elements[id].addEventListener('change', () => {
+      normalizeStyleTts2Control(id);
+      updateStyleTts2ControlLabels();
+      savePreferences();
+      markActionInputsChanged();
+    });
+  }
   elements.variety.addEventListener('change', () => {
     savePreferences();
     markActionInputsChanged();
@@ -222,6 +258,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   fitTimeline();
   applyPreferences();
+  updateStyleTts2ControlLabels();
   loadStyleTts2Voices();
   syncVoiceSelector();
   updateAudioTransport();
@@ -280,6 +317,12 @@ function savePreferences() {
       backend: elements.backend.value || DEFAULT_PREFERENCES.backend,
       styletts2Voice: state.pendingStyletts2Voice || elements['styletts2-voice'].value || '',
       styletts2Style: state.pendingStyletts2Style || elements['styletts2-style'].value || '',
+      styletts2StyleStrength: numericControlValue('styletts2-style-strength', DEFAULT_PREFERENCES.styletts2StyleStrength),
+      styletts2VoiceStrength: numericControlValue('styletts2-voice-strength', DEFAULT_PREFERENCES.styletts2VoiceStrength),
+      styletts2DiffusionSteps: numericControlValue('styletts2-diffusion-steps', DEFAULT_PREFERENCES.styletts2DiffusionSteps),
+      styletts2EmbeddingScale: numericControlValue('styletts2-embedding-scale', DEFAULT_PREFERENCES.styletts2EmbeddingScale),
+      styletts2Speed: numericControlValue('styletts2-speed', DEFAULT_PREFERENCES.styletts2Speed),
+      styletts2Seed: numericControlValue('styletts2-seed', DEFAULT_PREFERENCES.styletts2Seed),
       variety: elements.variety.value || DEFAULT_PREFERENCES.variety,
     }));
   } catch (_error) {
@@ -297,6 +340,53 @@ function applyPreferences() {
   elements.variety.value = preferences.variety || DEFAULT_PREFERENCES.variety;
   state.pendingStyletts2Voice = preferences.styletts2Voice || '';
   state.pendingStyletts2Style = preferences.styletts2Style || '';
+  setNumericControlValue('styletts2-style-strength', preferences.styletts2StyleStrength, DEFAULT_PREFERENCES.styletts2StyleStrength);
+  setNumericControlValue('styletts2-voice-strength', preferences.styletts2VoiceStrength, DEFAULT_PREFERENCES.styletts2VoiceStrength);
+  setNumericControlValue('styletts2-diffusion-steps', preferences.styletts2DiffusionSteps, DEFAULT_PREFERENCES.styletts2DiffusionSteps);
+  setNumericControlValue('styletts2-embedding-scale', preferences.styletts2EmbeddingScale, DEFAULT_PREFERENCES.styletts2EmbeddingScale);
+  setNumericControlValue('styletts2-speed', preferences.styletts2Speed, DEFAULT_PREFERENCES.styletts2Speed);
+  setNumericControlValue('styletts2-seed', preferences.styletts2Seed, DEFAULT_PREFERENCES.styletts2Seed);
+}
+
+function numericControlValue(id, fallback) {
+  const value = Number(elements[id]?.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function setNumericControlValue(id, value, fallback) {
+  elements[id].value = String(Number.isFinite(Number(value)) ? value : fallback);
+  normalizeStyleTts2Control(id);
+}
+
+function normalizeStyleTts2Control(id) {
+  const input = elements[id];
+  const fallback = DEFAULT_PREFERENCES[controlPreferenceKey(id)];
+  let value = Number(input.value);
+  if (!Number.isFinite(value)) value = fallback;
+  const min = Number(input.min);
+  const max = Number(input.max);
+  if (Number.isFinite(min)) value = Math.max(min, value);
+  if (Number.isFinite(max)) value = Math.min(max, value);
+  if (input.step === '1') value = Math.round(value);
+  input.value = String(value);
+}
+
+function controlPreferenceKey(id) {
+  return {
+    'styletts2-style-strength': 'styletts2StyleStrength',
+    'styletts2-voice-strength': 'styletts2VoiceStrength',
+    'styletts2-diffusion-steps': 'styletts2DiffusionSteps',
+    'styletts2-embedding-scale': 'styletts2EmbeddingScale',
+    'styletts2-speed': 'styletts2Speed',
+    'styletts2-seed': 'styletts2Seed',
+  }[id];
+}
+
+function updateStyleTts2ControlLabels() {
+  elements['styletts2-style-strength-value'].textContent = numericControlValue('styletts2-style-strength', 0).toFixed(2);
+  elements['styletts2-voice-strength-value'].textContent = numericControlValue('styletts2-voice-strength', 0).toFixed(2);
+  elements['styletts2-embedding-scale-value'].textContent = numericControlValue('styletts2-embedding-scale', 0).toFixed(2);
+  elements['styletts2-speed-value'].textContent = numericControlValue('styletts2-speed', 0).toFixed(2);
 }
 
 async function phonemicize() {
@@ -320,6 +410,12 @@ async function synthesize() {
     backend: elements.backend.value,
     styletts2_voice: elements['styletts2-voice'].value || null,
     styletts2_style: elements['styletts2-style'].value || null,
+    styletts2_style_strength: numericControlValue('styletts2-style-strength', DEFAULT_PREFERENCES.styletts2StyleStrength),
+    styletts2_voice_strength: numericControlValue('styletts2-voice-strength', DEFAULT_PREFERENCES.styletts2VoiceStrength),
+    styletts2_diffusion_steps: numericControlValue('styletts2-diffusion-steps', DEFAULT_PREFERENCES.styletts2DiffusionSteps),
+    styletts2_embedding_scale: numericControlValue('styletts2-embedding-scale', DEFAULT_PREFERENCES.styletts2EmbeddingScale),
+    styletts2_speed: numericControlValue('styletts2-speed', DEFAULT_PREFERENCES.styletts2Speed),
+    styletts2_seed: numericControlValue('styletts2-seed', DEFAULT_PREFERENCES.styletts2Seed),
   }, async (payload) => {
     renderPhonemicization(payload.phonemicization);
     await setAudio(payload.audio_url, `${payload.duration_ms} ms, ${payload.samples} samples`);
@@ -385,6 +481,16 @@ function syncVoiceSelector() {
   const enabled = elements.backend.value === 'styletts2';
   elements['styletts2-voice'].disabled = !enabled;
   elements['styletts2-style'].disabled = !enabled;
+  for (const id of [
+    'styletts2-style-strength',
+    'styletts2-voice-strength',
+    'styletts2-diffusion-steps',
+    'styletts2-embedding-scale',
+    'styletts2-speed',
+    'styletts2-seed',
+  ]) {
+    elements[id].disabled = !enabled;
+  }
   elements['refresh-voices'].disabled = false;
   elements['styletts2-voice-file'].disabled = !enabled;
   updateRecordingControls();

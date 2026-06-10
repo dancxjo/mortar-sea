@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mortar Align</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=styletts2-controls-2" />
     <script defer src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
-    <script defer src="/static/app.js"></script>
+    <script defer src="/static/app.js?v=styletts2-controls-2"></script>
   </head>
   <body>
     <main class="shell">
@@ -85,6 +85,44 @@
                 </div>
                 <button type="button" id="refresh-voices" class="icon-button" title="Refresh WAV list" aria-label="Refresh WAV list"><i data-lucide="refresh-cw" aria-hidden="true">&#8635;</i></button>
                 <button type="button" id="synthesize" class="labeled-icon-button" title="Synthesize audio" aria-label="Synthesize audio"><i data-lucide="zap" aria-hidden="true">&#9889;</i><span>Synthesize</span></button>
+              </div>
+              <div class="styletts2-controls" aria-label="StyleTTS2 controls">
+                <div class="knob-field">
+                  <div class="knob-label-row">
+                    <label for="styletts2-style-strength">Style</label>
+                    <output id="styletts2-style-strength-value" for="styletts2-style-strength">0.90</output>
+                  </div>
+                  <input id="styletts2-style-strength" type="range" min="0" max="1" step="0.05" value="0.90" oninput="document.getElementById('styletts2-style-strength-value').textContent = Number(this.value).toFixed(2)" />
+                </div>
+                <div class="knob-field">
+                  <div class="knob-label-row">
+                    <label for="styletts2-voice-strength">Voice</label>
+                    <output id="styletts2-voice-strength-value" for="styletts2-voice-strength">0.70</output>
+                  </div>
+                  <input id="styletts2-voice-strength" type="range" min="0" max="1" step="0.05" value="0.70" oninput="document.getElementById('styletts2-voice-strength-value').textContent = Number(this.value).toFixed(2)" />
+                </div>
+                <div class="field compact-number-field">
+                  <label for="styletts2-diffusion-steps">Steps</label>
+                  <input id="styletts2-diffusion-steps" type="number" min="2" max="32" step="1" value="5" />
+                </div>
+                <div class="knob-field">
+                  <div class="knob-label-row">
+                    <label for="styletts2-embedding-scale">Scale</label>
+                    <output id="styletts2-embedding-scale-value" for="styletts2-embedding-scale">1.00</output>
+                  </div>
+                  <input id="styletts2-embedding-scale" type="range" min="0.25" max="2" step="0.05" value="1.00" oninput="document.getElementById('styletts2-embedding-scale-value').textContent = Number(this.value).toFixed(2)" />
+                </div>
+                <div class="knob-field">
+                  <div class="knob-label-row">
+                    <label for="styletts2-speed">Speed</label>
+                    <output id="styletts2-speed-value" for="styletts2-speed">1.00</output>
+                  </div>
+                  <input id="styletts2-speed" type="range" min="0.6" max="1.4" step="0.05" value="1.00" oninput="document.getElementById('styletts2-speed-value').textContent = Number(this.value).toFixed(2)" />
+                </div>
+                <div class="field compact-number-field">
+                  <label for="styletts2-seed">Seed</label>
+                  <input id="styletts2-seed" type="number" min="0" step="1" value="0" />
+                </div>
               </div>
               <details class="voice-details">
                 <summary>Add speaker WAV</summary>

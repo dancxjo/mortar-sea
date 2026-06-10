@@ -47,6 +47,18 @@ struct SynthesizeRequestBody {
     styletts2_voice: Option<String>,
     #[serde(default)]
     styletts2_style: Option<String>,
+    #[serde(default)]
+    styletts2_style_strength: Option<f32>,
+    #[serde(default)]
+    styletts2_voice_strength: Option<f32>,
+    #[serde(default)]
+    styletts2_diffusion_steps: Option<usize>,
+    #[serde(default)]
+    styletts2_embedding_scale: Option<f64>,
+    #[serde(default)]
+    styletts2_speed: Option<f64>,
+    #[serde(default)]
+    styletts2_seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

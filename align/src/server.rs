@@ -111,10 +111,9 @@ async fn synthesize(
     State(state): State<AppState>,
     Json(request): Json<SynthesizeRequestBody>,
 ) -> Result<Json<SynthesizeResponse>, AppError> {
-    let phonemicized = phonemicize_text(request.text, request.variety)?;
     let filename = format!("synth-{}-{}.wav", request.backend.as_str(), Uuid::new_v4());
     let output_path = state.audio_dir.join(&filename);
-    let options = SpeechSynthesisOptions {
+    let mut options = SpeechSynthesisOptions {
         voice_wav: selected_styletts2_wav_path(
             request.backend,
             &state.styletts2_voice_dir,
@@ -129,6 +128,8 @@ async fn synthesize(
         )?,
         ..SpeechSynthesisOptions::default()
     };
+    apply_styletts2_controls(&mut options, &request)?;
+    let phonemicized = phonemicize_text(request.text, request.variety)?;
     let artifact = synthesize_phonemicized_to_wav(
         &phonemicized.ir,
         request.backend.into_speak_backend(),
@@ -143,6 +144,56 @@ async fn synthesize(
         duration_ms: artifact.duration_ms(),
         phonemicization: phonemicized,
     }))
+}
+
+fn apply_styletts2_controls(
+    options: &mut SpeechSynthesisOptions,
+    request: &SynthesizeRequestBody,
+) -> Result<(), AppError> {
+    if let Some(strength) = request.styletts2_voice_strength {
+        validate_unit_interval("StyleTTS2 voice strength", strength)?;
+        options.style_alpha = 1.0 - strength;
+    }
+    if let Some(strength) = request.styletts2_style_strength {
+        validate_unit_interval("StyleTTS2 style strength", strength)?;
+        options.style_beta = 1.0 - strength;
+    }
+    if let Some(diffusion_steps) = request.styletts2_diffusion_steps {
+        if diffusion_steps < 2 {
+            return Err(AppError::bad_request(
+                "StyleTTS2 diffusion steps must be at least 2",
+            ));
+        }
+        options.diffusion_steps = diffusion_steps;
+    }
+    if let Some(embedding_scale) = request.styletts2_embedding_scale {
+        validate_positive_f64("StyleTTS2 embedding scale", embedding_scale)?;
+        options.embedding_scale = embedding_scale;
+    }
+    if let Some(speed) = request.styletts2_speed {
+        validate_positive_f64("StyleTTS2 speed", speed)?;
+        options.speed = speed;
+    }
+    if let Some(seed) = request.styletts2_seed {
+        options.style_seed = seed;
+    }
+    Ok(())
+}
+
+fn validate_unit_interval(label: &str, value: f32) -> Result<(), AppError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        return Ok(());
+    }
+    Err(AppError::bad_request(format!("{label} must be in 0..=1")))
+}
+
+fn validate_positive_f64(label: &str, value: f64) -> Result<(), AppError> {
+    if value.is_finite() && value > 0.0 {
+        return Ok(());
+    }
+    Err(AppError::bad_request(format!(
+        "{label} must be finite and positive"
+    )))
 }
 
 async fn styletts2_voices(
