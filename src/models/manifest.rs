@@ -140,8 +140,8 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
     },
     ModelAsset {
         id: "cmudict-base",
-        filename: "cmudict-0.7b",
-        relative_path: "models/speech/en-us/cmudict-0.7b",
+        filename: "cmudict.dict",
+        relative_path: "models/speech/en-us/cmudict.dict",
         url: "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict",
         sha256: None,
         size_bytes: None,
@@ -151,8 +151,8 @@ pub const MODEL_ASSETS: &[ModelAsset] = &[
     },
     ModelAsset {
         id: "cmudict-vp",
-        filename: "cmudict-0.7b.vp",
-        relative_path: "models/speech/en-us/cmudict-0.7b.vp",
+        filename: "cmudict.vp",
+        relative_path: "models/speech/en-us/cmudict.vp",
         url: "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.vp",
         sha256: None,
         size_bytes: None,

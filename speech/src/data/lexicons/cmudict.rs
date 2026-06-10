@@ -111,8 +111,13 @@ mmm M
             dirs::data_local_dir()?.join("mortar-sea")
         };
 
-        let base_path = home.join("models/speech/en-us/cmudict-0.7b");
-        let vp_path = home.join("models/speech/en-us/cmudict-0.7b.vp");
+        let mut base_path = home.join("models/speech/en-us/cmudict.dict");
+        let mut vp_path = home.join("models/speech/en-us/cmudict.vp");
+
+        if !base_path.exists() {
+            base_path = home.join("models/speech/en-us/cmudict-0.7b");
+            vp_path = home.join("models/speech/en-us/cmudict-0.7b.vp");
+        }
 
         if base_path.exists() {
             if let Ok(base_data) = std::fs::read_to_string(&base_path) {
@@ -218,14 +223,15 @@ mmm M
             }
 
             let key = word.to_lowercase().into_boxed_str();
-            self.entries
+            let entry = self.entries
                 .entry(key)
                 .or_insert_with(|| LexiconEntry {
                     candidates: Vec::new(),
                     source,
-                })
-                .candidates
-                .push(phonemes);
+                });
+            if !entry.candidates.contains(&phonemes) {
+                entry.candidates.push(phonemes);
+            }
         }
     }
 }

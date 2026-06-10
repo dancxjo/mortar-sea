@@ -2130,6 +2130,10 @@ fn is_linked_as_modifier(word_idx: usize, syntax: &crate::syntax::SentenceSyntax
     false
 }
 
+fn find_word_index_at(c_idx: usize, words: &[WordToken]) -> Option<usize> {
+    words.iter().position(|w| w.span.start_char <= c_idx && c_idx < w.span.end_char)
+}
+
 pub fn english_normalize_numbers(text: &str) -> String {
     let words = tokenize_words(text);
     if words.is_empty() {
@@ -2141,210 +2145,223 @@ pub fn english_normalize_numbers(text: &str) -> String {
 
     let char_vec: Vec<char> = text.chars().collect();
     let mut result = String::new();
-    let mut last_char_idx = 0;
-    let mut i = 0;
+    let mut idx = 0;
 
-    while i < words.len() {
-        let word = &words[i];
-        let span = word.span;
-
-        // Append non-word content before this word
-        for c in &char_vec[last_char_idx..span.start_char] {
-            result.push(*c);
-        }
-
-        // Check if this word is a currency amount (preceded by '$')
-        let is_currency = span.start_char > 0 && char_vec[span.start_char - 1] == '$';
-
-        if is_currency {
-            if result.ends_with('$') {
-                result.pop();
+    while idx < char_vec.len() {
+        // Check currency amount at `idx`
+        if char_vec[idx] == '$' {
+            let mut int_part = String::new();
+            let mut temp_idx = idx + 1;
+            while temp_idx < char_vec.len() && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',') {
+                int_part.push(char_vec[temp_idx]);
+                temp_idx += 1;
             }
-
-            let mut cents_val: Option<u128> = None;
-            let mut cents_consumed = false;
-
-            if i + 1 < words.len() {
-                let next_word = &words[i + 1];
-                let dot_idx = word.span.end_char;
-                if dot_idx < char_vec.len() && char_vec[dot_idx] == '.' {
-                    if next_word.span.start_char == dot_idx + 1 {
-                        if next_word.text.len() == 2 && next_word.text.chars().all(|c| c.is_ascii_digit()) {
-                            let is_longer_decimal = if i + 2 < words.len() {
-                                words[i + 2].span.start_char == next_word.span.end_char
-                                    && words[i + 2].text.chars().all(|c| c.is_ascii_digit())
-                            } else {
-                                false
-                            };
-
-                            if !is_longer_decimal {
-                                if let Ok(val) = next_word.text.parse::<u128>() {
-                                    cents_val = Some(val);
-                                    cents_consumed = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut scale_word: Option<String> = None;
-            let mut scale_word_idx: Option<usize> = None;
-            if !cents_consumed && i + 1 < words.len() {
-                let next_word = &words[i + 1];
-                let next_lower = next_word.normalized.to_lowercase();
-                if is_scale_word(&next_lower) {
-                    scale_word = Some(next_lower);
-                    scale_word_idx = Some(i + 1);
-                }
-            }
-
-            let dollars_str: String = word.text.chars().filter(|&c| c != ',').collect();
-            if let Ok(dollars_val) = dollars_str.parse::<u128>() {
-                let check_idx = scale_word_idx.unwrap_or(i);
-                let modifier = is_linked_as_modifier(check_idx, &syntax, &words);
-
-                let spelled = if modifier {
-                    let dollars_spelled = spell_out(dollars_val);
-                    let base = if let Some(ref scale) = scale_word {
-                        format!("{}-{}", dollars_spelled, scale)
-                    } else {
-                        dollars_spelled
-                    };
-                    
-                    if let Some(cents) = cents_val {
-                        let cents_spelled = spell_out(cents);
-                        format!("{}-dollar-and-{}-cent", base.replace(' ', "-"), cents_spelled.replace(' ', "-"))
-                    } else {
-                        format!("{}-dollar", base.replace(' ', "-"))
-                    }
-                } else {
-                    let dollars_spelled = spell_out(dollars_val);
-                    let base = if let Some(ref scale) = scale_word {
-                        format!("{} {}", dollars_spelled, scale)
-                    } else {
-                        dollars_spelled
-                    };
-                    
-                    let dollars_unit = if dollars_val == 1 && scale_word.is_none() { "dollar" } else { "dollars" };
-                    if let Some(cents) = cents_val {
-                        let cents_spelled = spell_out(cents);
-                        let cents_unit = if cents == 1 { "cent" } else { "cents" };
-                        format!("{} {} and {} {}", base, dollars_unit, cents_spelled, cents_unit)
-                    } else {
-                        format!("{} {}", base, dollars_unit)
-                    }
-                };
-
-                result.push_str(&spelled);
-
-                let end_word_idx = if cents_consumed { i + 1 } else { scale_word_idx.unwrap_or(i) };
-                last_char_idx = words[end_word_idx].span.end_char;
-                i = end_word_idx + 1;
-                continue;
-            }
-        }
-
-        let first_char = word.text.chars().next().unwrap_or(' ');
-        if first_char.is_ascii_digit() {
-            let digits: String = word.text.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
-            let suffix: String = word.text.chars().skip(digits.len()).collect();
-            let clean_digits = digits.replace(',', "");
             
-            if let Ok(val) = clean_digits.parse::<u128>() {
-                let mut unit_str = suffix.to_lowercase();
-                let mut unit_from_next_word = false;
-                
-                if unit_str.is_empty() && i + 1 < words.len() {
-                    let next_word = &words[i + 1];
-                    let next_lower = next_word.normalized.to_lowercase();
-                    if is_known_unit(&next_lower) {
-                        unit_str = next_lower;
-                        unit_from_next_word = true;
+            let mut cents_part: Option<String> = None;
+            let mut cents_temp = temp_idx;
+            if cents_temp < char_vec.len() && char_vec[cents_temp] == '.' {
+                cents_temp += 1;
+                if cents_temp + 1 < char_vec.len() 
+                    && char_vec[cents_temp].is_ascii_digit() 
+                    && char_vec[cents_temp + 1].is_ascii_digit() 
+                {
+                    if cents_temp + 2 >= char_vec.len() || !char_vec[cents_temp + 2].is_ascii_digit() {
+                        cents_part = Some(format!("{}{}", char_vec[cents_temp], char_vec[cents_temp + 1]));
+                        temp_idx = cents_temp + 2;
                     }
                 }
-                
-                let mut percent_consumed = false;
-                if unit_str.is_empty() {
-                    let end_idx = word.span.end_char;
-                    if end_idx < char_vec.len() && char_vec[end_idx] == '%' {
-                        unit_str = "%".to_string();
-                        percent_consumed = true;
-                    }
-                }
-
-                if is_known_unit(&unit_str) {
-                    let mut height_inches_val: Option<u128> = None;
-                    let mut height_inches_consumed = false;
-                    
-                    if matches!(unit_str.as_str(), "ft" | "feet" | "foot") {
-                        let next_num_idx = if unit_from_next_word { i + 2 } else { i + 1 };
-                        if next_num_idx < words.len() {
-                            let next_word = &words[next_num_idx];
-                            if next_word.text.chars().all(|c| c.is_ascii_digit()) {
-                                if let Ok(inches) = next_word.text.parse::<u128>() {
-                                    height_inches_val = Some(inches);
-                                    height_inches_consumed = true;
-                                }
-                            }
-                        }
-                    }
-                    
-                    let spelled = if let Some(inches) = height_inches_val {
-                        format!("{} foot {}", spell_out(val), spell_out(inches))
+            }
+            
+            let mut scale_temp = temp_idx;
+            while scale_temp < char_vec.len() && char_vec[scale_temp] == ' ' {
+                scale_temp += 1;
+            }
+            let mut scale_word = String::new();
+            while scale_temp < char_vec.len() && char_vec[scale_temp].is_alphabetic() {
+                scale_word.push(char_vec[scale_temp]);
+                scale_temp += 1;
+            }
+            
+            let scale_valid = !scale_word.is_empty() 
+                && is_scale_word(&scale_word.to_lowercase())
+                && (scale_temp >= char_vec.len() || !char_vec[scale_temp].is_alphanumeric());
+            
+            let actual_scale = if scale_valid {
+                temp_idx = scale_temp;
+                Some(scale_word.to_lowercase())
+            } else {
+                None
+            };
+            
+            let clean_int: String = int_part.chars().filter(|&c| c != ',').collect();
+            let commas_valid = if int_part.contains(',') {
+                let groups: Vec<&str> = int_part.split(',').collect();
+                groups.first().is_some_and(|g| !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit()))
+                    && groups.iter().skip(1).all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+            } else {
+                true
+            };
+            
+            if !clean_int.is_empty() && commas_valid {
+                if let Ok(dollars_val) = clean_int.parse::<u128>() {
+                    let word_idx = find_word_index_at(idx + 1, &words).unwrap_or(0);
+                    let query_idx = if actual_scale.is_some() {
+                        find_word_index_at(temp_idx - 1, &words).unwrap_or(word_idx)
                     } else {
-                        let unit_spelled = spell_unit(val, &unit_str);
-                        format!("{} {}", spell_out(val), unit_spelled)
+                        word_idx
+                    };
+                    
+                    let modifier = is_linked_as_modifier(query_idx, &syntax, &words);
+                    
+                    let spelled = if modifier {
+                        let dollars_spelled = spell_out(dollars_val);
+                        let base = if let Some(ref scale) = actual_scale {
+                            format!("{}-{}", dollars_spelled, scale)
+                        } else {
+                            dollars_spelled
+                        };
+                        if let Some(ref cents_str) = cents_part {
+                            if let Ok(cents_val) = cents_str.parse::<u128>() {
+                                let cents_spelled = spell_out(cents_val);
+                                format!("{}-dollar-and-{}-cent", base.replace(' ', "-"), cents_spelled.replace(' ', "-"))
+                            } else {
+                                format!("{}-dollar", base.replace(' ', "-"))
+                            }
+                        } else {
+                            format!("{}-dollar", base.replace(' ', "-"))
+                        }
+                    } else {
+                        let dollars_spelled = spell_out(dollars_val);
+                        let base = if let Some(ref scale) = actual_scale {
+                            format!("{} {}", dollars_spelled, scale)
+                        } else {
+                            dollars_spelled
+                        };
+                        let dollars_unit = if dollars_val == 1 && actual_scale.is_none() { "dollar" } else { "dollars" };
+                        if let Some(ref cents_str) = cents_part {
+                            if let Ok(cents_val) = cents_str.parse::<u128>() {
+                                let cents_spelled = spell_out(cents_val);
+                                let cents_unit = if cents_val == 1 { "cent" } else { "cents" };
+                                format!("{} {} and {} {}", base, dollars_unit, cents_spelled, cents_unit)
+                            } else {
+                                format!("{} {}", base, dollars_unit)
+                            }
+                        } else {
+                            format!("{} {}", base, dollars_unit)
+                        }
                     };
                     
                     result.push_str(&spelled);
-                    
-                    let end_word_idx = if height_inches_consumed {
-                        if unit_from_next_word { i + 2 } else { i + 1 }
-                    } else {
-                        if unit_from_next_word { i + 1 } else { i }
-                    };
-                    
-                    last_char_idx = words[end_word_idx].span.end_char;
-                    if percent_consumed {
-                        last_char_idx += 1;
-                    }
-                    i = end_word_idx + 1;
+                    idx = temp_idx;
                     continue;
-                } else {
-                    let mut is_decimal = false;
-                    if i + 1 < words.len() {
-                        let next_word = &words[i + 1];
-                        let dot_idx = word.span.end_char;
-                        if dot_idx < char_vec.len() && char_vec[dot_idx] == '.' {
-                            if next_word.span.start_char == dot_idx + 1 {
-                                is_decimal = true;
-                            }
+                }
+            }
+        }
+
+        // Check cardinal number or measurement at `idx`
+        if char_vec[idx].is_ascii_digit() {
+            let mut int_part = String::new();
+            let mut temp_idx = idx;
+            while temp_idx < char_vec.len() && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',') {
+                int_part.push(char_vec[temp_idx]);
+                temp_idx += 1;
+            }
+            
+            let clean_int: String = int_part.chars().filter(|&c| c != ',').collect();
+            let commas_valid = if int_part.contains(',') {
+                let groups: Vec<&str> = int_part.split(',').collect();
+                groups.first().is_some_and(|g| !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit()))
+                    && groups.iter().skip(1).all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+            } else {
+                true
+            };
+            
+            if !clean_int.is_empty() && commas_valid {
+                if let Ok(val) = clean_int.parse::<u128>() {
+                    let mut suffix_temp = temp_idx;
+                    while suffix_temp < char_vec.len() && char_vec[suffix_temp] == ' ' {
+                        suffix_temp += 1;
+                    }
+                    
+                    let mut suffix_word = String::new();
+                    if suffix_temp < char_vec.len() && char_vec[suffix_temp] == '%' {
+                        suffix_word.push('%');
+                        suffix_temp += 1;
+                    } else {
+                        while suffix_temp < char_vec.len() && char_vec[suffix_temp].is_alphabetic() {
+                            suffix_word.push(char_vec[suffix_temp]);
+                            suffix_temp += 1;
                         }
                     }
                     
-                    if !is_decimal {
-                        let spelled = spell_out(val);
+                    let suffix_valid = !suffix_word.is_empty()
+                        && is_known_unit(&suffix_word.to_lowercase())
+                        && (suffix_temp >= char_vec.len() || !char_vec[suffix_temp].is_alphanumeric());
+                    
+                    if suffix_valid {
+                        let unit_str = suffix_word.to_lowercase();
+                        let mut height_inches_val: Option<u128> = None;
+                        let mut height_temp = suffix_temp;
+                        
+                        if matches!(unit_str.as_str(), "ft" | "feet" | "foot") {
+                            while height_temp < char_vec.len() && char_vec[height_temp] == ' ' {
+                                height_temp += 1;
+                            }
+                            let mut inches_str = String::new();
+                            while height_temp < char_vec.len() && char_vec[height_temp].is_ascii_digit() {
+                                inches_str.push(char_vec[height_temp]);
+                                height_temp += 1;
+                            }
+                            let inches_valid = !inches_str.is_empty()
+                                && (height_temp >= char_vec.len() || !char_vec[height_temp].is_alphanumeric());
+                            
+                            if inches_valid {
+                                if let Ok(inches) = inches_str.parse::<u128>() {
+                                    height_inches_val = Some(inches);
+                                }
+                            }
+                        }
+                        
+                        let spelled = if let Some(inches) = height_inches_val {
+                            temp_idx = height_temp;
+                            format!("{} foot {}", spell_out(val), spell_out(inches))
+                        } else {
+                            temp_idx = suffix_temp;
+                            let unit_spelled = spell_unit(val, &unit_str);
+                            format!("{} {}", spell_out(val), unit_spelled)
+                        };
+                        
                         result.push_str(&spelled);
-                        last_char_idx = word.span.end_char;
-                        i += 1;
+                        idx = temp_idx;
                         continue;
+                    } else {
+                        let mut decimal_temp = temp_idx;
+                        let mut is_decimal = false;
+                        if decimal_temp < char_vec.len() && char_vec[decimal_temp] == '.' {
+                            decimal_temp += 1;
+                            let mut dec_digits = String::new();
+                            while decimal_temp < char_vec.len() && char_vec[decimal_temp].is_ascii_digit() {
+                                dec_digits.push(char_vec[decimal_temp]);
+                                decimal_temp += 1;
+                            }
+                            if !dec_digits.is_empty() {
+                                is_decimal = true;
+                            }
+                        }
+                        
+                        if !is_decimal {
+                            let spelled = spell_out(val);
+                            result.push_str(&spelled);
+                            idx = temp_idx;
+                            continue;
+                        }
                     }
                 }
             }
         }
 
-        // Fallback: append the word as-is
-        for c in &char_vec[span.start_char..span.end_char] {
-            result.push(*c);
-        }
-        last_char_idx = span.end_char;
-        i += 1;
-    }
-
-    // Append remaining characters
-    for c in &char_vec[last_char_idx..] {
-        result.push(*c);
+        result.push(char_vec[idx]);
+        idx += 1;
     }
 
     result
@@ -2356,6 +2373,42 @@ mod tests {
     use crate::rules::RuleCondition;
     use crate::syntax::SyntacticLinkKind;
     use crate::variety::VarietyImplementationStatus;
+ 
+    #[test]
+    fn test_number_normalization() {
+        assert_eq!(
+            english_normalize_numbers("He has $15 million."),
+            "He has fifteen million dollars."
+        );
+        assert_eq!(
+            english_normalize_numbers("A $15 million renovation."),
+            "A fifteen-million-dollar renovation."
+        );
+        assert_eq!(
+            english_normalize_numbers("His $15 million slush fund."),
+            "His fifteen-million-dollar slush fund."
+        );
+        assert_eq!(
+            english_normalize_numbers("He is 6ft 4."),
+            "He is six foot four."
+        );
+        assert_eq!(
+            english_normalize_numbers("We reached 60mph."),
+            "We reached sixty miles per hour."
+        );
+        assert_eq!(
+            english_normalize_numbers("The price was $15.52."),
+            "The price was fifteen dollars and fifty-two cents."
+        );
+        assert_eq!(
+            english_normalize_numbers("A 5% discount."),
+            "A five percent discount."
+        );
+        assert_eq!(
+            english_normalize_numbers("affects over 100,000 pending immigration cases"),
+            "affects over one hundred thousand pending immigration cases"
+        );
+    }
 
     #[test]
     fn test_tts_pronunciation_pipeline_regression() {
