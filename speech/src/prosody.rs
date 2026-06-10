@@ -66,6 +66,7 @@ pub enum ProsodicLabelKind {
     Emphasis,
     Focus,
     QuestionRise,
+    AlternativeQuestionRise,
     AlternativeQuestionFall,
     ContinuationRise,
     FinalFall,

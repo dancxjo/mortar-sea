@@ -13,7 +13,10 @@ use ort::session::{
 use ort::value::{DynTensorValueType, Tensor};
 use speech::{StyleRef, StyleSource};
 
-use crate::backend::{StyleTts2Backend, StyleTts2Error, StyleTts2SynthesisOutput, StyleTts2Timing};
+use crate::backend::{
+    StyleTts2AudioChunk, StyleTts2AudioSink, StyleTts2Backend, StyleTts2Error,
+    StyleTts2SynthesisOutput, StyleTts2Timing,
+};
 #[cfg(test)]
 use crate::plan::{styletts2_character_id, styletts2_text_for_symbol};
 use crate::plan::{styletts2_token_ids_for_symbols, validate_styletts2_plan};
@@ -304,6 +307,62 @@ impl StyleTts2Backend for StyleTts2OnnxBackend {
                 continue;
             }
             let output = self.synthesize_token_ids(request, token_ids)?;
+            pcm_mono_f32.extend(output.pcm_mono_f32);
+            let chunk_prefix = format!("chunk_{}", index + 1);
+            timings.extend(
+                output
+                    .timings
+                    .into_iter()
+                    .map(|timing| prefix_timing(&chunk_prefix, timing)),
+            );
+            timings.push(timing(&format!("{chunk_prefix}.total"), chunk_started));
+        }
+        timings.push(timing("total", total_started));
+
+        Ok(StyleTts2SynthesisOutput {
+            sample_rate_hz: SAMPLE_RATE_HZ,
+            pcm_mono_f32,
+            realized_utterance: None,
+            timings,
+        })
+    }
+
+    fn synthesize_streaming(
+        &mut self,
+        request: &StyleTts2SynthesisRequest,
+        sink: &mut dyn StyleTts2AudioSink,
+    ) -> Result<StyleTts2SynthesisOutput, StyleTts2Error> {
+        let total_started = Instant::now();
+        let preflight_started = Instant::now();
+        self.preflight_request(request)?;
+        let mut timings = vec![timing("preflight", preflight_started)];
+        if request.is_empty() {
+            timings.push(timing("total", total_started));
+            return Ok(StyleTts2SynthesisOutput {
+                sample_rate_hz: SAMPLE_RATE_HZ,
+                pcm_mono_f32: Vec::new(),
+                realized_utterance: None,
+                timings,
+            });
+        }
+
+        let mut pcm_mono_f32 = Vec::new();
+        let chunk_count = request.backend_plan.chunks.len();
+        for (index, chunk) in request.backend_plan.chunks.iter().enumerate() {
+            let chunk_started = Instant::now();
+            let token_ids = styletts2_token_ids_for_symbols(&chunk.symbols)?;
+            if token_ids.is_empty() {
+                continue;
+            }
+            let output = self.synthesize_token_ids(request, token_ids)?;
+            sink.emit(StyleTts2AudioChunk {
+                chunk_index: index,
+                is_final: index + 1 == chunk_count,
+                terminal: chunk.terminal,
+                source_text: chunk.source_text.clone(),
+                sample_rate_hz: SAMPLE_RATE_HZ,
+                pcm_mono_f32: output.pcm_mono_f32.clone(),
+            })?;
             pcm_mono_f32.extend(output.pcm_mono_f32);
             let chunk_prefix = format!("chunk_{}", index + 1);
             timings.extend(

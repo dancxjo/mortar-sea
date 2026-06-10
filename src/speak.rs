@@ -26,7 +26,8 @@ use crate::models::{
 };
 use crate::models::{ensure_piper_voice_model_available, ensure_styletts2_model_available};
 use crate::piper::{
-    PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan, piper_voice_config_path,
+    PiperAudioChunk, PiperAudioSink, PiperOnnxBackend, PiperVoiceConfig, piper_sequence_from_plan,
+    piper_voice_config_path,
 };
 
 const DEFAULT_STYLE_ALPHA: f32 = 0.3;
@@ -254,20 +255,32 @@ impl PiperTextSynthesizer {
         plan: UtterancePlan,
         output_path: &Path,
     ) -> Result<SpeechSynthesisArtifact> {
-        let output = self
-            .backend
-            .synthesize_plan(&plan)
-            .context("native Piper ONNX synthesis failed")?;
+        let mut pcm_mono_f32 = Vec::new();
+        self.synthesize_plan_streaming(&plan, &mut |chunk: PiperAudioChunk| {
+            pcm_mono_f32.extend(chunk.pcm_mono_f32);
+            Ok(())
+        })?;
+        let sample_rate_hz = self.backend.sample_rate_hz();
 
-        write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+        write_wav_mono_f32(output_path, sample_rate_hz, &pcm_mono_f32)
             .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
 
         Ok(SpeechSynthesisArtifact {
             path: output_path.to_path_buf(),
-            sample_rate_hz: output.sample_rate_hz,
-            samples: output.pcm_mono_f32.len(),
+            sample_rate_hz,
+            samples: pcm_mono_f32.len(),
             timings: Vec::new(),
         })
+    }
+
+    pub fn synthesize_plan_streaming(
+        &mut self,
+        plan: &UtterancePlan,
+        sink: &mut dyn PiperAudioSink,
+    ) -> Result<()> {
+        self.backend
+            .synthesize_plan_streaming(plan, sink)
+            .context("native Piper ONNX synthesis failed")
     }
 }
 
@@ -347,16 +360,38 @@ impl StyleTts2TextSynthesizer {
         output_path: &Path,
     ) -> Result<SpeechSynthesisArtifact> {
         let request = self.synthesis_request(backend_plan, plan);
+        let mut pcm_mono_f32 = Vec::new();
         let output = self
             .backend
-            .synthesize(&request)
+            .synthesize_streaming(&request, &mut |chunk: styletts2::StyleTts2AudioChunk| {
+                pcm_mono_f32.extend(chunk.pcm_mono_f32);
+                Ok(())
+            })
             .context("native StyleTTS2 synthesis failed")?;
 
-        write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+        write_wav_mono_f32(output_path, output.sample_rate_hz, &pcm_mono_f32)
             .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
 
         Ok(SpeechSynthesisArtifact {
             path: output_path.to_path_buf(),
+            sample_rate_hz: output.sample_rate_hz,
+            samples: pcm_mono_f32.len(),
+            timings: output.timings,
+        })
+    }
+
+    pub fn synthesize_backend_plan_streaming(
+        &mut self,
+        backend_plan: BackendSynthesisPlan,
+        plan: &UtterancePlan,
+        sink: &mut dyn styletts2::StyleTts2AudioSink,
+    ) -> Result<StyleTts2TimingSummary> {
+        let request = self.synthesis_request(backend_plan, plan);
+        let output = self
+            .backend
+            .synthesize_streaming(&request, sink)
+            .context("native StyleTTS2 synthesis failed")?;
+        Ok(StyleTts2TimingSummary {
             sample_rate_hz: output.sample_rate_hz,
             samples: output.pcm_mono_f32.len(),
             timings: output.timings,
@@ -390,6 +425,13 @@ impl StyleTts2TextSynthesizer {
         request = request.with_style_reference_audio_uri(style_reference.display().to_string());
         request
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleTts2TimingSummary {
+    pub sample_rate_hz: u32,
+    pub samples: usize,
+    pub timings: Vec<StyleTts2Timing>,
 }
 
 pub fn synthesize_phonemicized_to_wav(
@@ -703,17 +745,21 @@ fn synthesize_backend_plan_with_mock_to_wav(
         ProsodyTrack::default(),
     );
     let mut backend = MockStyleTts2Backend::new(sample_rate_hz);
+    let mut pcm_mono_f32 = Vec::new();
     let output = backend
-        .synthesize(&request)
+        .synthesize_streaming(&request, &mut |chunk: styletts2::StyleTts2AudioChunk| {
+            pcm_mono_f32.extend(chunk.pcm_mono_f32);
+            Ok(())
+        })
         .context("mock StyleTTS2 synthesis failed")?;
 
-    write_wav_mono_f32(output_path, output.sample_rate_hz, &output.pcm_mono_f32)
+    write_wav_mono_f32(output_path, output.sample_rate_hz, &pcm_mono_f32)
         .with_context(|| format!("failed to write WAV to {}", output_path.display()))?;
 
     Ok(SpeechSynthesisArtifact {
         path: output_path.to_path_buf(),
         sample_rate_hz: output.sample_rate_hz,
-        samples: output.pcm_mono_f32.len(),
+        samples: pcm_mono_f32.len(),
         timings: output.timings,
     })
 }
@@ -809,8 +855,11 @@ fn boundary_intonation_marker(boundary: &SpeechBoundaryToken) -> Option<&'static
             TerminalPunctuation::Period | TerminalPunctuation::Exclamation => "↘",
         });
     }
-    if matches!(boundary.pause, Some(PauseKind::Comma)) {
-        return Some("→");
+    if let Some(pause) = boundary.pause {
+        return Some(match pause {
+            PauseKind::Comma => "→",
+            PauseKind::AlternativeQuestionRise => "↗",
+        });
     }
     None
 }

@@ -8,8 +8,8 @@ use ort::session::{Session, builder::GraphOptimizationLevel};
 use ort::value::{DynTensorValueType, Tensor, TensorElementType};
 use serde_json::Value;
 use speech::{
-    FeatureId, FeatureValue, PauseKind, PhoneToken, PhonemeToken, Spec, SpeechBoundaryToken,
-    TerminalPunctuation, UtterancePlan,
+    FeatureId, FeatureValue, PauseKind, PhoneToken, PhonemeToken, ProsodicLabelKind, Spec,
+    SpeechBoundaryToken, TerminalPunctuation, UtterancePlan,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +43,28 @@ pub struct PiperIdSequence {
 pub struct PiperSynthesisOutput {
     pub sample_rate_hz: u32,
     pub pcm_mono_f32: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PiperAudioChunk {
+    pub chunk_index: usize,
+    pub is_final: bool,
+    pub pause_after_ms: u32,
+    pub sample_rate_hz: u32,
+    pub pcm_mono_f32: Vec<f32>,
+}
+
+pub trait PiperAudioSink {
+    fn emit(&mut self, chunk: PiperAudioChunk) -> Result<()>;
+}
+
+impl<F> PiperAudioSink for F
+where
+    F: FnMut(PiperAudioChunk) -> Result<()>,
+{
+    fn emit(&mut self, chunk: PiperAudioChunk) -> Result<()> {
+        self(chunk)
+    }
 }
 
 #[cfg(feature = "piper-onnx")]
@@ -202,6 +224,7 @@ pub fn piper_sequence_from_plan(plan: &UtterancePlan) -> Result<PiperPhonemeSequ
             push_symbol(&mut symbols, &symbol);
         }
     }
+    apply_piper_prosody_terminal_hint(&mut symbols, plan);
     append_default_terminal_symbol(&mut symbols);
     Ok(PiperPhonemeSequence { symbols })
 }
@@ -343,6 +366,26 @@ fn append_default_terminal_symbol(symbols: &mut Vec<String>) {
         return;
     }
     push_symbol(symbols, ".");
+}
+
+fn apply_piper_prosody_terminal_hint(symbols: &mut Vec<String>, plan: &UtterancePlan) {
+    if !plan.target_prosody.labels.iter().any(|label| {
+        matches!(
+            label.kind,
+            ProsodicLabelKind::QuestionRise | ProsodicLabelKind::AlternativeQuestionFall
+        )
+    }) {
+        return;
+    }
+
+    if let Some(last) = symbols.last_mut()
+        && matches!(last.as_str(), "." | "!" | "?")
+    {
+        *last = "?".to_string();
+        return;
+    }
+
+    push_symbol(symbols, "?");
 }
 
 fn punctuation_after_words(text: &str) -> Vec<Option<&'static str>> {
@@ -621,26 +664,50 @@ impl PiperOnnxBackend {
         })
     }
 
+    pub fn sample_rate_hz(&self) -> u32 {
+        self.config.sample_rate_hz
+    }
+
     pub fn synthesize_plan(&mut self, plan: &UtterancePlan) -> Result<PiperSynthesisOutput> {
-        let chunks = piper_synthesis_chunks_from_plan(plan)?;
         let mut pcm_mono_f32 = Vec::new();
-        for chunk in chunks {
-            let ids = chunk
-                .sequence
-                .to_text_ids_compatible(&self.config)
-                .context("failed to map Mortar speech plan to Piper phoneme IDs")?;
-            let output = self.synthesize_ids(&ids)?;
-            pcm_mono_f32.extend(output.pcm_mono_f32);
-            pcm_mono_f32.extend(std::iter::repeat_n(
-                0.0,
-                pause_sample_count(self.config.sample_rate_hz, chunk.pause_after_ms),
-            ));
-        }
+        self.synthesize_plan_streaming(plan, &mut |chunk: PiperAudioChunk| {
+            pcm_mono_f32.extend(chunk.pcm_mono_f32);
+            Ok(())
+        })?;
 
         Ok(PiperSynthesisOutput {
             sample_rate_hz: self.config.sample_rate_hz,
             pcm_mono_f32,
         })
+    }
+
+    pub fn synthesize_plan_streaming(
+        &mut self,
+        plan: &UtterancePlan,
+        sink: &mut dyn PiperAudioSink,
+    ) -> Result<()> {
+        let chunks = piper_synthesis_chunks_from_plan(plan)?;
+        let chunk_count = chunks.len();
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            let ids = chunk
+                .sequence
+                .to_text_ids_compatible(&self.config)
+                .context("failed to map Mortar speech plan to Piper phoneme IDs")?;
+            let mut output = self.synthesize_ids(&ids)?.pcm_mono_f32;
+            output.extend(std::iter::repeat_n(
+                0.0,
+                pause_sample_count(self.config.sample_rate_hz, chunk.pause_after_ms),
+            ));
+            sink.emit(PiperAudioChunk {
+                chunk_index,
+                is_final: chunk_index + 1 == chunk_count,
+                pause_after_ms: chunk.pause_after_ms,
+                sample_rate_hz: self.config.sample_rate_hz,
+                pcm_mono_f32: output,
+            })?;
+        }
+
+        Ok(())
     }
 
     pub fn synthesize_ids(&mut self, ids: &PiperIdSequence) -> Result<PiperSynthesisOutput> {
@@ -776,7 +843,19 @@ impl PiperOnnxBackend {
         bail!("Piper ONNX synthesis requires building mortar-sea with the `piper-onnx` feature")
     }
 
+    pub fn sample_rate_hz(&self) -> u32 {
+        0
+    }
+
     pub fn synthesize_plan(&mut self, _plan: &UtterancePlan) -> Result<PiperSynthesisOutput> {
+        bail!("Piper ONNX synthesis requires building mortar-sea with the `piper-onnx` feature")
+    }
+
+    pub fn synthesize_plan_streaming(
+        &mut self,
+        _plan: &UtterancePlan,
+        _sink: &mut dyn PiperAudioSink,
+    ) -> Result<()> {
         bail!("Piper ONNX synthesis requires building mortar-sea with the `piper-onnx` feature")
     }
 }
@@ -788,6 +867,7 @@ fn push_symbol(symbols: &mut Vec<String>, symbol: &str) {
     symbols.push(symbol.to_string());
 }
 
+#[cfg(any(feature = "piper-onnx", test))]
 fn pause_sample_count(sample_rate_hz: u32, pause_ms: u32) -> usize {
     ((sample_rate_hz as u128 * pause_ms as u128) / 1000) as usize
 }
@@ -1444,7 +1524,10 @@ fn find_onnxruntime_dylib() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use speech::{EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, ProsodyTrack, VarietyId};
+    use speech::{
+        EnglishPhonemicizer, PhonemicizeRequest, Phonemicizer, ProsodicLabel, ProsodicLabelKind,
+        ProsodyTrack, TimeSpan, VarietyId,
+    };
 
     fn config_from_json(json: &str) -> PiperVoiceConfig {
         PiperVoiceConfig::from_json_str(json).expect("config")
@@ -1559,6 +1642,44 @@ mod tests {
             style: None,
             provenance: phonemicized.provenance,
         };
+
+        let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
+
+        assert_eq!(sequence.symbols.last().map(String::as_str), Some("?"));
+    }
+
+    #[test]
+    fn piper_sequence_can_ask_question_from_prosody_hint_without_punctuation() {
+        let phonemicized = EnglishPhonemicizer
+            .phonemicize(&PhonemicizeRequest {
+                text: "hello world".into(),
+                variety: VarietyId("en-US".into()),
+                style: None,
+            })
+            .expect("phonemicize");
+        let mut plan = UtterancePlan {
+            id: speech::UtteranceId("test".into()),
+            variety: phonemicized.variety,
+            speaker: None,
+            intended_text: Some(phonemicized.text),
+            intended_morphemes: Vec::new(),
+            intended_phonemes: phonemicized.phonemes,
+            target_phones: phonemicized.phones,
+            target_syllables: phonemicized.syllables,
+            boundaries: Vec::new(),
+            target_prosody: ProsodyTrack::default(),
+            target_acoustics: Vec::new(),
+            style: None,
+            provenance: phonemicized.provenance,
+        };
+        plan.target_prosody.labels.push(ProsodicLabel {
+            span: TimeSpan {
+                start_s: 0.0,
+                end_s: 0.0,
+            },
+            kind: ProsodicLabelKind::QuestionRise,
+            confidence: 0.9,
+        });
 
         let sequence = piper_sequence_from_plan(&plan).expect("Piper sequence");
 

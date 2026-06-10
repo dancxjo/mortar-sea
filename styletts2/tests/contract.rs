@@ -223,6 +223,38 @@ fn lower_plan_tokens_marks_alternative_question_fall_from_target_prosody() {
 }
 
 #[test]
+fn lower_plan_tokens_can_ask_question_from_prosody_hint_without_punctuation() {
+    let symbol_set = SymbolSet::new(["alpha", "?", "↗"]).with_alias("variety.phone.a", "alpha");
+    let mut plan = plan(
+        None,
+        None,
+        Vec::new(),
+        vec![phone_token("variety.phone.a")],
+        Vec::new(),
+        Some("a".into()),
+    );
+    plan.target_prosody.labels.push(ProsodicLabel {
+        span: TimeSpan {
+            start_s: 0.0,
+            end_s: 0.0,
+        },
+        kind: ProsodicLabelKind::QuestionRise,
+        confidence: 0.9,
+    });
+
+    let lowered = symbol_set
+        .lower_plan_tokens(&plan)
+        .expect("plan should lower");
+    let symbols = lowered
+        .tokens
+        .iter()
+        .map(|token| token.symbol.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(symbols, ["alpha", "↗", "?"]);
+}
+
+#[test]
 fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
     let symbol_set = SymbolSet::new(["alpha", "|", ",", "."])
         .with_alias("variety.phone.a", "alpha")
@@ -405,6 +437,58 @@ fn output_sample_rate_is_propagated_from_backend() {
         .expect("mock should synthesize");
 
     assert_eq!(output.sample_rate_hz, 16_000);
+}
+
+#[test]
+fn mock_backend_streams_each_prepared_chunk() {
+    let request = StyleTts2SynthesisRequest::from_backend_plan(
+        BackendSynthesisPlan {
+            utterance_id: UtteranceId("utt.mock.stream".into()),
+            variety: VarietyId("en-US".into()),
+            text: Some("a? a.".into()),
+            chunks: vec![
+                SynthesisChunk {
+                    symbols: vec![StyleTts2SymbolToken {
+                        symbol: "?".into(),
+                        source: StyleTts2SymbolSource::BoundaryPunctuation,
+                    }],
+                    terminal: Some(TerminalPunctuation::Question),
+                    source_text: Some("a?".into()),
+                },
+                SynthesisChunk {
+                    symbols: vec![StyleTts2SymbolToken {
+                        symbol: ".".into(),
+                        source: StyleTts2SymbolSource::BoundaryPunctuation,
+                    }],
+                    terminal: Some(TerminalPunctuation::Period),
+                    source_text: Some("a.".into()),
+                },
+            ],
+            max_symbols_per_chunk: 4,
+        },
+        None,
+        None,
+        ProsodyTrack::default(),
+    );
+    let mut backend = MockStyleTts2Backend::default();
+    let mut chunk_lengths = Vec::new();
+
+    let output = backend
+        .synthesize_streaming(&request, &mut |chunk: styletts2::StyleTts2AudioChunk| {
+            chunk_lengths.push((chunk.chunk_index, chunk.is_final, chunk.pcm_mono_f32.len()));
+            Ok(())
+        })
+        .expect("mock stream should synthesize");
+
+    assert_eq!(chunk_lengths.len(), 2);
+    assert_eq!(chunk_lengths[0].0, 0);
+    assert!(!chunk_lengths[0].1);
+    assert!(chunk_lengths[0].2 > 0);
+    assert!(chunk_lengths[1].1);
+    assert_eq!(
+        output.pcm_mono_f32.len(),
+        chunk_lengths.iter().map(|(_, _, len)| *len).sum::<usize>()
+    );
 }
 
 #[test]
@@ -616,6 +700,24 @@ fn english_either_or_question_lowers_with_falling_final_contour() {
     assert!(
         !actual.contains("↗ ?"),
         "either/or question should not lower to a yes/no rise: {actual}"
+    );
+}
+
+#[test]
+fn english_would_you_rather_question_lowers_first_option_rise_and_final_fall() {
+    let actual = styletts2_text_from_english("Would you rather marry or fly an airplane?");
+
+    assert!(
+        actual.contains("↗ |"),
+        "first linked option should lower with a rise before the coordinator boundary: {actual}"
+    );
+    assert!(
+        actual.contains("↘ ?"),
+        "final option should lower with a falling question contour: {actual}"
+    );
+    assert!(
+        !actual.contains("↗ ?"),
+        "alternative question should not lower as a simple yes/no final rise: {actual}"
     );
 }
 

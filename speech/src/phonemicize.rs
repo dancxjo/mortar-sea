@@ -140,7 +140,7 @@ pub trait PronunciationPipeline {
         let variety = self.variety(&canonical_variety)?;
         let normalized_text = self.text_normalizer(&input.text);
         let words = self.orthographic_tokenizer(&normalized_text);
-        let boundaries = self.boundary_extractor(&normalized_text, &words);
+        let mut boundaries = self.boundary_extractor(&normalized_text, &words);
         let syntax = HeuristicLinkGrammarParser.parse(
             &words
                 .iter()
@@ -148,6 +148,7 @@ pub trait PronunciationPipeline {
                 .collect::<Vec<_>>(),
             final_terminal(&boundaries),
         );
+        annotate_alternative_question_boundaries(&mut boundaries, &words, &syntax);
         let prosody = prosody_from_boundaries(&boundaries, &words);
         let mut graphemes = Vec::with_capacity(words.len());
         let mut phonemes = Vec::new();
@@ -724,9 +725,75 @@ fn prosodic_label_for_boundary(
         (Some(TerminalPunctuation::Period | TerminalPunctuation::Exclamation), _) => {
             Some(ProsodicLabelKind::FinalFall)
         }
+        (None, Some(PauseKind::AlternativeQuestionRise)) => {
+            Some(ProsodicLabelKind::AlternativeQuestionRise)
+        }
         (None, Some(PauseKind::Comma)) => Some(ProsodicLabelKind::ContinuationRise),
         _ => None,
     }
+}
+
+fn annotate_alternative_question_boundaries(
+    boundaries: &mut Vec<SpeechBoundaryToken>,
+    words: &[WordToken],
+    syntax: &SentenceSyntaxAnalysis,
+) {
+    if final_terminal(boundaries) != Some(TerminalPunctuation::Question) {
+        return;
+    }
+    if !words
+        .first()
+        .is_some_and(|word| is_yes_no_question_opener(&word.normalized))
+    {
+        return;
+    }
+    let normalized_words = words
+        .iter()
+        .map(|word| word.normalized.as_str())
+        .collect::<Vec<_>>();
+    let Some(first_option_index) =
+        alternative_question_first_option_index(&normalized_words, syntax)
+    else {
+        return;
+    };
+
+    if let Some(boundary) = boundaries
+        .iter_mut()
+        .find(|boundary| boundary.after_grapheme_index == first_option_index)
+    {
+        if boundary.terminal.is_none() {
+            boundary.kind = BoundaryKind::Phrase;
+            boundary.pause = Some(PauseKind::AlternativeQuestionRise);
+        }
+    } else {
+        boundaries.push(SpeechBoundaryToken {
+            kind: BoundaryKind::Phrase,
+            after_grapheme_index: first_option_index,
+            span: None,
+            terminal: None,
+            pause: Some(PauseKind::AlternativeQuestionRise),
+        });
+        boundaries.sort_by_key(|boundary| boundary.after_grapheme_index);
+    }
+}
+
+fn alternative_question_first_option_index(
+    words: &[&str],
+    syntax: &SentenceSyntaxAnalysis,
+) -> Option<usize> {
+    let parse = syntax.primary_parse()?;
+    words
+        .iter()
+        .enumerate()
+        .filter(|(index, word)| **word == "or" && *index > 0 && index + 1 < words.len())
+        .find_map(|(or_index, _)| {
+            let has_linked_options = parse.links.iter().any(|link| {
+                link.kind == crate::syntax::SyntacticLinkKind::Coordination
+                    && link.left + 2 == link.right
+                    && link.left + 1 == or_index
+            });
+            has_linked_options.then_some(or_index - 1)
+        })
 }
 
 fn words_in_sentence<'a>(
@@ -2086,6 +2153,45 @@ mod tests {
         assert!(output.boundaries.iter().any(|boundary| {
             boundary.kind == BoundaryKind::Phrase
                 && boundary.terminal == Some(TerminalPunctuation::Question)
+        }));
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::AlternativeQuestionFall && label.confidence > 0.0
+        }));
+        assert!(
+            !output
+                .prosody
+                .labels
+                .iter()
+                .any(|label| label.kind == ProsodicLabelKind::QuestionRise)
+        );
+    }
+
+    #[test]
+    fn would_you_rather_questions_rise_on_first_linked_option_and_fall_at_end() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request(
+                "Would you rather marry or fly an airplane?",
+                "en-US",
+            ))
+            .expect("alternative question should phonemicize");
+
+        assert!(
+            output
+                .syntax
+                .word_has_link(3, SyntacticLinkKind::Coordination)
+        );
+        assert!(
+            output
+                .syntax
+                .word_has_link(5, SyntacticLinkKind::Coordination)
+        );
+        assert!(output.boundaries.iter().any(|boundary| {
+            boundary.kind == BoundaryKind::Phrase
+                && boundary.after_grapheme_index == 3
+                && boundary.pause == Some(PauseKind::AlternativeQuestionRise)
+        }));
+        assert!(output.prosody.labels.iter().any(|label| {
+            label.kind == ProsodicLabelKind::AlternativeQuestionRise && label.confidence > 0.0
         }));
         assert!(output.prosody.labels.iter().any(|label| {
             label.kind == ProsodicLabelKind::AlternativeQuestionFall && label.confidence > 0.0

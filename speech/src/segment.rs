@@ -85,6 +85,7 @@ pub enum TerminalPunctuation {
 #[serde(rename_all = "snake_case")]
 pub enum PauseKind {
     Comma,
+    AlternativeQuestionRise,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

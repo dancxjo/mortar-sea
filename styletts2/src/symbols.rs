@@ -161,6 +161,7 @@ impl SymbolSet {
         };
 
         self.apply_prosody_markers(&mut sequence.tokens, &plan.target_prosody);
+        self.apply_prosody_terminal_hint(&mut sequence.tokens, &plan.target_prosody);
         Ok(sequence)
     }
 
@@ -451,10 +452,12 @@ impl SymbolSet {
 
         let mut marked = Vec::with_capacity(lowered.len() + markers.len());
         for token in lowered.drain(..) {
-            if token.source == StyleTts2SymbolSource::BoundaryPunctuation
-                && let Some(index) = markers
-                    .iter()
-                    .position(|marker| marker.compatible_with(&token.symbol))
+            if matches!(
+                token.source,
+                StyleTts2SymbolSource::Boundary | StyleTts2SymbolSource::BoundaryPunctuation
+            ) && let Some(index) = markers
+                .iter()
+                .position(|marker| marker.compatible_with(&token.symbol))
             {
                 let marker = markers.remove(index);
                 if self.symbols.contains(marker.symbol) {
@@ -467,6 +470,41 @@ impl SymbolSet {
             marked.push(token);
         }
         *lowered = marked;
+    }
+
+    fn apply_prosody_terminal_hint(
+        &self,
+        lowered: &mut Vec<StyleTts2SymbolToken>,
+        prosody: &ProsodyTrack,
+    ) {
+        let Some(marker) = strongest_question_marker(prosody) else {
+            return;
+        };
+        if lowered.iter().any(|token| {
+            token.source == StyleTts2SymbolSource::BoundaryPunctuation && token.symbol == "?"
+        }) {
+            return;
+        }
+        if !self.symbols.contains("?") {
+            return;
+        }
+
+        if lowered.last().is_some_and(|token| {
+            token.source == StyleTts2SymbolSource::BoundaryPunctuation
+                && is_terminal_punctuation(&token.symbol)
+        }) {
+            lowered.pop();
+        }
+        if self.symbols.contains(marker.symbol) {
+            lowered.push(StyleTts2SymbolToken {
+                symbol: marker.symbol.to_string(),
+                source: StyleTts2SymbolSource::Prosody,
+            });
+        }
+        lowered.push(StyleTts2SymbolToken {
+            symbol: "?".to_string(),
+            source: StyleTts2SymbolSource::BoundaryPunctuation,
+        });
     }
 
     fn push_boundary_symbol(
@@ -778,8 +816,11 @@ fn boundary_symbol(boundary: &SpeechBoundaryToken) -> Option<&'static str> {
             TerminalPunctuation::Exclamation => "!",
         });
     }
-    if matches!(boundary.pause, Some(PauseKind::Comma)) {
-        return Some(",");
+    if let Some(pause) = boundary.pause {
+        return Some(match pause {
+            PauseKind::Comma => ",",
+            PauseKind::AlternativeQuestionRise => "|",
+        });
     }
     if boundary.kind == BoundaryKind::Word {
         return Some("|");
@@ -871,6 +912,7 @@ impl IntonationMarker {
     fn compatible_with(&self, punctuation: &str) -> bool {
         match &self.contour {
             ProsodicLabelKind::QuestionRise => punctuation == "?",
+            ProsodicLabelKind::AlternativeQuestionRise => punctuation == "|",
             ProsodicLabelKind::AlternativeQuestionFall => punctuation == "?",
             ProsodicLabelKind::ContinuationRise => matches!(punctuation, "," | ";" | ":"),
             ProsodicLabelKind::FinalFall => matches!(punctuation, "." | "!" | "?"),
@@ -882,6 +924,7 @@ impl IntonationMarker {
 fn intonation_marker_for_label(kind: &ProsodicLabelKind) -> Option<IntonationMarker> {
     let symbol = match kind {
         ProsodicLabelKind::QuestionRise => "↗",
+        ProsodicLabelKind::AlternativeQuestionRise => "↗",
         ProsodicLabelKind::AlternativeQuestionFall => "↘",
         ProsodicLabelKind::ContinuationRise => "→",
         ProsodicLabelKind::FinalFall => "↘",
@@ -891,6 +934,22 @@ fn intonation_marker_for_label(kind: &ProsodicLabelKind) -> Option<IntonationMar
         symbol,
         contour: kind.clone(),
     })
+}
+
+fn strongest_question_marker(prosody: &ProsodyTrack) -> Option<IntonationMarker> {
+    prosody
+        .labels
+        .iter()
+        .filter(|label| {
+            matches!(
+                label.kind,
+                ProsodicLabelKind::QuestionRise | ProsodicLabelKind::AlternativeQuestionFall
+            )
+        })
+        .filter_map(|label| intonation_marker_for_label(&label.kind).map(|marker| (label, marker)))
+        .filter(|(_, marker)| marker.compatible_with("?"))
+        .max_by(|(left, _), (right, _)| left.confidence.total_cmp(&right.confidence))
+        .map(|(_, marker)| marker)
 }
 
 fn is_terminal_punctuation(symbol: &str) -> bool {
