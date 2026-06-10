@@ -297,7 +297,7 @@ fn lower_plan_tokens_aligns_punctuation_with_split_surface_words() {
 }
 
 #[test]
-fn lower_plan_tokens_does_not_invent_final_punctuation() {
+fn lower_plan_tokens_appends_final_punctuation_if_missing() {
     let symbol_set = SymbolSet::new(["alpha", "."]).with_alias("variety.phone.a", "alpha");
     let plan = plan(
         None,
@@ -317,7 +317,7 @@ fn lower_plan_tokens_does_not_invent_final_punctuation() {
         .map(|token| token.symbol.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(symbols, ["alpha"]);
+    assert_eq!(symbols, ["alpha", "."]);
 }
 
 #[test]

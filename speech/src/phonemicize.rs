@@ -663,7 +663,10 @@ fn boundary_tokens(text: &str, words: &[WordToken]) -> Vec<SpeechBoundaryToken> 
             .get(index + 1)
             .map(|next| next.span.start_char)
             .unwrap_or(text_len_chars);
-        if let Some(boundary) = punctuation_boundary_after_word(text, word, index, next_start) {
+        let next_word = words.get(index + 1);
+        if let Some(boundary) =
+            punctuation_boundary_after_word(text, word, index, next_start, next_word)
+        {
             boundaries.push(boundary);
         } else if index + 1 < words.len() {
             boundaries.push(SpeechBoundaryToken {
@@ -961,19 +964,142 @@ fn punctuation_boundary_after_word(
     word: &WordToken,
     word_index: usize,
     next_start_char: usize,
+    next_word: Option<&WordToken>,
 ) -> Option<SpeechBoundaryToken> {
+    let is_abbr = matches!(
+        word.normalized.as_str(),
+        "mr" | "mrs"
+            | "ms"
+            | "dr"
+            | "prof"
+            | "sen"
+            | "rep"
+            | "gen"
+            | "col"
+            | "capt"
+            | "sgt"
+            | "lieut"
+            | "corp"
+            | "rev"
+            | "fr"
+            | "br"
+            | "st"
+            | "ave"
+            | "rd"
+            | "blvd"
+            | "ln"
+            | "ct"
+            | "pl"
+            | "co"
+            | "inc"
+            | "ltd"
+            | "etc"
+            | "vs"
+            | "approx"
+            | "jan"
+            | "feb"
+            | "mar"
+            | "apr"
+            | "jun"
+            | "jul"
+            | "aug"
+            | "sep"
+            | "sept"
+            | "oct"
+            | "nov"
+            | "dec"
+            | "jr"
+            | "sr"
+    );
+
     let mut found = None;
     for (char_index, character) in text.chars().enumerate() {
         if char_index < word.span.end_char || char_index >= next_start_char {
             continue;
         }
 
-        let terminal = match character {
+        let mut terminal = match character {
             '.' | '…' => Some(TerminalPunctuation::Period),
             '?' => Some(TerminalPunctuation::Question),
             '!' => Some(TerminalPunctuation::Exclamation),
             _ => None,
         };
+
+        if terminal == Some(TerminalPunctuation::Period) && is_abbr {
+            let is_title_abbr = matches!(
+                word.normalized.as_str(),
+                "mr" | "mrs"
+                    | "ms"
+                    | "dr"
+                    | "prof"
+                    | "sen"
+                    | "rep"
+                    | "gen"
+                    | "col"
+                    | "capt"
+                    | "sgt"
+                    | "lieut"
+                    | "corp"
+                    | "rev"
+                    | "fr"
+                    | "br"
+            );
+
+            if is_title_abbr {
+                if next_word.is_some() {
+                    terminal = None;
+                }
+            } else {
+                if let Some(next) = next_word {
+                    let next_first_char = next.text.chars().next();
+                    let next_is_uppercase = next_first_char.map_or(false, |c| c.is_uppercase());
+                    if !next_is_uppercase {
+                        terminal = None;
+                    } else if word.normalized == "st" {
+                        let next_word_lower = next.normalized.as_str();
+                        let is_sentence_starter = matches!(
+                            next_word_lower,
+                            "the"
+                                | "he"
+                                | "she"
+                                | "it"
+                                | "they"
+                                | "we"
+                                | "i"
+                                | "you"
+                                | "this"
+                                | "that"
+                                | "these"
+                                | "those"
+                                | "there"
+                                | "here"
+                                | "but"
+                                | "and"
+                                | "then"
+                                | "so"
+                                | "if"
+                                | "when"
+                                | "as"
+                                | "what"
+                                | "who"
+                                | "how"
+                                | "why"
+                                | "my"
+                                | "your"
+                                | "our"
+                                | "their"
+                                | "his"
+                                | "her"
+                                | "its"
+                        );
+                        if !is_sentence_starter {
+                            terminal = None;
+                        }
+                    }
+                }
+            }
+        }
+
         let pause = match character {
             ',' | ';' | ':' => Some(PauseKind::Comma),
             _ => None,
@@ -1169,7 +1295,7 @@ fn pronunciation_for_word(
             status: PronunciationStatus::Guessed,
             provenance: EvidenceProvenance {
                 source: EvidenceSource::Rule,
-                method: "fallback".into(),
+                method: "unknown-word fallback".into(),
                 version: Some("0.1".into()),
             },
             warnings: vec![PronunciationWarning {
@@ -1858,7 +1984,7 @@ fn confidence_for_status(status: PronunciationStatus) -> f32 {
 }
 
 fn cmudict_pronunciation_provenance(
-    status: PronunciationStatus,
+    _status: PronunciationStatus,
     source: &'static str,
     part_of_speech: Option<PartOfSpeech>,
     applied_pos: bool,
@@ -1936,9 +2062,27 @@ pub fn phoneme_base_symbol(id: &PhonemeId) -> &str {
 }
 
 const PREFIX: &[&str] = &[
-    "", "m", "b", "tr", "quadr", "quint", "sext", "sept", "oct", "non",
-    "dec", "undec", "duodec", "tredec", "quattuordec", "quindec", "sexdec",
-    "septendec", "octodec", "novemdec", "vigint",
+    "",
+    "m",
+    "b",
+    "tr",
+    "quadr",
+    "quint",
+    "sext",
+    "sept",
+    "oct",
+    "non",
+    "dec",
+    "undec",
+    "duodec",
+    "tredec",
+    "quattuordec",
+    "quindec",
+    "sexdec",
+    "septendec",
+    "octodec",
+    "novemdec",
+    "vigint",
 ];
 
 fn power_name(p: usize) -> Result<String, &'static str> {
@@ -2016,14 +2160,14 @@ fn spell_out(i: u128) -> String {
                     let divisor = 10u128.pow(num_digits);
                     let head = i / divisor;
                     let tail = i % divisor;
-                    
+
                     let power_name_str = match power_name(p as usize) {
                         Ok(name) => name,
                         Err(_) => {
-                            return i.to_string(); 
+                            return i.to_string();
                         }
                     };
-                    
+
                     if tail > 0 {
                         format!("{} {} {}", spell_out(head), power_name_str, spell_out(tail))
                     } else {
@@ -2082,13 +2226,49 @@ fn is_known_unit(word: &str) -> bool {
 
 fn spell_unit(val: u128, unit: &str) -> &'static str {
     match unit {
-        "ft" | "feet" | "foot" => if val == 1 { "foot" } else { "feet" },
-        "in" | "inch" | "inches" => if val == 1 { "inch" } else { "inches" },
+        "ft" | "feet" | "foot" => {
+            if val == 1 {
+                "foot"
+            } else {
+                "feet"
+            }
+        }
+        "in" | "inch" | "inches" => {
+            if val == 1 {
+                "inch"
+            } else {
+                "inches"
+            }
+        }
         "mph" => "miles per hour",
-        "lb" | "lbs" | "pound" | "pounds" => if val == 1 { "pound" } else { "pounds" },
-        "kg" | "kilo" | "kilos" | "kilograms" => if val == 1 { "kilogram" } else { "kilograms" },
-        "cm" | "centimeter" | "centimeters" => if val == 1 { "centimeter" } else { "centimeters" },
-        "m" | "meter" | "meters" => if val == 1 { "meter" } else { "meters" },
+        "lb" | "lbs" | "pound" | "pounds" => {
+            if val == 1 {
+                "pound"
+            } else {
+                "pounds"
+            }
+        }
+        "kg" | "kilo" | "kilos" | "kilograms" => {
+            if val == 1 {
+                "kilogram"
+            } else {
+                "kilograms"
+            }
+        }
+        "cm" | "centimeter" | "centimeters" => {
+            if val == 1 {
+                "centimeter"
+            } else {
+                "centimeters"
+            }
+        }
+        "m" | "meter" | "meters" => {
+            if val == 1 {
+                "meter"
+            } else {
+                "meters"
+            }
+        }
         "%" | "percent" => "percent",
         _ => "",
     }
@@ -2098,27 +2278,33 @@ fn is_number_or_scale_word(word: &str) -> bool {
     if is_scale_word(word) {
         return true;
     }
-    word.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+    word.chars()
+        .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
 }
 
-fn is_linked_as_modifier(word_idx: usize, syntax: &crate::syntax::SentenceSyntaxAnalysis, words: &[WordToken]) -> bool {
+fn is_linked_as_modifier(
+    word_idx: usize,
+    syntax: &crate::syntax::SentenceSyntaxAnalysis,
+    words: &[WordToken],
+) -> bool {
     let parse = match syntax.primary_parse() {
         Some(p) => p,
         None => return false,
     };
-    
+
     let mut current_idx = word_idx;
     let mut visited = std::collections::HashSet::new();
     visited.insert(current_idx);
-    
+
     while let Some(link) = parse.links.iter().find(|l| {
-        l.left == current_idx 
-            && (l.kind == crate::syntax::SyntacticLinkKind::NounCompound || l.kind == crate::syntax::SyntacticLinkKind::Modifier)
+        l.left == current_idx
+            && (l.kind == crate::syntax::SyntacticLinkKind::NounCompound
+                || l.kind == crate::syntax::SyntacticLinkKind::Modifier)
             && !visited.contains(&l.right)
     }) {
         current_idx = link.right;
         visited.insert(current_idx);
-        
+
         if let Some(target_word) = words.get(current_idx) {
             let text_lower = target_word.normalized.to_lowercase();
             if !is_number_or_scale_word(&text_lower) {
@@ -2126,12 +2312,14 @@ fn is_linked_as_modifier(word_idx: usize, syntax: &crate::syntax::SentenceSyntax
             }
         }
     }
-    
+
     false
 }
 
 fn find_word_index_at(c_idx: usize, words: &[WordToken]) -> Option<usize> {
-    words.iter().position(|w| w.span.start_char <= c_idx && c_idx < w.span.end_char)
+    words
+        .iter()
+        .position(|w| w.span.start_char <= c_idx && c_idx < w.span.end_char)
 }
 
 pub fn english_normalize_numbers(text: &str) -> String {
@@ -2152,26 +2340,34 @@ pub fn english_normalize_numbers(text: &str) -> String {
         if char_vec[idx] == '$' {
             let mut int_part = String::new();
             let mut temp_idx = idx + 1;
-            while temp_idx < char_vec.len() && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',') {
+            while temp_idx < char_vec.len()
+                && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',')
+            {
                 int_part.push(char_vec[temp_idx]);
                 temp_idx += 1;
             }
-            
+
             let mut cents_part: Option<String> = None;
             let mut cents_temp = temp_idx;
             if cents_temp < char_vec.len() && char_vec[cents_temp] == '.' {
                 cents_temp += 1;
-                if cents_temp + 1 < char_vec.len() 
-                    && char_vec[cents_temp].is_ascii_digit() 
-                    && char_vec[cents_temp + 1].is_ascii_digit() 
+                if cents_temp + 1 < char_vec.len()
+                    && char_vec[cents_temp].is_ascii_digit()
+                    && char_vec[cents_temp + 1].is_ascii_digit()
                 {
-                    if cents_temp + 2 >= char_vec.len() || !char_vec[cents_temp + 2].is_ascii_digit() {
-                        cents_part = Some(format!("{}{}", char_vec[cents_temp], char_vec[cents_temp + 1]));
+                    if cents_temp + 2 >= char_vec.len()
+                        || !char_vec[cents_temp + 2].is_ascii_digit()
+                    {
+                        cents_part = Some(format!(
+                            "{}{}",
+                            char_vec[cents_temp],
+                            char_vec[cents_temp + 1]
+                        ));
                         temp_idx = cents_temp + 2;
                     }
                 }
             }
-            
+
             let mut scale_temp = temp_idx;
             while scale_temp < char_vec.len() && char_vec[scale_temp] == ' ' {
                 scale_temp += 1;
@@ -2181,27 +2377,31 @@ pub fn english_normalize_numbers(text: &str) -> String {
                 scale_word.push(char_vec[scale_temp]);
                 scale_temp += 1;
             }
-            
-            let scale_valid = !scale_word.is_empty() 
+
+            let scale_valid = !scale_word.is_empty()
                 && is_scale_word(&scale_word.to_lowercase())
                 && (scale_temp >= char_vec.len() || !char_vec[scale_temp].is_alphanumeric());
-            
+
             let actual_scale = if scale_valid {
                 temp_idx = scale_temp;
                 Some(scale_word.to_lowercase())
             } else {
                 None
             };
-            
+
             let clean_int: String = int_part.chars().filter(|&c| c != ',').collect();
             let commas_valid = if int_part.contains(',') {
                 let groups: Vec<&str> = int_part.split(',').collect();
-                groups.first().is_some_and(|g| !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit()))
-                    && groups.iter().skip(1).all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+                groups.first().is_some_and(|g| {
+                    !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit())
+                }) && groups
+                    .iter()
+                    .skip(1)
+                    .all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
             } else {
                 true
             };
-            
+
             if !clean_int.is_empty() && commas_valid {
                 if let Ok(dollars_val) = clean_int.parse::<u128>() {
                     let word_idx = find_word_index_at(idx + 1, &words).unwrap_or(0);
@@ -2210,9 +2410,9 @@ pub fn english_normalize_numbers(text: &str) -> String {
                     } else {
                         word_idx
                     };
-                    
+
                     let modifier = is_linked_as_modifier(query_idx, &syntax, &words);
-                    
+
                     let spelled = if modifier {
                         let dollars_spelled = spell_out(dollars_val);
                         let base = if let Some(ref scale) = actual_scale {
@@ -2223,7 +2423,11 @@ pub fn english_normalize_numbers(text: &str) -> String {
                         if let Some(ref cents_str) = cents_part {
                             if let Ok(cents_val) = cents_str.parse::<u128>() {
                                 let cents_spelled = spell_out(cents_val);
-                                format!("{}-dollar-and-{}-cent", base.replace(' ', "-"), cents_spelled.replace(' ', "-"))
+                                format!(
+                                    "{}-dollar-and-{}-cent",
+                                    base.replace(' ', "-"),
+                                    cents_spelled.replace(' ', "-")
+                                )
                             } else {
                                 format!("{}-dollar", base.replace(' ', "-"))
                             }
@@ -2237,12 +2441,19 @@ pub fn english_normalize_numbers(text: &str) -> String {
                         } else {
                             dollars_spelled
                         };
-                        let dollars_unit = if dollars_val == 1 && actual_scale.is_none() { "dollar" } else { "dollars" };
+                        let dollars_unit = if dollars_val == 1 && actual_scale.is_none() {
+                            "dollar"
+                        } else {
+                            "dollars"
+                        };
                         if let Some(ref cents_str) = cents_part {
                             if let Ok(cents_val) = cents_str.parse::<u128>() {
                                 let cents_spelled = spell_out(cents_val);
                                 let cents_unit = if cents_val == 1 { "cent" } else { "cents" };
-                                format!("{} {} and {} {}", base, dollars_unit, cents_spelled, cents_unit)
+                                format!(
+                                    "{} {} and {} {}",
+                                    base, dollars_unit, cents_spelled, cents_unit
+                                )
                             } else {
                                 format!("{} {}", base, dollars_unit)
                             }
@@ -2250,7 +2461,7 @@ pub fn english_normalize_numbers(text: &str) -> String {
                             format!("{} {}", base, dollars_unit)
                         }
                     };
-                    
+
                     result.push_str(&spelled);
                     idx = temp_idx;
                     continue;
@@ -2262,66 +2473,103 @@ pub fn english_normalize_numbers(text: &str) -> String {
         if char_vec[idx].is_ascii_digit() {
             let mut int_part = String::new();
             let mut temp_idx = idx;
-            while temp_idx < char_vec.len() && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',') {
+            while temp_idx < char_vec.len()
+                && (char_vec[temp_idx].is_ascii_digit() || char_vec[temp_idx] == ',')
+            {
                 int_part.push(char_vec[temp_idx]);
                 temp_idx += 1;
             }
-            
+
+            // Check if this digit sequence is part of a mixed alphanumeric word
+            let mut is_part_of_word = false;
+            if idx > 0 && char_vec[idx - 1].is_alphabetic() {
+                is_part_of_word = true;
+            }
+            if !is_part_of_word && temp_idx < char_vec.len() && char_vec[temp_idx].is_alphabetic() {
+                let mut suffix_temp = temp_idx;
+                let mut suffix_word = String::new();
+                while suffix_temp < char_vec.len() && char_vec[suffix_temp].is_alphabetic() {
+                    suffix_word.push(char_vec[suffix_temp]);
+                    suffix_temp += 1;
+                }
+                let suffix_valid = !suffix_word.is_empty()
+                    && is_known_unit(&suffix_word.to_lowercase())
+                    && (suffix_temp >= char_vec.len() || !char_vec[suffix_temp].is_alphanumeric());
+                if !suffix_valid {
+                    is_part_of_word = true;
+                }
+            }
+
+            if is_part_of_word {
+                result.push_str(&int_part);
+                idx = temp_idx;
+                continue;
+            }
+
             let clean_int: String = int_part.chars().filter(|&c| c != ',').collect();
             let commas_valid = if int_part.contains(',') {
                 let groups: Vec<&str> = int_part.split(',').collect();
-                groups.first().is_some_and(|g| !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit()))
-                    && groups.iter().skip(1).all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+                groups.first().is_some_and(|g| {
+                    !g.is_empty() && g.len() <= 3 && g.chars().all(|c| c.is_ascii_digit())
+                }) && groups
+                    .iter()
+                    .skip(1)
+                    .all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
             } else {
                 true
             };
-            
+
             if !clean_int.is_empty() && commas_valid {
                 if let Ok(val) = clean_int.parse::<u128>() {
                     let mut suffix_temp = temp_idx;
                     while suffix_temp < char_vec.len() && char_vec[suffix_temp] == ' ' {
                         suffix_temp += 1;
                     }
-                    
+
                     let mut suffix_word = String::new();
                     if suffix_temp < char_vec.len() && char_vec[suffix_temp] == '%' {
                         suffix_word.push('%');
                         suffix_temp += 1;
                     } else {
-                        while suffix_temp < char_vec.len() && char_vec[suffix_temp].is_alphabetic() {
+                        while suffix_temp < char_vec.len() && char_vec[suffix_temp].is_alphabetic()
+                        {
                             suffix_word.push(char_vec[suffix_temp]);
                             suffix_temp += 1;
                         }
                     }
-                    
+
                     let suffix_valid = !suffix_word.is_empty()
                         && is_known_unit(&suffix_word.to_lowercase())
-                        && (suffix_temp >= char_vec.len() || !char_vec[suffix_temp].is_alphanumeric());
-                    
+                        && (suffix_temp >= char_vec.len()
+                            || !char_vec[suffix_temp].is_alphanumeric());
+
                     if suffix_valid {
                         let unit_str = suffix_word.to_lowercase();
                         let mut height_inches_val: Option<u128> = None;
                         let mut height_temp = suffix_temp;
-                        
+
                         if matches!(unit_str.as_str(), "ft" | "feet" | "foot") {
                             while height_temp < char_vec.len() && char_vec[height_temp] == ' ' {
                                 height_temp += 1;
                             }
                             let mut inches_str = String::new();
-                            while height_temp < char_vec.len() && char_vec[height_temp].is_ascii_digit() {
+                            while height_temp < char_vec.len()
+                                && char_vec[height_temp].is_ascii_digit()
+                            {
                                 inches_str.push(char_vec[height_temp]);
                                 height_temp += 1;
                             }
                             let inches_valid = !inches_str.is_empty()
-                                && (height_temp >= char_vec.len() || !char_vec[height_temp].is_alphanumeric());
-                            
+                                && (height_temp >= char_vec.len()
+                                    || !char_vec[height_temp].is_alphanumeric());
+
                             if inches_valid {
                                 if let Ok(inches) = inches_str.parse::<u128>() {
                                     height_inches_val = Some(inches);
                                 }
                             }
                         }
-                        
+
                         let spelled = if let Some(inches) = height_inches_val {
                             temp_idx = height_temp;
                             format!("{} foot {}", spell_out(val), spell_out(inches))
@@ -2330,7 +2578,7 @@ pub fn english_normalize_numbers(text: &str) -> String {
                             let unit_spelled = spell_unit(val, &unit_str);
                             format!("{} {}", spell_out(val), unit_spelled)
                         };
-                        
+
                         result.push_str(&spelled);
                         idx = temp_idx;
                         continue;
@@ -2340,7 +2588,9 @@ pub fn english_normalize_numbers(text: &str) -> String {
                         if decimal_temp < char_vec.len() && char_vec[decimal_temp] == '.' {
                             decimal_temp += 1;
                             let mut dec_digits = String::new();
-                            while decimal_temp < char_vec.len() && char_vec[decimal_temp].is_ascii_digit() {
+                            while decimal_temp < char_vec.len()
+                                && char_vec[decimal_temp].is_ascii_digit()
+                            {
                                 dec_digits.push(char_vec[decimal_temp]);
                                 decimal_temp += 1;
                             }
@@ -2348,7 +2598,7 @@ pub fn english_normalize_numbers(text: &str) -> String {
                                 is_decimal = true;
                             }
                         }
-                        
+
                         if !is_decimal {
                             let spelled = spell_out(val);
                             result.push_str(&spelled);
@@ -2373,7 +2623,7 @@ mod tests {
     use crate::rules::RuleCondition;
     use crate::syntax::SyntacticLinkKind;
     use crate::variety::VarietyImplementationStatus;
- 
+
     #[test]
     fn test_number_normalization() {
         assert_eq!(
@@ -3012,6 +3262,69 @@ mod tests {
         assert!(output.prosody.labels.iter().any(|label| {
             label.kind == ProsodicLabelKind::QuestionRise && label.confidence > 0.0
         }));
+    }
+
+    #[test]
+    fn test_abbreviation_periods_are_not_terminal_boundaries() {
+        let output = EnglishPhonemicizer
+            .phonemicize(&request("About 17,000 cases will stay at 630 Sansome St. in San Francisco, another, smaller location with just two operating courtrooms.", "en-US"))
+            .expect("should phonemicize");
+
+        let st_boundary = output.boundaries.iter().find(|b| {
+            output
+                .graphemes
+                .get(b.after_grapheme_index)
+                .is_some_and(|g| g.text == "St")
+        });
+        assert!(
+            st_boundary.is_some_and(|b| b.terminal.is_none()),
+            "St. followed by lowercase should not be a sentence boundary"
+        );
+
+        let output2 = EnglishPhonemicizer
+            .phonemicize(&request(
+                "He lives on Sansome St. The house is blue.",
+                "en-US",
+            ))
+            .expect("should phonemicize");
+        let st_boundary2 = output2.boundaries.iter().find(|b| {
+            output2
+                .graphemes
+                .get(b.after_grapheme_index)
+                .is_some_and(|g| g.text == "St")
+        });
+        assert!(
+            st_boundary2.is_some_and(|b| b.terminal == Some(TerminalPunctuation::Period)),
+            "St. followed by sentence starter should be a sentence boundary"
+        );
+
+        let output3 = EnglishPhonemicizer
+            .phonemicize(&request("We visited St. Charles.", "en-US"))
+            .expect("should phonemicize");
+        let st_boundary3 = output3.boundaries.iter().find(|b| {
+            output3
+                .graphemes
+                .get(b.after_grapheme_index)
+                .is_some_and(|g| g.text == "St")
+        });
+        assert!(
+            st_boundary3.is_none() || st_boundary3.is_some_and(|b| b.terminal.is_none()),
+            "St. Charles should not have a terminal period after St."
+        );
+
+        let output4 = EnglishPhonemicizer
+            .phonemicize(&request("He lives on Sansome St.", "en-US"))
+            .expect("should phonemicize");
+        let st_boundary4 = output4.boundaries.iter().find(|b| {
+            output4
+                .graphemes
+                .get(b.after_grapheme_index)
+                .is_some_and(|g| g.text == "St")
+        });
+        assert!(
+            st_boundary4.is_some_and(|b| b.terminal == Some(TerminalPunctuation::Period)),
+            "St. at the end of the text should be a sentence boundary"
+        );
     }
 
     #[test]

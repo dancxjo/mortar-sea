@@ -98,9 +98,13 @@ impl MorphologicalTrigger {
             Self::RightStartsWith(prefix) => right.surface.starts_with(prefix),
             Self::LeftHasFeature { key, value } => {
                 let fid = FeatureId(key.clone());
-                if let Some(Spec::Known(FeatureValue::Category(val))) = left_meta.features.values.get(&fid) {
+                if let Some(Spec::Known(FeatureValue::Category(val))) =
+                    left_meta.features.values.get(&fid)
+                {
                     val == value
-                } else if let Some(Spec::Known(FeatureValue::Text(val))) = left_meta.features.values.get(&fid) {
+                } else if let Some(Spec::Known(FeatureValue::Text(val))) =
+                    left_meta.features.values.get(&fid)
+                {
                     val == value
                 } else {
                     false
@@ -108,9 +112,13 @@ impl MorphologicalTrigger {
             }
             Self::RightHasFeature { key, value } => {
                 let fid = FeatureId(key.clone());
-                if let Some(Spec::Known(FeatureValue::Category(val))) = right_meta.features.values.get(&fid) {
+                if let Some(Spec::Known(FeatureValue::Category(val))) =
+                    right_meta.features.values.get(&fid)
+                {
                     val == value
-                } else if let Some(Spec::Known(FeatureValue::Text(val))) = right_meta.features.values.get(&fid) {
+                } else if let Some(Spec::Known(FeatureValue::Text(val))) =
+                    right_meta.features.values.get(&fid)
+                {
                     val == value
                 } else {
                     false
@@ -210,7 +218,8 @@ fn set_primary_stress(pron: &mut [PhonemeToken], target_idx: usize) {
                 Spec::Known(FeatureValue::Category("primary".to_string())),
             );
         } else if is_vowel_token(p) {
-            if let Some(Spec::Known(FeatureValue::Category(s))) = p.features.values.get(&stress_id) {
+            if let Some(Spec::Known(FeatureValue::Category(s))) = p.features.values.get(&stress_id)
+            {
                 if s == "primary" {
                     p.features.values.insert(
                         stress_id.clone(),
@@ -248,11 +257,32 @@ pub fn compose_morpheme_tokens(
         let left = &mut left_slice[i];
         let right = &mut right_slice[0];
 
-        let Spec::Known(left_id) = &left.morpheme else { continue; };
-        let Spec::Known(right_id) = &right.morpheme else { continue; };
+        let Spec::Known(left_id) = &left.morpheme else {
+            continue;
+        };
+        let Spec::Known(right_id) = &right.morpheme else {
+            continue;
+        };
 
-        let Some(left_meta) = morpheme_db.get(left_id) else { continue; };
-        let Some(right_meta) = morpheme_db.get(right_id) else { continue; };
+        let dummy_left = Morpheme {
+            id: left_id.clone(),
+            form: left_id.0.clone(),
+            kind: MorphemeKind::Root,
+            gloss: None,
+            features: FeatureBundle::default(),
+            pronunciation: Vec::new(),
+        };
+        let left_meta = morpheme_db.get(left_id).unwrap_or(&dummy_left);
+
+        let dummy_right = Morpheme {
+            id: right_id.clone(),
+            form: right_id.0.clone(),
+            kind: MorphemeKind::Root,
+            gloss: None,
+            features: FeatureBundle::default(),
+            pronunciation: Vec::new(),
+        };
+        let right_meta = morpheme_db.get(right_id).unwrap_or(&dummy_right);
 
         for rule in rules {
             let mut matched = true;
@@ -285,7 +315,9 @@ pub fn finalize_word_pronunciation(pron: &mut [PhonemeToken]) {
     if let Some(primary_idx) = primary_idx {
         for (i, p) in pron.iter_mut().enumerate() {
             if i != primary_idx {
-                if let Some(Spec::Known(FeatureValue::Category(s))) = p.features.values.get(&stress_id) {
+                if let Some(Spec::Known(FeatureValue::Category(s))) =
+                    p.features.values.get(&stress_id)
+                {
                     if s == "primary" {
                         p.features.values.insert(
                             stress_id.clone(),

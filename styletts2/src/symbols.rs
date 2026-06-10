@@ -442,6 +442,12 @@ impl SymbolSet {
         {
             return;
         }
+        if self.symbols.contains(".") {
+            lowered.push(StyleTts2SymbolToken {
+                symbol: ".".to_string(),
+                source: StyleTts2SymbolSource::BoundaryPunctuation,
+            });
+        }
     }
 
     fn apply_prosody_markers(

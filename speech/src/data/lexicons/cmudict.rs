@@ -223,12 +223,10 @@ mmm M
             }
 
             let key = word.to_lowercase().into_boxed_str();
-            let entry = self.entries
-                .entry(key)
-                .or_insert_with(|| LexiconEntry {
-                    candidates: Vec::new(),
-                    source,
-                });
+            let entry = self.entries.entry(key).or_insert_with(|| LexiconEntry {
+                candidates: Vec::new(),
+                source,
+            });
             if !entry.candidates.contains(&phonemes) {
                 entry.candidates.push(phonemes);
             }

@@ -2,9 +2,8 @@ use crate::data::lexicons::cmudict::{CmuPhoneme, CmuStress, bundled};
 use crate::feature::FeatureBundle;
 use crate::ids::MorphemeId;
 use crate::morphology::{
-    Morpheme, MorphemeKind, MorphemeToken, Morphology, MorphologicalAction,
-    MorphologicalRule, MorphologicalTrigger, compose_morpheme_tokens,
-    finalize_word_pronunciation,
+    Morpheme, MorphemeKind, MorphemeToken, MorphologicalAction, MorphologicalRule,
+    MorphologicalTrigger, Morphology, compose_morpheme_tokens, finalize_word_pronunciation,
 };
 use crate::phonology::PhonemeToken;
 use crate::spec::Spec;
@@ -19,7 +18,10 @@ fn make_pronunciation(variety_id: &str, cmu_symbols: &[&str]) -> Vec<PhonemeToke
             let raw_symbol = cmu.raw_symbol();
             let features = crate::data::notation::arpabet::cmu_token_features(&cmu);
             PhonemeToken {
-                phoneme: Spec::Known(crate::data::notation::arpabet::phoneme_id(variety_id, &raw_symbol)),
+                phoneme: Spec::Known(crate::data::notation::arpabet::phoneme_id(
+                    variety_id,
+                    &raw_symbol,
+                )),
                 span: None,
                 features,
                 realized_as: Vec::new(),
@@ -53,6 +55,7 @@ pub fn english_morphology(variety_id: &str) -> Morphology {
         ("-graphy", vec!["G", "R", "AH0", "F", "IY0"]),
         ("-phobia", vec!["F", "OW1", "B", "IY0", "AH0"]),
         ("-rrhea", vec!["R", "IY1", "AH0"]),
+        ("-ing", vec!["IH0", "NG"]),
     ];
 
     for &(form, ref cmu_symbols) in suffixes {
@@ -133,28 +136,36 @@ pub fn english_morphology(variety_id: &str) -> Morphology {
         id: "stress_attraction_ity".to_string(),
         name: "Stress attraction for -ity".to_string(),
         triggers: vec![MorphologicalTrigger::RightMorphemeId("-ity".to_string())],
-        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(1)],
+        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(
+            1,
+        )],
     });
 
     rules.push(MorphologicalRule {
         id: "stress_attraction_ivity".to_string(),
         name: "Stress attraction for -ivity".to_string(),
         triggers: vec![MorphologicalTrigger::RightMorphemeId("-ivity".to_string())],
-        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(2)],
+        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(
+            2,
+        )],
     });
 
     rules.push(MorphologicalRule {
         id: "stress_attraction_ology".to_string(),
         name: "Stress attraction for -ology".to_string(),
         triggers: vec![MorphologicalTrigger::RightMorphemeId("-ology".to_string())],
-        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(3)],
+        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(
+            3,
+        )],
     });
 
     rules.push(MorphologicalRule {
         id: "stress_attraction_graphy".to_string(),
         name: "Stress attraction for -graphy".to_string(),
         triggers: vec![MorphologicalTrigger::RightMorphemeId("-graphy".to_string())],
-        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(3)],
+        actions: vec![MorphologicalAction::SetPrimaryStressOnLeftSyllableFromEnd(
+            3,
+        )],
     });
 
     Morphology { morphemes, rules }
@@ -164,23 +175,6 @@ pub fn english_morphology(variety_id: &str) -> Morphology {
 pub fn decompose_word(variety: &LinguisticVariety, word: &str) -> Option<Vec<MorphemeToken>> {
     let word_lower = word.to_lowercase();
     let morph_db = variety.morphology.as_ref()?;
-
-    // Check if the whole word is in the dictionary first.
-    let entry = bundled().lookup_entry(&word_lower);
-    if !entry.candidates.is_empty() {
-        let morpheme_id = MorphemeId(word_lower.clone());
-        let pr_symbols: Vec<String> = entry.candidates[0].iter().map(|p| p.raw_symbol()).collect();
-        let pr_strs: Vec<&str> = pr_symbols.iter().map(|s: &String| s.as_str()).collect();
-        let pronunciation = make_pronunciation(&variety.id.0, &pr_strs);
-        return Some(vec![MorphemeToken {
-            morpheme: Spec::Known(morpheme_id),
-            surface: word_lower,
-            span: None,
-            features: FeatureBundle::default(),
-            pronunciation,
-            confidence: 1.0,
-        }]);
-    }
 
     // 1. Try Suffixes
     for (morpheme_id, morpheme) in &morph_db.morphemes {
@@ -249,11 +243,31 @@ pub fn decompose_word(variety: &LinguisticVariety, word: &str) -> Option<Vec<Mor
         }
     }
 
+    // Check if the whole word is in the dictionary first (as a root/base morpheme).
+    let entry = bundled().lookup_entry(&word_lower);
+    if !entry.candidates.is_empty() {
+        let morpheme_id = MorphemeId(word_lower.clone());
+        let pr_symbols: Vec<String> = entry.candidates[0].iter().map(|p| p.raw_symbol()).collect();
+        let pr_strs: Vec<&str> = pr_symbols.iter().map(|s: &String| s.as_str()).collect();
+        let pronunciation = make_pronunciation(&variety.id.0, &pr_strs);
+        return Some(vec![MorphemeToken {
+            morpheme: Spec::Known(morpheme_id),
+            surface: word_lower,
+            span: None,
+            features: FeatureBundle::default(),
+            pronunciation,
+            confidence: 1.0,
+        }]);
+    }
+
     None
 }
 
 /// Combines decomposed MorphemeTokens into a single coherent pronunciation, applying morphotactic rules.
-pub fn compose_pronunciation(variety: &LinguisticVariety, parts: &[MorphemeToken]) -> Vec<CmuPhoneme> {
+pub fn compose_pronunciation(
+    variety: &LinguisticVariety,
+    parts: &[MorphemeToken],
+) -> Vec<CmuPhoneme> {
     if parts.is_empty() {
         return Vec::new();
     }
@@ -283,7 +297,9 @@ pub fn compose_pronunciation(variety: &LinguisticVariety, parts: &[MorphemeToken
     all_phonemes
         .into_iter()
         .map(|p| {
-            let base = if let Some(Spec::Known(crate::feature::FeatureValue::Category(b))) = p.features.values.get(&base_id) {
+            let base = if let Some(Spec::Known(crate::feature::FeatureValue::Category(b))) =
+                p.features.values.get(&base_id)
+            {
                 b.clone()
             } else {
                 let phoneme_str = match &p.phoneme {
@@ -294,7 +310,9 @@ pub fn compose_pronunciation(variety: &LinguisticVariety, parts: &[MorphemeToken
                 parts.last().cloned().unwrap_or("AH").to_string()
             };
 
-            let stress = if let Some(Spec::Known(crate::feature::FeatureValue::Category(s))) = p.features.values.get(&stress_id) {
+            let stress = if let Some(Spec::Known(crate::feature::FeatureValue::Category(s))) =
+                p.features.values.get(&stress_id)
+            {
                 match s.as_str() {
                     "primary" => Some(CmuStress::Primary),
                     "secondary" => Some(CmuStress::Secondary),
@@ -371,5 +389,47 @@ mod tests {
         let symbols: Vec<String> = pron.iter().map(|p| p.raw_symbol()).collect();
         assert_eq!(symbols[0], "W");
         assert!(symbols.contains(&"N".to_string()));
+    }
+
+    #[test]
+    fn test_decompose_unforgivingly() {
+        let variety = test_variety();
+        let parts = decompose_word(&variety, "unforgivingly");
+        assert!(parts.is_some(), "Should decompose unforgivingly");
+        let parts = parts.unwrap();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0].surface, "un");
+        assert_eq!(parts[1].surface, "forgive");
+        assert_eq!(parts[2].surface, "ing");
+        assert_eq!(parts[3].surface, "ly");
+
+        // Test spelling composition
+        let mut tokens_for_spelling = parts.clone();
+        let morph_db = variety.morphology.as_ref().unwrap();
+        compose_morpheme_tokens(
+            &mut tokens_for_spelling,
+            &morph_db.morphemes,
+            &morph_db.rules,
+        );
+        let spelling: String = tokens_for_spelling
+            .iter()
+            .map(|t| t.surface.as_str())
+            .collect();
+        assert_eq!(spelling, "unforgivingly");
+
+        // Test pronunciation composition
+        let pron = compose_pronunciation(&variety, &parts);
+        let symbols: Vec<String> = pron.iter().map(|p| p.raw_symbol()).collect();
+        assert_eq!(symbols[0], "AH2");
+        assert_eq!(symbols[1], "N");
+        assert_eq!(symbols[2], "F");
+        assert_eq!(symbols[3], "ER0");
+        assert_eq!(symbols[4], "G");
+        assert_eq!(symbols[5], "IH1");
+        assert_eq!(symbols[6], "V");
+        assert_eq!(symbols[7], "IH0");
+        assert_eq!(symbols[8], "NG");
+        assert_eq!(symbols[9], "L");
+        assert_eq!(symbols[10], "IY0");
     }
 }
