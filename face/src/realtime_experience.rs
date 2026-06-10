@@ -184,7 +184,14 @@ fn record_generated_experiences(
         .iter()
         .cloned()
         .collect::<Vec<_>>();
-    let records = parse_experience_records(generated, &impressions);
+    let sensations = state
+        .sensations
+        .read()
+        .expect("sensation log lock")
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let records = parse_experience_records(generated, &sensations, &impressions);
     if records.is_empty() {
         return;
     }
@@ -209,6 +216,7 @@ fn record_generated_experiences(
 
 fn parse_experience_records(
     generated: &str,
+    records: &[SensationRecord],
     impressions: &[VisionImpressionRecord],
 ) -> Vec<ExperienceRecord> {
     let Some(what) = generated_experience_text(generated) else {
@@ -219,12 +227,17 @@ fn parse_experience_records(
         .filter(|impression| is_experience_grounding_impression(impression))
         .cloned()
         .collect::<Vec<_>>();
-    if grounding_impressions.is_empty() {
+    let grounding_records = select_records_for_experience_prompt_with_diagnostics(
+        records,
+        impressions,
+        &mut RealtimeExperienceDiagnostics::default(),
+    );
+    if grounding_impressions.is_empty() && grounding_records.is_empty() {
         return Vec::new();
     }
     let observed_at = chrono::Utc::now();
     let impression_ids = recent_experience_impression_ids(&grounding_impressions);
-    let occurred_at = impression_ids
+    let latest_impression_occurred_at = impression_ids
         .iter()
         .filter_map(|id| {
             grounding_impressions
@@ -237,7 +250,15 @@ fn parse_experience_records(
             grounding_impressions
                 .last()
                 .map(|impression| impression.occurred_at)
-        })
+        });
+    let latest_record_occurred_at = grounding_records
+        .iter()
+        .map(|record| record.occurred_at)
+        .max();
+    let occurred_at = latest_impression_occurred_at
+        .into_iter()
+        .chain(latest_record_occurred_at)
+        .max()
         .unwrap_or(observed_at);
 
     vec![ExperienceRecord {
@@ -1672,6 +1693,35 @@ mod tests {
         }
     }
 
+    fn location_record(id: Uuid, occurred_at: chrono::DateTime<chrono::Utc>) -> SensationRecord {
+        SensationRecord {
+            id,
+            kind: "location.fix".to_string(),
+            occurred_at,
+            observed_at: occurred_at,
+            source: crate::messages::SensationSource {
+                client_id: "face-browser".to_string(),
+                sensor_id: "gps.default".to_string(),
+                faculty: "location".to_string(),
+            },
+            sequence: 3,
+            media: crate::messages::MediaRecord {
+                mime: "application/vnd.geo+json".to_string(),
+                width: 0,
+                height: 0,
+                encoding: "json".to_string(),
+            },
+            provenance: psyche::Provenance::direct().with_faculty("Location Faculty"),
+            data_sha256: "location-sha".to_string(),
+            data_bytes: 128,
+            detail: json!({
+                "lat": 37.77493,
+                "lon": -122.41942,
+                "accuracy_meters": 12.0,
+            }),
+        }
+    }
+
     #[test]
     fn prompt_includes_vision_impression_for_original_sensation_outside_recent_window() {
         let t0 = chrono::Utc::now();
@@ -2088,12 +2138,33 @@ mod tests {
 
         let records = parse_experience_records(
             "A man and dog seem to be present.",
+            &[],
             &[vision.clone(), self_generated.clone()],
         );
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].impression_ids, vec![vision.id]);
         assert!(!records[0].impression_ids.contains(&self_generated.id));
+    }
+
+    #[test]
+    fn generated_location_only_experience_does_not_require_impression() {
+        let t0 = chrono::Utc::now();
+        let location = location_record(Uuid::new_v4(), t0);
+
+        let records = parse_experience_records(
+            "I am approximately near San Francisco according to the location fix.",
+            &[location.clone()],
+            &[],
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].what,
+            "I am approximately near San Francisco according to the location fix."
+        );
+        assert!(records[0].impression_ids.is_empty());
+        assert_eq!(records[0].occurred_at, location.occurred_at);
     }
 
     #[test]
@@ -2138,7 +2209,8 @@ mod tests {
         );
         let generated = "\nA man appears to be present near the camera. The repeated views seem to be the same ongoing moment, not separate events.\n";
 
-        let records = parse_experience_records(generated, &[old, first.clone(), second.clone()]);
+        let records =
+            parse_experience_records(generated, &[], &[old, first.clone(), second.clone()]);
 
         assert_eq!(records.len(), 1);
         assert_eq!(

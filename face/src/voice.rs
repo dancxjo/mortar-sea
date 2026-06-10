@@ -1921,7 +1921,7 @@ fn build_voice_messages(
 
 fn build_dialogue_voice_messages(
     recent_experiences: &VecDeque<ExperienceRecord>,
-    _recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     conversation: &VecDeque<VoiceConversationTurn>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
@@ -1933,6 +1933,7 @@ fn build_dialogue_voice_messages(
     system.push_str("\n\n");
     system.push_str(&build_dialogue_voice_context_prompt(
         recent_experiences,
+        recent_finalized_asr,
         recent_thoughts,
         recent_speech_feedback,
     ));
@@ -1993,6 +1994,7 @@ fn dialogue_voice_system_prompt() -> &'static str {
 
 fn build_dialogue_voice_context_prompt(
     recent_experiences: &VecDeque<ExperienceRecord>,
+    recent_finalized_asr: &VecDeque<FinalizedAsrUpdate>,
     recent_thoughts: &VecDeque<VoiceObservation>,
     recent_speech_feedback: &VecDeque<VoiceSpeechFeedback>,
 ) -> String {
@@ -2017,6 +2019,15 @@ fn build_dialogue_voice_context_prompt(
                 experience.confidence,
                 prompt_json_string(&experience.what)
             ));
+        }
+    }
+    prompt.push('\n');
+    prompt.push_str("Recent finalized ASR transcripts heard directly:\n");
+    if recent_finalized_asr.is_empty() {
+        prompt.push_str("- None yet.\n");
+    } else {
+        for update in recent_finalized_asr {
+            prompt.push_str(&format_finalized_asr_update(update));
         }
     }
     prompt.push('\n');
@@ -2286,6 +2297,9 @@ fn trim_to_last_chars(text: &mut String, max_chars: usize) {
 fn voice_reply_from_generated(text: &str) -> Option<VoiceReply> {
     let cleaned = clean_generated_voice_text(text);
     if cleaned.is_empty() {
+        return None;
+    }
+    if normalized_signature(&cleaned).contains("i perceive you") {
         return None;
     }
 
@@ -3639,7 +3653,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogue_voice_messages_do_not_duplicate_asr_context() {
+    fn dialogue_voice_messages_include_recent_asr_context() {
         let observed_at = chrono::Utc::now();
         let mut asr = VecDeque::new();
         asr.push_back(FinalizedAsrUpdate {
@@ -3664,9 +3678,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        assert!(!prompt.contains("Recent finalized ASR transcripts heard directly:"));
-        assert!(!prompt.contains("My name is Travis."));
-        assert!(!prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
+        assert!(prompt.contains("Recent finalized ASR transcripts heard directly:"));
+        assert!(prompt.contains("My name is Travis."));
+        assert!(prompt.contains("sequence_start=10 sequence_end=12 sentence_index=0"));
     }
 
     #[test]
@@ -3816,6 +3830,18 @@ mod tests {
         );
         assert_eq!(
             voice_reply_from_generated("Reply only when the latest user turn needs an answer."),
+            None
+        );
+    }
+
+    #[test]
+    fn voice_reply_from_generated_filters_perceive_you_fallback() {
+        assert_eq!(
+            voice_reply_from_generated("I perceive you in the current moment."),
+            None
+        );
+        assert_eq!(
+            voice_reply_from_generated("<say>I perceive you.</say>"),
             None
         );
     }
