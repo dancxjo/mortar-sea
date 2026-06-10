@@ -77,6 +77,7 @@ pub struct CmudictLexicon {
 
 pub const GENERATED_OVERRIDES: &str = "\
 logorrhea L AO2 G ER0 IY1 AH0
+sansome S AE1 N S AH0 M
 talkativeness T AO1 K AH0 T IH0 V N AH0 S
 wordiness W ER1 D IY0 N AH0 S
 ";
@@ -279,6 +280,15 @@ mod tests {
         assert_eq!(
             bundled().lookup_entry("\"hello!\"").status,
             PronunciationStatus::Normalized
+        );
+        let sansome = bundled().lookup_entry("sansome");
+        assert_eq!(sansome.status, PronunciationStatus::Exact);
+        assert_eq!(
+            sansome.candidates[0]
+                .iter()
+                .map(CmuPhoneme::raw_symbol)
+                .collect::<Vec<_>>(),
+            ["S", "AE1", "N", "S", "AH0", "M"]
         );
         assert_eq!(
             bundled().lookup_entry("xyzzyqux").status,
